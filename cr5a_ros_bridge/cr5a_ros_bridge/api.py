@@ -33,8 +33,14 @@ class SafeJSONResponse(JSONResponse):
         return super().render(json_safe(content))
 
 
+class NonStandardJSONConstant(ValueError):
+    pass
+
+
 def _reject_json_constant(value):
-    raise ValueError(f"Non-standard JSON numeric constant is not allowed: {value}")
+    raise NonStandardJSONConstant(
+        f"Non-standard JSON numeric constant is not allowed: {value}"
+    )
 
 
 def _dict(message, invalid_paths=None):
@@ -157,6 +163,17 @@ def create_app(backend, config):
             supplied = request.headers.get("Authorization", "")
             if supplied != "Bearer " + token:
                 return JSONResponse(status_code=401, content={"detail": "Bearer token required"})
+
+        # Python's json parser otherwise accepts NaN and Infinity even though
+        # they are not valid JSON numbers. Reject them before route code sees
+        # the request body; request.body() is cached by Starlette middleware.
+        if "application/json" in request.headers.get("content-type", "").lower():
+            try:
+                body = await request.body()
+                if body:
+                    json.loads(body, parse_constant=_reject_json_constant)
+            except NonStandardJSONConstant as exc:
+                return JSONResponse(status_code=400, content={"detail": str(exc)})
         return await call_next(request)
 
     @app.get("/health")
@@ -441,6 +458,8 @@ def create_app(backend, config):
         frame = payload.get("frame_id", config.get("moveit", {}).get("base_frame", "dummy_link"))
         pose_values = finite_vector(payload.get("position_m", [0, 0, 0]), 3, "position_m")
         orientation = finite_vector(payload.get("orientation_xyzw", [0, 0, 0, 1]), 4, "orientation_xyzw")
+        if sum(component * component for component in orientation) <= 1e-12:
+            raise ValueError("orientation_xyzw must be a non-zero quaternion")
         obj = CollisionObject()
         obj.id = object_id or payload.get("id") or ("object_" + uuid.uuid4().hex[:10])
         obj.header.frame_id = frame
@@ -555,6 +574,8 @@ def create_app(backend, config):
             link_orientation = finite_vector(link_pose.get("orientation_xyzw"), 4, "link_frame_pose.orientation_xyzw")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if sum(component * component for component in link_orientation) <= 1e-12:
+            raise HTTPException(status_code=422, detail="link_frame_pose.orientation_xyzw must be a non-zero quaternion")
         if len(existing.primitives) != 1 or len(existing.primitive_poses) != 1 or existing.meshes:
             raise HTTPException(
                 status_code=422,
@@ -636,10 +657,48 @@ def create_app(backend, config):
 
         error_code = getattr(result.error_code, "val", None)
         succeeded = error_code == 1
+        invalid_trajectory_fields = []
+        trajectory_data = (
+            _dict(result.planned_trajectory, invalid_trajectory_fields)
+            if result.planned_trajectory is not None else None
+        )
+        trajectory_start_data = (
+            _dict(result.trajectory_start, invalid_trajectory_fields)
+            if result.trajectory_start is not None else None
+        )
+        planning_time = json_safe(getattr(result, "planning_time", None))
+
+        # A planner success is not sufficient if its trajectory contains NaN,
+        # Infinity, or is incomplete. Such a plan must never be executable.
+        if succeeded and (
+            result.planned_trajectory is None
+            or result.trajectory_start is None
+            or invalid_trajectory_fields
+        ):
+            reason = "MoveIt returned an incomplete or non-finite trajectory; the plan was rejected"
+            backend.plans[plan_id].update({
+                "status": "FAILED",
+                "error_code": error_code,
+                "planning_time": planning_time,
+                "failure_reason": reason,
+                "trajectory": None,
+                "trajectory_start": None,
+            })
+            data = {
+                "plan_id": plan_id,
+                "status": "FAILED",
+                "error_code": error_code,
+                "planning_time": planning_time,
+                "error": reason,
+                "invalid_fields": invalid_trajectory_fields,
+            }
+            backend.emit("motion.plan", data)
+            return data
+
         backend.plans[plan_id].update({
             "status": "SUCCEEDED" if succeeded else "FAILED",
             "error_code": error_code,
-            "planning_time": getattr(result, "planning_time", None),
+            "planning_time": planning_time,
             "trajectory": result.planned_trajectory,
             "trajectory_start": result.trajectory_start,
         })
@@ -651,8 +710,9 @@ def create_app(backend, config):
             "plan_id": plan_id,
             "status": backend.plans[plan_id]["status"],
             "error_code": error_code,
-            "planning_time": getattr(result, "planning_time", None),
-            "trajectory": _dict(result.planned_trajectory),
+            "planning_time": planning_time,
+            "trajectory": trajectory_data,
+            "trajectory_start": trajectory_start_data,
         }
         backend.emit("motion.plan", data)
         return data
@@ -717,15 +777,25 @@ def create_app(backend, config):
         if not planned_names or not current_snapshot:
             raise HTTPException(status_code=409, detail="Cannot verify the robot start state; wait for joint telemetry and plan again")
 
-        max_state_age = float(config.get("moveit", {}).get("max_joint_state_age_sec", 1.0))
-        snapshot_time = current_snapshot.get("timestamp")
         try:
+            max_state_age = finite_vector(
+                [config.get("moveit", {}).get("max_joint_state_age_sec", 1.0)],
+                1, "max_joint_state_age_sec",
+            )[0]
+            if max_state_age <= 0:
+                raise ValueError("max_joint_state_age_sec must be greater than zero")
+            snapshot_time = current_snapshot.get("timestamp")
             from datetime import datetime
-            observed_at = datetime.fromisoformat(str(snapshot_time).replace("Z", "+00:00")).timestamp()
-            if time.time() - observed_at > max_state_age:
+            observed_at = datetime.fromisoformat(
+                str(snapshot_time).replace("Z", "+00:00")
+            ).timestamp()
+            telemetry_age = time.time() - observed_at
+            if telemetry_age < -1.0:
+                raise HTTPException(status_code=409, detail="Joint telemetry timestamp is in the future; verify the ROS clock and plan again")
+            if telemetry_age > max_state_age:
                 raise HTTPException(status_code=409, detail="Joint telemetry is stale; wait for fresh joint states and plan again")
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail="Joint telemetry timestamp is invalid; plan again") from exc
+            raise HTTPException(status_code=409, detail="Joint telemetry timestamp or freshness configuration is invalid; plan again") from exc
 
         current_data = current_snapshot.get("data", {})
         current_names = list(current_data.get("name", []) or [])
@@ -754,6 +824,8 @@ def create_app(backend, config):
         if missing:
             raise HTTPException(status_code=409, detail="Cannot compare planned and current joints: " + ", ".join(missing))
         max_delta = max(abs(current_by_name[name] - planned_by_name[name]) for name in planned_names)
+        if not (max_delta >= 0 and max_delta < float("inf")):
+            raise HTTPException(status_code=409, detail="Joint-state comparison produced a non-finite result; refresh telemetry and plan again")
         if max_delta > tolerance:
             raise HTTPException(
                 status_code=409,
