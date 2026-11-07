@@ -6,7 +6,7 @@
 # physical Dobot driver or the hardware-specific CR5A bridge.
 
 session_name: cr5a-demo
-start_directory: .
+start_directory: ../
 windows:
   - window_name: demo
     layout: tiled
