@@ -12,7 +12,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.parameter import Parameter
 from rosidl_runtime_py.convert import message_to_ordereddict
 from rosidl_runtime_py.set_message import set_message_fields
-from .json_utils import finite_float, finite_vector, json_safe
+from .json_utils import finite_float, finite_quaternion, finite_vector, json_safe
 from rosidl_runtime_py.utilities import get_message, get_service
 
 from rcl_interfaces.srv import (
@@ -396,9 +396,7 @@ class BridgeNode(Node):
             frame = target.get("frame_id", moveit.get("base_frame", "dummy_link"))
             link = target.get("link_name", moveit.get("end_effector_link", "Link6"))
             position = finite_vector(target.get("position_m"), 3, "position_m")
-            orientation = finite_vector(target.get("orientation_xyzw"), 4, "orientation_xyzw")
-            if sum(component * component for component in orientation) <= 1e-12:
-                raise ValueError("orientation_xyzw must be a non-zero quaternion")
+            orientation = finite_quaternion(target.get("orientation_xyzw"), "orientation_xyzw")
             position_tolerance = finite_float(
                 target.get("position_tolerance_m", 0.001), "position_tolerance_m"
             )
