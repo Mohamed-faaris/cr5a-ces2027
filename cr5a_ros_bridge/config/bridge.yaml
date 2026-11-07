@@ -45,6 +45,8 @@ moveit:
   apply_planning_scene_service: /apply_planning_scene
   display_trajectory_topic: /display_planned_path
   allow_execution: false
+  start_state_tolerance_rad: 0.03
+  max_joint_state_age_sec: 1.0
 
 robot:
   service_prefix: /dobot_bringup_ros2/srv/

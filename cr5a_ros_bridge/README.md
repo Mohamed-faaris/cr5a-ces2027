@@ -246,3 +246,12 @@ The token must be injected through the environment or deployment secret manager;
 6. Request a plan with a conservative target and inspect the trajectory. Do not execute until the planning scene, start state, collision environment, controller and physical workspace have been verified.
 
 This package has not yet been colcon-built or tested against a live CR5A. Treat all motion endpoints as unvalidated until the first-run checklist and supervised hardware tests have passed.
+
+## Execute-time state validation
+
+Before allowing an execution request, the bridge compares the current `/joint_states`
+positions against the stored plan's start state for every planned joint. It rejects
+missing or stale telemetry and rejects plans whose largest joint delta exceeds
+`moveit.start_state_tolerance_rad` (default `0.03` rad). The telemetry age limit is
+`moveit.max_joint_state_age_sec` (default `1.0` second). These checks apply to both
+the REST compatibility route and the WebSocket request method.

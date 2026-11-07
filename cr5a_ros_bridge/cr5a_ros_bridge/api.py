@@ -688,6 +688,51 @@ def create_app(backend, config):
             raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
         if not status.get("data", {}).get("is_enable"):
             raise HTTPException(status_code=409, detail="Robot is not enabled")
+
+        # Never execute a plan against a different or stale robot start state.
+        trajectory = plan.get("trajectory")
+        trajectory_start = plan.get("trajectory_start")
+        joint_trajectory = getattr(trajectory, "joint_trajectory", None)
+        planned_joint_state = getattr(trajectory_start, "joint_state", None)
+        planned_names = list(getattr(joint_trajectory, "joint_names", []) or [])
+        planned_state_names = list(getattr(planned_joint_state, "name", []) or [])
+        planned_state_positions = list(getattr(planned_joint_state, "position", []) or [])
+        current_snapshot = backend.topic_snapshot("/joint_states")
+        if not planned_names or not current_snapshot:
+            raise HTTPException(status_code=409, detail="Cannot verify the robot start state; wait for joint telemetry and plan again")
+
+        max_state_age = float(config.get("moveit", {}).get("max_joint_state_age_sec", 1.0))
+        snapshot_time = current_snapshot.get("timestamp")
+        try:
+            from datetime import datetime
+            observed_at = datetime.fromisoformat(str(snapshot_time).replace("Z", "+00:00")).timestamp()
+            if time.time() - observed_at > max_state_age:
+                raise HTTPException(status_code=409, detail="Joint telemetry is stale; wait for fresh joint states and plan again")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Joint telemetry timestamp is invalid; plan again") from exc
+
+        current_data = current_snapshot.get("data", {})
+        current_names = list(current_data.get("name", []) or [])
+        current_positions = list(current_data.get("position", []) or [])
+        current_by_name = {
+            name: float(position)
+            for name, position in zip(current_names, current_positions)
+        }
+        planned_by_name = {
+            name: float(position)
+            for name, position in zip(planned_state_names, planned_state_positions)
+        }
+        tolerance = float(config.get("moveit", {}).get("start_state_tolerance_rad", 0.03))
+        missing = [name for name in planned_names if name not in current_by_name or name not in planned_by_name]
+        if missing:
+            raise HTTPException(status_code=409, detail="Cannot compare planned and current joints: " + ", ".join(missing))
+        max_delta = max(abs(current_by_name[name] - planned_by_name[name]) for name in planned_names)
+        if max_delta > tolerance:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Robot state changed after planning (max joint delta {max_delta:.4f} rad > {tolerance:.4f} rad); create a new plan",
+            )
+
         backend.emit("motion.execution", {"plan_id": plan_id, "status": "EXECUTING"})
         try:
             result = await _await_ros(
