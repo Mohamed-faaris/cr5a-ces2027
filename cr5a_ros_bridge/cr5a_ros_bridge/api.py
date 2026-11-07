@@ -164,16 +164,6 @@ def create_app(backend, config):
             if supplied != "Bearer " + token:
                 return JSONResponse(status_code=401, content={"detail": "Bearer token required"})
 
-        # Python's json parser otherwise accepts NaN and Infinity even though
-        # they are not valid JSON numbers. Reject them before route code sees
-        # the request body; request.body() is cached by Starlette middleware.
-        if "application/json" in request.headers.get("content-type", "").lower():
-            try:
-                body = await request.body()
-                if body:
-                    json.loads(body, parse_constant=_reject_json_constant)
-            except NonStandardJSONConstant as exc:
-                return JSONResponse(status_code=400, content={"detail": str(exc)})
         return await call_next(request)
 
     @app.get("/health")
