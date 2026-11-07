@@ -81,28 +81,46 @@ export function VisualizerPage(){
   const bounds=useMemo(()=>parseJointBounds(model?.urdf),[model?.urdf]);
   const jointNames=joints?.name??[];
   const actualJoints=joints?.position??[];
+  const actualJointsValid=jointNames.length>0&&jointNames.every((_,index)=>
+    typeof actualJoints[index]==="number"&&Number.isFinite(actualJoints[index])
+  );
   const worldObjects=scene?.world?.collision_objects??[];
   const attachedObjects=scene?.robot_state?.attached_collision_objects??[];
 
   useEffect(()=>{
-    if(!tcp||tcpDirty)return;
+    if(tcpDirty)return;
+    if(!tcp){
+      setTcpTarget(null);
+      return;
+    }
+    const values=[tcp.x,tcp.y,tcp.z,tcp.rx,tcp.ry,tcp.rz];
+    if(!values.every((value)=>typeof value==="number"&&Number.isFinite(value))){
+      setTcpTarget(null);
+      return;
+    }
     setTcpTarget({
-      x:tcp.x??0,y:tcp.y??0,z:tcp.z??0,
-      rx:tcp.rx??0,ry:tcp.ry??0,rz:tcp.rz??0
+      x:tcp.x as number,y:tcp.y as number,z:tcp.z as number,
+      rx:tcp.rx as number,ry:tcp.ry as number,rz:tcp.rz as number
     });
   },[tcp,tcpDirty]);
 
   useEffect(()=>{
     if(jointDirty)return;
     const next:Record<string,number>={};
-    jointNames.forEach((name,index)=>{next[name]=actualJoints[index]??0;});
+    jointNames.forEach((name,index)=>{
+      const value=actualJoints[index];
+      if(typeof value==="number"&&Number.isFinite(value))next[name]=value;
+    });
     setJointTargets(next);
   },[jointNames.join("|"),actualJoints.join("|"),jointDirty]);
 
   useEffect(()=>{
     if(plan?.status!=="SUCCEEDED"||!plannedJointSnapshot||executionStatus==="EXECUTING")return;
     const current:Record<string,number>={};
-    jointNames.forEach((name,index)=>{current[name]=actualJoints[index]??0;});
+    jointNames.forEach((name,index)=>{
+      const value=actualJoints[index];
+      if(typeof value==="number"&&Number.isFinite(value))current[name]=value;
+    });
     const names=Object.keys(plannedJointSnapshot);
     const changed=names.length===0||names.some((name)=>
       current[name]===undefined||Math.abs(current[name]-plannedJointSnapshot[name])>0.03
@@ -122,18 +140,28 @@ export function VisualizerPage(){
   const resetTargets=()=>{
     setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
     setTcpDirty(false);setJointDirty(false);
-    if(tcp)setTcpTarget({
-      x:tcp.x??0,y:tcp.y??0,z:tcp.z??0,rx:tcp.rx??0,ry:tcp.ry??0,rz:tcp.rz??0
-    });
+    if(tcp&&[tcp.x,tcp.y,tcp.z,tcp.rx,tcp.ry,tcp.rz].every((value)=>typeof value==="number"&&Number.isFinite(value))){
+      setTcpTarget({
+        x:tcp.x as number,y:tcp.y as number,z:tcp.z as number,
+        rx:tcp.rx as number,ry:tcp.ry as number,rz:tcp.rz as number
+      });
+    }else setTcpTarget(null);
     const next:Record<string,number>={};
-    jointNames.forEach((name,index)=>{next[name]=actualJoints[index]??0;});
+    jointNames.forEach((name,index)=>{
+      const value=actualJoints[index];
+      if(typeof value==="number"&&Number.isFinite(value))next[name]=value;
+    });
     setJointTargets(next);
   };
 
   const planTcp=async()=>{
     if(!tcpTarget||!model)return;
+    if(!actualJointsValid||![tcpTarget.x,tcpTarget.y,tcpTarget.z,tcpTarget.rx,tcpTarget.ry,tcpTarget.rz].every(Number.isFinite)){
+      setNotice({tone:"error",message:"Cannot plan without finite TCP target values and complete joint telemetry."});
+      return;
+    }
     const startJoints:Record<string,number>={};
-    jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index]??0;});
+    jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index] as number;});
     setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
     try{
       const quaternion=rpyDegreesToQuaternion(tcpTarget.rx,tcpTarget.ry,tcpTarget.rz);
@@ -160,8 +188,16 @@ export function VisualizerPage(){
 
   const planJoints=async()=>{
     if(!model||!jointNames.length)return;
+    if(!actualJointsValid){
+      setNotice({tone:"error",message:"Cannot plan joint targets without complete finite joint telemetry."});
+      return;
+    }
+    if(jointNames.some((name)=>typeof jointTargets[name]!=="number"||!Number.isFinite(jointTargets[name]))){
+      setNotice({tone:"error",message:"Every joint target must contain a finite value."});
+      return;
+    }
     const startJoints:Record<string,number>={};
-    jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index]??0;});
+    jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index] as number;});
     setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
     try{
       const result=await request("motion.plan",{
@@ -270,7 +306,7 @@ export function VisualizerPage(){
                   Controller ToolVectorActual values may use a different tool/user frame or TCP offset; copying them directly is not guaranteed to reproduce the same pose.
                   A failed plan can mean unreachable position/orientation, joint limits, collision, stale start state, or a missing transform. Check the MoveIt error code below.
                 </p>
-                <Button className="mt-4 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget||!actualJoints.length}>
+                <Button className="mt-4 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget||!actualJointsValid}>
                   {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan TCP target
                 </Button>
               </TabsContent>
@@ -278,15 +314,16 @@ export function VisualizerPage(){
                 <div className="space-y-4">
                   {jointNames.map((name,index)=>{
                     const bound=bounds[name];
-                    const actual=actualJoints[index]??0;
-                    const target=jointTargets[name]??actual;
+                    const rawActual=actualJoints[index];
+                    const actual=typeof rawActual==="number"&&Number.isFinite(rawActual)?rawActual:null;
+                    const target=jointTargets[name]??actual??0;
                     if(!bound)return <div key={name} className="text-xs text-zinc-500">{name}: position limits unavailable in URDF.</div>;
                     return <div key={name}>
                       <div className="mb-1.5 flex items-center justify-between">
                         <span className="text-xs font-medium text-zinc-700">{name}</span>
                         <span className="font-mono text-[11px] tabular-nums text-zinc-500">
                           {formatNumber(target*180/Math.PI,1)}°
-                          <span className="ml-2 text-zinc-300">actual {formatNumber(actual*180/Math.PI,1)}°</span>
+                          <span className="ml-2 text-zinc-300">actual {actual===null?"—":formatNumber(actual*180/Math.PI,1)+"°"}</span>
                         </span>
                       </div>
                       <input type="range" min={bound.lower*180/Math.PI} max={bound.upper*180/Math.PI}
@@ -305,7 +342,7 @@ export function VisualizerPage(){
                   {!jointNames.length&&<div className="text-xs text-zinc-400">Waiting for joint state messages.</div>}
                 </div>
                 <Button className="mt-4 w-full" onClick={planJoints}
-                  disabled={busy!==null||!model||!jointNames.length||jointNames.some((name)=>!bounds[name])}>
+                  disabled={busy!==null||!model||!actualJointsValid||jointNames.some((name)=>!bounds[name])}>
                   {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan joint target
                 </Button>
               </TabsContent>
