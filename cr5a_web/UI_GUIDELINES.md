@@ -8,6 +8,8 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Use `StatusBadge` from `src/components/status-badge.tsx`. The `status-*` color tokens live in `src/index.css`; when adding a status, update `RobotStatusKey`, `ROBOT_STATUS`, and the CSS mapping together.
 - Current colors: error = red; idle = green; paused = amber; moving = blue; planning = purple; connecting/initializing = cyan; disabled/disconnected/unknown = zinc.
 - Use `operationStatus()` for plan/execution outcomes. An operation result is not the robot's live status and must not overwrite it.
+- Drag mode is reported as RobotMode `6` (Backdrive); `start-drag`/`stop-drag` are commands, not confirmation. Wait for RobotMode telemetry before treating the toggle as changed.
+- `robot.get_errors` returns `GetErrorID`; `robot.get_error_details` calls `GetError` with a language argument. Keep error IDs and descriptions distinct.
 
 ## Socket and live state
 
@@ -24,6 +26,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 
 - Keep live joint/TCP telemetry distinct from editable target values. Editing a target is not a robot command.
 - Planning and execution are separate operations. Do not wire a Plan interaction to execution or present a successful plan as proof that motion occurred.
+- Manual TCP targets are MoveIt poses for `model.end_effector_link` in `model.base_frame`; controller `ToolVectorActual` may use a different tool/user frame or TCP offset. Preserve the UI warning and `planErrorDetail()` mapping for MoveIt error codes.
 - Joint-state positions are radians. Keep them in radians when passed to the URDF model; convert only at a display/input boundary.
 
 ## 3D viewer assumptions
