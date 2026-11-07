@@ -1,0 +1,67 @@
+# ROS 2 Humble CR5A bridge defaults.
+# The API and raw rosbridge are loopback-only. Put them behind an authenticated
+# TLS reverse proxy before exposing them to another machine.
+api:
+  host: 127.0.0.1
+  port: 8000
+  log_level: info
+
+ros:
+  node_name: cr5a_ros_bridge
+  service_timeout_sec: 3.0
+  action_timeout_sec: 45.0
+  generic_service_calls_enabled: false
+  topic_publish_enabled: false
+  auto_subscribe:
+    - topic: /joint_states
+      type: sensor_msgs/msg/JointState
+      qos: {reliability: reliable, durability: volatile, depth: 10}
+    - topic: /tf
+      type: tf2_msgs/msg/TFMessage
+      qos: {reliability: best_effort, durability: volatile, depth: 50}
+    - topic: /tf_static
+      type: tf2_msgs/msg/TFMessage
+      qos: {reliability: reliable, durability: transient_local, depth: 10}
+    - topic: /dobot_msgs_v4/msg/RobotStatus
+      type: dobot_msgs_v4/msg/RobotStatus
+      qos: {reliability: reliable, durability: volatile, depth: 10}
+    - topic: /dobot_msgs_v4/msg/ToolVectorActual
+      type: dobot_msgs_v4/msg/ToolVectorActual
+      qos: {reliability: reliable, durability: volatile, depth: 10}
+    - topic: /monitored_planning_scene
+      type: moveit_msgs/msg/PlanningScene
+      qos: {reliability: reliable, durability: volatile, depth: 10}
+    - topic: /display_planned_path
+      type: moveit_msgs/msg/DisplayTrajectory
+      qos: {reliability: reliable, durability: volatile, depth: 10}
+
+moveit:
+  group_name: cr5_group
+  base_frame: dummy_link
+  end_effector_link: Link6
+  move_group_action: /move_action
+  execute_trajectory_action: /execute_trajectory
+  get_planning_scene_service: /get_planning_scene
+  apply_planning_scene_service: /apply_planning_scene
+  display_trajectory_topic: /display_planned_path
+  allow_execution: true
+  start_state_tolerance_rad: 0.03
+  max_joint_state_age_sec: 1.0
+
+robot:
+  service_prefix: /dobot_bringup_ros2/srv/
+  simulation: true
+  status_topic: /dobot_msgs_v4/msg/RobotStatus
+  tcp_topic: /dobot_msgs_v4/msg/ToolVectorActual
+  allow_commands: true
+  allow_error_clear: true
+
+auth:
+  enabled: false
+  # Set CR5A_BRIDGE_TOKEN when enabling auth. Do not commit secrets here.
+  token_env: CR5A_BRIDGE_TOKEN
+
+rosbridge:
+  enabled: true
+  host: 127.0.0.1
+  port: 9090
