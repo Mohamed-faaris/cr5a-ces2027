@@ -7,7 +7,7 @@ from concurrent.futures import Future
 
 import pytest
 from fastapi.testclient import TestClient
-from rcl_interfaces.msg import ParameterValue
+from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters
 
 from cr5a_ros_bridge.api import create_app
@@ -49,7 +49,7 @@ class FakeBackend:
         if service_type is GetParameters:
             response = GetParameters.Response()
             value = ParameterValue()
-            value.type = ParameterValue.PARAMETER_STRING
+            value.type = ParameterType.PARAMETER_STRING
             value.string_value = "<robot name='cr5a'/>"
             response.values = [value for _ in request.names]
             future.set_result(response)
@@ -154,7 +154,7 @@ def test_topic_publish_is_disabled_by_default(client):
 def test_non_finite_json_request_is_rejected(client):
     response = client.post(
         "/api/v1/ros/topics/publish",
-        content=b'{"topic":"/x","type":"std_msgs/msg/String","message":{"value":NaN}}',
+        data=b'{"topic":"/x","type":"std_msgs/msg/String","message":{"value":NaN}}',
         headers={"Content-Type": "application/json"},
     )
 
