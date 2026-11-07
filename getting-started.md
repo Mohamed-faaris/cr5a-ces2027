@@ -316,20 +316,68 @@ source /root/cr5a_ws/install/setup.bash
 
 ### Automatically configure every new terminal
 
-The CR5A controller defaults in `dobot_bringup_v4/config/param.json` are IP `192.168.5.1` and robot type `cr5`. The launch files already fall back to those values, so exporting them is optional. To make the values explicit and automatically load ROS + the workspace in every new Bash terminal, add this block to the container user's `~/.bashrc`:
+Configure the container user's `/root/.bashrc` once. This gives every new interactive Bash terminal:
+
+- A readable colored root prompt: red username, magenta hostname, cyan working directory.
+- ROS 2 Humble and the workspace overlay automatically sourced.
+- CR5A controller defaults.
+- Useful navigation, listing, grep, ROS and colcon shortcuts.
+- A larger, cleaner command history.
+
+The controller defaults in `dobot_bringup_v4/config/param.json` are IP `192.168.5.1` and robot type `cr5`. These exports make the values explicit in every new shell.
+
+Run this once inside the container. The marker check prevents appending the block more than once:
 
 ~~~bash
-cat >> /root/.bashrc <<'EOF'
+if ! grep -q '# >>> CR5A shell configuration >>>' /root/.bashrc; then
+  cat >> /root/.bashrc <<'EOF'
 
-# CR5A ROS 2 Humble environment
+# >>> CR5A shell configuration >>>
+
+# CR5A controller defaults
 export IP_address="192.168.5.1"
 export DOBOT_TYPE="cr5"
 
+# ROS 2 Humble underlay and this workspace overlay
 source /opt/ros/humble/setup.bash
 if [ -f /root/cr5a_ws/install/setup.bash ]; then
   source /root/cr5a_ws/install/setup.bash
 fi
+
+# Colored prompt: red user, magenta host, cyan current directory
+PS1='\[\e[1;31m\]\u\[\e[0m\]@\[\e[1;35m\]\h\[\e[0m\]:\[\e[1;36m\]\w\[\e[0m\]\$ '
+
+# History
+HISTSIZE=10000
+HISTFILESIZE=20000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend checkwinsize
+PROMPT_COMMAND='history -a'
+
+# Basic shell conveniences
+alias ll='ls -alF --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+alias grep='grep --color=auto'
+alias cls='clear'
+
+# CR5A workspace navigation
+alias cws='cd /root/cr5a_ws'
+alias csrc='cd /root/cr5a_ws/src/cr5a-ces2027'
+
+# ROS 2 shortcuts
+alias rnodes='ros2 node list'
+alias rtopics='ros2 topic list'
+alias rservices='ros2 service list'
+alias ractions='ros2 action list'
+
+# Build shortcuts (run from /root/cr5a_ws)
+alias cb='colcon build --symlink-install'
+alias cbrel='colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'
+
+# <<< CR5A shell configuration <<<
 EOF
+fi
 ~~~
 
 Apply it to the current terminal immediately:
@@ -338,55 +386,62 @@ Apply it to the current terminal immediately:
 source /root/.bashrc
 ~~~
 
-After this, every new Bash terminal inside the container automatically gets the Humble environment, the workspace overlay (once it has been built), and the CR5A defaults. You no longer need to manually source those setup files in each terminal.
-
-If the controller IP or robot type ever changes, edit these two exports in `/root/.bashrc`. The values here match the repository's current default configuration.
-
-Check the environment:
+Check the result:
 
 ~~~bash
 echo "$ROS_DISTRO"
 echo "$IP_address"
 echo "$DOBOT_TYPE"
-ros2 pkg prefix cr5_moveit
+printf '%s\\n' "$PS1"
 ~~~
 
-Check that the main packages are discoverable:
+Your prompt should look similar to:
 
-~~~bash
-ros2 pkg prefix cr5_moveit
-ros2 pkg prefix dobot_bringup_v4
-ros2 pkg prefix cr5a_ros_bridge
+~~~text
+root@ECON003855L:~/cr5a_ws#
 ~~~
 
-### Building a package after making changes
+The username is red, hostname magenta, and working directory cyan. The prompt colors are only visual; they do not change permissions or robot state.
 
-After editing a package or adding a new package under `src/`, build it from the workspace root. For an existing package:
+### New-terminal and build workflow
+
+After the initial configuration, open a new terminal inside the container. ROS 2 Humble, the workspace overlay (if it has been built), and CR5A defaults load automatically.
+
+For an existing package, build from the workspace root:
 
 ~~~bash
-cd /root/cr5a_ws
-colcon build --symlink-install --packages-up-to <package_name> --cmake-args -DCMAKE_BUILD_TYPE=Release
+cws
+cb --packages-up-to cr5a_ros_bridge
 ~~~
 
-Replace `<package_name>` with the ROS package name from its `package.xml`, not the folder name unless they match. For example:
+Or use the Release build shortcut:
 
 ~~~bash
-colcon build --symlink-install --packages-up-to cr5a_ros_bridge
+cbrel --packages-up-to cr5a_ros_bridge
 ~~~
 
-For a newly added package, first make sure its dependencies are installed:
+For a newly added package, install its dependencies first:
 
 ~~~bash
+cws
 rosdep install --from-paths src/<path-to-package> --ignore-src --rosdistro humble -r -y
 ~~~
 
 Then build it:
 
 ~~~bash
-colcon build --symlink-install --packages-up-to <package_name>
+cb --packages-up-to <package_name>
 ~~~
 
-Because the `.bashrc` block above sources `install/setup.bash` when it exists, open a new terminal after the build (or run `source install/setup.bash` in the current terminal) to load the newly built package. If you add a brand-new package, `colcon` will discover it automatically as long as it is under the workspace `src/` directory and contains a valid `package.xml`.
+Replace `<package_name>` with the ROS package name from its `package.xml`, not necessarily its folder name. New packages must be inside the workspace `src/` directory and contain a valid `package.xml`.
+
+After a successful build, the current shell does not automatically re-source the overlay. Run:
+
+~~~bash
+source /root/cr5a_ws/install/setup.bash
+~~~
+
+New terminals will load the updated overlay automatically.
 
 ## 8. Run the MoveIt fake-hardware demo
 
