@@ -16,10 +16,10 @@ windows:
     focus: true
     panes:
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh hardware-driver bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py"'
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit dobot_moveit.launch.py'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh moveit bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit dobot_moveit.launch.py"'
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py start_rosbridge:=false'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh bridge bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py start_rosbridge:=false"'
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 "ros2 node list 2>/dev/null"'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh monitor-nodes bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 ros2 node list"'
