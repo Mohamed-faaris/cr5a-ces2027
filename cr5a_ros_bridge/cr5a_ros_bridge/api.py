@@ -737,7 +737,6 @@ def create_app(backend, config):
             "error_code": error_code,
             "planning_time": planning_time,
             "trajectory": trajectory_data,
-            "trajectory_start": trajectory_start_data,
         }
         backend.emit("motion.plan", data)
         return data
@@ -819,7 +818,7 @@ def create_app(backend, config):
                 raise HTTPException(status_code=409, detail="Joint telemetry timestamp is in the future; verify the ROS clock and plan again")
             if telemetry_age > max_state_age:
                 raise HTTPException(status_code=409, detail="Joint telemetry is stale; wait for fresh joint states and plan again")
-        except ValueError as exc:
+        except (ValueError, OverflowError, OSError) as exc:
             raise HTTPException(status_code=409, detail="Joint telemetry timestamp or freshness configuration is invalid; plan again") from exc
 
         current_data = current_snapshot.get("data", {})
