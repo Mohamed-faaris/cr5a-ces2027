@@ -29,7 +29,7 @@ function errorPresent(value: unknown): boolean {
     return numbers ? numbers.some((item) => Number(item) !== 0) : false;
   }
 }
-function extractRobotModeCode(value?: string): number | null {
+export function extractRobotModeCode(value?: string): number | null {
   if (!value) return null;
   const text = String(value).trim();
   const braced = text.match(/\{([^}]+)\}/);
