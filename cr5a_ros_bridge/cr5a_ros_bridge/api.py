@@ -28,20 +28,20 @@ from rosidl_runtime_py.convert import message_to_ordereddict
 
 
 _json_logger = logging.getLogger("cr5a_ros_bridge.api")
-_json_non_finite_warnings = set()
+_json_non_finite_warning_emitted = False
 
 
 class SafeJSONResponse(JSONResponse):
     """JSON response that never emits non-standard NaN/Infinity tokens."""
 
     def render(self, content):
+        global _json_non_finite_warning_emitted
         invalid_paths = []
         safe_content = json_safe(content, invalid_paths)
-        new_paths = [path for path in invalid_paths if path not in _json_non_finite_warnings]
-        if new_paths:
-            _json_non_finite_warnings.update(new_paths)
-            examples = ", ".join(new_paths[:5])
-            suffix = " ..." if len(new_paths) > 5 else ""
+        if invalid_paths and not _json_non_finite_warning_emitted:
+            _json_non_finite_warning_emitted = True
+            examples = ", ".join(invalid_paths[:5])
+            suffix = " ..." if len(invalid_paths) > 5 else ""
             _json_logger.warning(
                 "Non-finite values in an API response were replaced with null: %s%s",
                 examples, suffix,
