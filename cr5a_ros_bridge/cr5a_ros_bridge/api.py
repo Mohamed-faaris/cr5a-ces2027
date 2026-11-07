@@ -849,6 +849,13 @@ def create_app(backend, config):
             backend.emit("robot.errors", data)
             return data
 
+        if method == "robot.get_error_details":
+            language = str(params.get("language", "English"))
+            result = await _await_ros(
+                backend.robot_service("GetError", {"language": language}), 3.0
+            )
+            return _dict(result)
+
         if method == "robot.command":
             if not config.get("robot", {}).get("allow_commands", False):
                 raise HTTPException(status_code=403, detail="Robot commands are disabled by bridge safety configuration")
