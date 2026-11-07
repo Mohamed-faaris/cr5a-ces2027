@@ -370,8 +370,8 @@ def create_app(backend, config):
             if not values:
                 results[node_name] = {"successful": True, "reason": "No parameters to set"}
                 continue
-            client = _parameter_client(
-                backend, node_name, "set_parameters_atomically", SetParametersAtomically
+            service_name = _parameter_service_name(
+                backend, node_name, "set_parameters_atomically"
             )
             request = SetParametersAtomically.Request()
             try:
@@ -380,7 +380,7 @@ def create_app(backend, config):
                     for name, value in values.items()
                 ]
                 result = await _await_ros(
-                    backend.call_service(client.service_name, SetParametersAtomically, request)
+                    backend.call_service(service_name, SetParametersAtomically, request)
                 )
                 results[node_name] = {
                     "successful": result.result.successful,
