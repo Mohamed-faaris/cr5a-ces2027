@@ -129,13 +129,18 @@ def _parameter_value_to_python(value):
 
 
 async def _read_parameters(backend, node_name, names=None, describe=True):
-    list_client = _parameter_client(backend, node_name, "list_parameters", ListParameters)
-    list_request = ListParameters.Request()
-    list_request.depth = 0
-    listed = await _await_ros(
-        backend.call_service(list_client.service_name, ListParameters, list_request)
-    )
-    parameter_names = list(names) if names else list(listed.result.names)
+    # Avoid an unnecessary ListParameters round-trip when the caller already
+    # knows the exact parameters it needs (for example robot_description).
+    if names:
+        parameter_names = list(names)
+    else:
+        list_client = _parameter_client(backend, node_name, "list_parameters", ListParameters)
+        list_request = ListParameters.Request()
+        list_request.depth = 0
+        listed = await _await_ros(
+            backend.call_service(list_client.service_name, ListParameters, list_request)
+        )
+        parameter_names = list(listed.result.names)
     if not parameter_names:
         return {"parameters": {}, "descriptors": {}}
 
