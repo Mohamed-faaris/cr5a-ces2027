@@ -97,7 +97,7 @@ class DobotSimulation(Node):
         self.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
 
         self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         action_name = str(self.get_parameter("controller_action_name").value).rstrip("/")
         self._cancel_client = self.create_client(
@@ -203,6 +203,9 @@ class DobotSimulation(Node):
                 self._mode = 1  # Initializing / no fresh simulated joint state.
             return
 
+        if self._mode == 1:
+            self._mode = 5 if self._enabled else 4
+
         try:
             transform = self._tf_buffer.lookup_transform(
                 self._base_frame, self._tcp_link, Time()
@@ -227,9 +230,6 @@ class DobotSimulation(Node):
         tcp.x, tcp.y, tcp.z = (float(value) * 1000.0 for value in xyz)
         tcp.rx, tcp.ry, tcp.rz = rpy
         self._tcp_pub.publish(tcp)
-
-        if self._mode == 1:
-            self._mode = 5 if self._enabled else 4
 
     def _set_result(self, response, result=0):
         if hasattr(response, "res"):
