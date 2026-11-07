@@ -26,17 +26,45 @@ export function rpyDegreesToQuaternion(rollDeg: number, pitchDeg: number, yawDeg
     cr * cp * cy + sr * sp * sy
   ];
 }
-export function parseJointBounds(urdf?: string): Record<string,{lower:number;upper:number}> {
-  if (!urdf || typeof DOMParser === "undefined") return {};
-  const doc = new DOMParser().parseFromString(urdf, "application/xml");
+export interface JointPositionLimitConfig {
+  has_position_limits?: boolean;
+  min_position?: unknown;
+  max_position?: unknown;
+}
+
+export function parseJointBounds(
+  urdf?: string,
+  configured?: Record<string,JointPositionLimitConfig>
+): Record<string,{lower:number;upper:number}> {
   const result: Record<string,{lower:number;upper:number}> = {};
-  doc.querySelectorAll("joint").forEach((joint) => {
-    const name = joint.getAttribute("name");
-    const limit = joint.querySelector("limit");
-    const lower = Number(limit?.getAttribute("lower"));
-    const upper = Number(limit?.getAttribute("upper"));
-    if (name && Number.isFinite(lower) && Number.isFinite(upper) && lower < upper) result[name] = {lower,upper};
+  if (urdf && typeof DOMParser !== "undefined") {
+    const doc = new DOMParser().parseFromString(urdf, "application/xml");
+    if (doc.querySelector("parsererror") === null) {
+      doc.querySelectorAll("robot > joint").forEach((joint) => {
+        const name = joint.getAttribute("name");
+        const limit = joint.querySelector(":scope > limit");
+        const lower = finite(limit?.getAttribute("lower"));
+        const upper = finite(limit?.getAttribute("upper"));
+        if (name && lower !== null && upper !== null && lower < upper) {
+          result[name] = {lower,upper};
+        }
+      });
+    }
+  }
+
+  // MoveIt config explicitly overrides URDF values when position limits are enabled.
+  Object.entries(configured ?? {}).forEach(([name,limit]) => {
+    if (limit.has_position_limits === false) {
+      delete result[name];
+      return;
+    }
+    const lower = finite(limit.min_position);
+    const upper = finite(limit.max_position);
+    if (lower !== null && upper !== null && lower < upper) {
+      result[name] = {lower,upper};
+    }
   });
+
   return result;
 }
 export function safeDate(value?: string): string {
