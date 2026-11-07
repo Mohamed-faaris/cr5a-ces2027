@@ -184,6 +184,27 @@ pipx install tmuxp
 export PATH="$PATH:/root/.local/bin"
 ~~~
 
+### Install Node.js and pnpm (for the React web console)
+
+The MoveIt Docker image does not include Node.js or pnpm. Install Node.js 22 LTS and pnpm inside the container:
+
+~~~bash
+apt-get install -y ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+npm install --global pnpm
+~~~
+
+Verify the installations:
+
+~~~bash
+node --version
+npm --version
+pnpm --version
+~~~
+
+These tools are installed inside the persistent container, so they remain available in every new `docker exec` terminal. If you remove and recreate the container, repeat this installation section.
+
 The bridge also uses FastAPI, Uvicorn, WebSockets, YAML, rosapi, and rosbridge_server. Install its ROS and Python runtime packages:
 
 ~~~bash
@@ -598,7 +619,7 @@ Gazebo Classic reached end of life in January 2025. Keep this optional environme
 
 ## 12. Optional: run the React web console
 
-The web console is separate from the ROS build. It requires Node.js and pnpm.
+The web console is separate from the ROS build. Complete the Node.js and pnpm installation in section 3 before running it.
 
 ~~~bash
 cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
@@ -613,6 +634,7 @@ Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and 
 
 | Symptom | Check |
 |---|---|
+| `node`, `npm`, or `pnpm` command not found | Complete the Node.js and pnpm installation in section 3. |
 | ROS_DISTRO is empty or wrong | Run source /opt/ros/humble/setup.bash in that terminal. |
 | Package cr5_moveit not found | Source /root/cr5a_ws/install/setup.bash after a successful build. |
 | rosdep reports `message_generation`, `ament_python`, or `warehouse_ros_mongo` as unresolved | Pull the latest `main` branch in section 5, then rerun the dependency command. These obsolete/unneeded dependency declarations were removed from the manifests. |
