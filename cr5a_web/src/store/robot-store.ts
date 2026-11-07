@@ -5,7 +5,7 @@ import type {
 } from "@/lib/types";
 
 interface RobotStore {
-  bridgeState: BridgeState; connectionError: string | null;
+  bridgeState: BridgeState; connectionError: string | null; simulation: boolean;
   robotStatus: RobotStatusMessage | null; robotMode: RobotModeMessage | null;
   errors: Record<string,unknown> | null; joints: JointStateMessage | null; tcp: TcpMessage | null;
   timestamps: {status?:string;joints?:string;tcp?:string}; capabilities: RobotCapabilities;
@@ -27,7 +27,7 @@ interface RobotStore {
 }
 
 export const useRobotStore = create<RobotStore>((set)=>({
-  bridgeState:"connecting",connectionError:null,robotStatus:null,robotMode:null,errors:null,
+  bridgeState:"connecting",connectionError:null,simulation:false,robotStatus:null,robotMode:null,errors:null,
   joints:null,tcp:null,timestamps:{},capabilities:{},lastCommand:null,lastJointChangeAt:undefined,
   scene:null,sceneLoading:false,sceneError:null,model:null,modelLoading:false,modelError:null,
   jointLimits:null,plan:null,executionStatus:null,notice:null,
@@ -50,7 +50,8 @@ export const useRobotStore = create<RobotStore>((set)=>({
     robotStatus:{is_connected:value.connected,is_enable:value.enabled},
     robotMode:value.mode??state.robotMode,errors:value.errors??state.errors,
     joints:value.joints??state.joints,tcp:value.tcp??state.tcp,
-    timestamps:value.timestamps??state.timestamps,capabilities:value.capabilities??state.capabilities
+    timestamps:value.timestamps??state.timestamps,capabilities:value.capabilities??state.capabilities,
+    simulation:value.simulation===true
   })),
   setScene:(value)=>set({scene:value,sceneLoading:false,sceneError:null}),
   setSceneLoading:(value,error=null)=>set({sceneLoading:value,sceneError:error}),

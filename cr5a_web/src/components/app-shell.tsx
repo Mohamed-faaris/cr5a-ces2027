@@ -8,6 +8,7 @@ import {cn} from "@/lib/utils";
 
 export function AppShell({children}:{children:ReactNode}) {
   const bridgeState=useRobotStore((state)=>state.bridgeState);
+  const simulation=useRobotStore((state)=>state.simulation);
   const robotStatus=useRobotStore((state)=>state.robotStatus);
   const robotMode=useRobotStore((state)=>state.robotMode);
   const errors=useRobotStore((state)=>state.errors);
@@ -47,8 +48,11 @@ export function AppShell({children}:{children:ReactNode}) {
             })}
           </nav>
           <div className="flex items-center gap-3">
-            <span className="hidden text-[10px] font-medium tracking-[0.12em] text-zinc-400 md:inline">
-              {bridgeState==="connected"?"LIVE TELEMETRY":"BRIDGE"}
+            <span className={cn(
+              "hidden text-[10px] font-medium tracking-[0.12em] md:inline",
+              simulation?"text-amber-700":"text-zinc-400"
+            )}>
+              {simulation?"SIMULATION":bridgeState==="connected"?"LIVE TELEMETRY":"BRIDGE"}
             </span>
             <StatusBadge state={status.key}/>
           </div>

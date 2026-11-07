@@ -6,8 +6,9 @@
 # Every operational window has a separate logged, interactive Humble shell pane.
 # Window 5 is retained as a full-size workspace shell.
 #
-# NOTE: MoveIt's demo.launch.py uses fake hardware. It is started separately
-# from Gazebo; this profile does not connect MoveIt controllers to Gazebo.
+# MoveIt's demo launch uses fake ros2_control hardware and starts the Dobot
+# telemetry/service simulator. Do not start Gazebo in this ROS domain: its
+# separate robot_state_publisher creates a second, unlinked CR5A TF tree.
 
 session_name: cr5a-demo
 start_directory: ../../../
@@ -21,19 +22,11 @@ windows:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-moveit-demo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
-  - window_name: gazebo
-    layout: even-horizontal
-    panes:
-      - shell_command:
-          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh gazebo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_gazebo dobot_gazebo.launch.py"'
-      - shell_command:
-          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-gazebo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
-
   - window_name: bridge
     layout: even-horizontal
     panes:
       - shell_command:
-          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh bridge bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py"'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh bridge bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py simulation:=true"'
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-bridge bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 

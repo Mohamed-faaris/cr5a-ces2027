@@ -2,7 +2,7 @@ import {useEffect,useMemo,useState} from "react";
 import {Activity,AlertCircle,Check,Clipboard,Pause,Play,RefreshCw,Square} from "lucide-react";
 import {Button} from "@/components/ui/button";
 import {Metric} from "@/components/metric";
-import {deriveRobotStatus,formatRobotMode,hasActiveError} from "@/lib/status";
+import {deriveRobotStatus,extractRobotModeCode,formatRobotMode,hasActiveError} from "@/lib/status";
 import {formatNumber,safeDate} from "@/lib/utils";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
@@ -10,6 +10,7 @@ import {useRobotStore} from "@/store/robot-store";
 export function DiagnosticsPage(){
   const {request}=useRobotSocket();
   const bridgeState=useRobotStore((s)=>s.bridgeState);
+  const simulation=useRobotStore((s)=>s.simulation);
   const robotStatus=useRobotStore((s)=>s.robotStatus);
   const robotMode=useRobotStore((s)=>s.robotMode);
   const errors=useRobotStore((s)=>s.errors);
@@ -39,9 +40,14 @@ export function DiagnosticsPage(){
   const canCommand=bridgeState==="connected"&&robotStatus?.is_connected===true&&capabilities.robot_commands_enabled===true;
   const paused=status.key==="paused";
   const enabled=robotStatus?.is_enable;
-  const dragActive=/backdrive|\b6\b/i.test(robotMode?.value??"");
-  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&enableTransition===null&&dragTransition===null&&(enabled||!activeError);
-  const canToggleDrag=canCommand&&busy===null&&enableTransition===null&&(dragActive||(enabled===true&&!activeError));
+  const modeCode=extractRobotModeCode(robotMode?.value);
+  const dragActive=modeCode===6;
+  const enableModeAllowed=modeCode===3||modeCode===4;
+  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&enableTransition===null&&dragTransition===null&&
+    (enabled===true?modeCode===5:enableModeAllowed)&&
+    (enabled===true||!activeError);
+  const canToggleDrag=canCommand&&busy===null&&enableTransition===null&&
+    (dragActive||(modeCode===5&&enabled===true&&!activeError));
 
   useEffect(()=>{
     if(enableTransition===null)return;
@@ -70,12 +76,14 @@ export function DiagnosticsPage(){
     return {
       captured_at:new Date().toISOString(),
       robot:{
+        source:simulation?"simulation":"physical",
         connected:robotStatus?.is_connected??null,
         enabled:robotStatus?.is_enable??null,
         mode:robotMode?.value??null,
         status:status.label
       },
       tcp:tcp?{
+        source:simulation?"TF-derived simulated end-effector pose":"controller-reported TCP",
         source_topic:"/dobot_msgs_v4/msg/ToolVectorActual",
         position_mm:[tcp.x??null,tcp.y??null,tcp.z??null],
         rpy_degrees:[tcp.rx??null,tcp.ry??null,tcp.rz??null],
@@ -90,7 +98,7 @@ export function DiagnosticsPage(){
       }:null,
       errors
     };
-  },[joints,tcp,timestamps,robotStatus,robotMode,status.label,errors]);
+  },[joints,tcp,timestamps,robotStatus,robotMode,status.label,errors,simulation]);
 
   const runCommand=async(command:string,label:string)=>{
     setBusy(command);setNotice(null);
@@ -195,7 +203,7 @@ export function DiagnosticsPage(){
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-100 text-zinc-700"><Activity size={19}/></div>
           <div>
             <div className="text-sm font-semibold">Robot controller</div>
-            <div className="mt-0.5 text-xs text-zinc-500">Dobot CR5A · Driver status topic</div>
+            <div className="mt-0.5 text-xs text-zinc-500">{simulation?"MoveIt fake hardware · simulated Dobot driver interfaces":"Dobot CR5A · Driver status topic"}</div>
           </div>
         </div>
       </div>
@@ -208,10 +216,10 @@ export function DiagnosticsPage(){
         <Button variant="destructive" onClick={()=>runCommand("stop","Stop")} disabled={!canCommand||busy!==null}>
           <Square size={14} fill="currentColor"/> Stop
         </Button>
-        <Button variant="outline" onClick={()=>runCommand("pause","Pause")} disabled={!canCommand||busy!==null||paused}>
+        <Button variant="outline" onClick={()=>runCommand("pause","Pause")} disabled={!canCommand||busy!==null||paused||!(modeCode===5||modeCode===7)}>
           {busy==="pause"?<RefreshCw size={14} className="animate-spin"/>:<Pause size={14}/>} Pause
         </Button>
-        <Button variant="outline" onClick={()=>runCommand("resume","Resume")} disabled={!canCommand||busy!==null||!paused}>
+        <Button variant="outline" onClick={()=>runCommand("resume","Resume")} disabled={!canCommand||busy!==null||!paused||modeCode!==10}>
           {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Play
         </Button>
         <div className="flex-1"/>
@@ -223,7 +231,7 @@ export function DiagnosticsPage(){
           disabled={!canToggleDrag||dragTransition!==null}>
           {busy==="start-drag"||busy==="stop-drag"||dragTransition!==null?<RefreshCw size={14} className="animate-spin"/>:<Activity size={14}/>} {dragTransition==="starting"?"Starting drag…":dragTransition==="stopping"?"Stopping drag…":dragActive?"Disable drag mode":"Enable drag mode"}
         </Button>
-        <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||robotStatus?.is_connected!==true||capabilities.error_clear_enabled!==true||busy!==null}>
+        <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||robotStatus?.is_connected!==true||capabilities.error_clear_enabled!==true||busy!==null||!activeError}>
           <RefreshCw size={14}/> Clear errors
         </Button>
       </div>
@@ -248,7 +256,7 @@ export function DiagnosticsPage(){
         <div className="panel-header">
           <div>
             <div className="text-sm font-semibold">Live TCP coordinates</div>
-            <div className="mt-0.5 text-xs text-zinc-500">ToolVectorActual · controller-reported values</div>
+            <div className="mt-0.5 text-xs text-zinc-500">{simulation?"ToolVectorActual · derived from the simulated TF tree":"ToolVectorActual · controller-reported values"}</div>
           </div>
           <span className="text-[11px] text-zinc-400">{safeDate(timestamps.tcp)}</span>
         </div>
