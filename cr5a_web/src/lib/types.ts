@@ -34,5 +34,5 @@ export interface PlanningScene {
   robot_state?: { attached_collision_objects?: Array<{ link_name?: string; object?: CollisionObject }> };
 }
 export interface MotionPlan {
-  plan_id?: string; status?: string; error_code?: number; planning_time?: number; trajectory?: any;
+  plan_id?: string; status?: string; error_code?: number | null; planning_time?: number | null; trajectory?: any;
 }
