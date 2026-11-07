@@ -11,6 +11,31 @@ import {useRobotStore} from "@/store/robot-store";
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
 
+function planErrorDetail(code?:number):string|null{
+  if(code===undefined||code===null)return null;
+  const reasons:Record<number,string>={
+    [-1]:"Planning failed: no valid trajectory was found.",
+    [-2]:"Invalid motion plan returned by the planner.",
+    [-3]:"Plan invalidated by the current environment or robot state.",
+    [-10]:"Start state is invalid (check current joints/collisions).",
+    [-11]:"Start state is in collision.",
+    [-12]:"Start state violates path constraints.",
+    [-13]:"Goal state is invalid.",
+    [-14]:"Goal state is in collision.",
+    [-15]:"Goal violates path constraints.",
+    [-16]:"Goal constraints are invalid.",
+    [-17]:"Robot state is invalid.",
+    [-18]:"Planner configuration is invalid.",
+    [-21]:"Required transform is unavailable.",
+    [-22]:"A required transform lookup failed.",
+    [-23]:"A required transform is stale.",
+    [-24]:"A required transform extrapolation failed.",
+    [99999]:"MoveIt reported a generic failure."
+  };
+  return `MoveIt code ${code}: ${reasons[code]??"Unclassified planning result; inspect MoveIt logs."}`;
+}
+
+
 function NumericInput({label,value,suffix,onChange}:{label:string;value:number;suffix:string;onChange:(value:number)=>void}){
   return <label className="block">
     <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">{label}</span>
@@ -125,7 +150,7 @@ export function VisualizerPage(){
       setPlannedJointSnapshot(result.status==="SUCCEEDED"?startJoints:null);
       setNotice({
         tone:result.status==="SUCCEEDED"?"success":"error",
-        message:result.status==="SUCCEEDED"?"Plan generated. Inspect the path before execution.":"MoveIt could not find a valid plan."
+        message:result.status==="SUCCEEDED"?"Plan generated. Inspect the path before execution.":(planErrorDetail(result.error_code)??"MoveIt could not find a valid plan.")
       });
     }catch(error){
       setPlan({status:"FAILED"});
@@ -232,6 +257,7 @@ export function VisualizerPage(){
                   {(["rx","ry","rz"] as const).map((key)=><NumericInput key={key} label={key.toUpperCase()}
                     value={tcpTarget?.[key]??0} suffix="deg"
                     onChange={(value)=>{
+                      setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
                       setTcpDirty(true);
                       setTcpTarget((current)=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));
                     }}/>)}
@@ -239,6 +265,11 @@ export function VisualizerPage(){
                 <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-400">
                   <span>Position mm · RPY degrees</span><span>Frame: {model?.base_frame??"—"}</span>
                 </div>
+                <p className="mt-3 text-[11px] leading-4 text-zinc-500">
+                  Manual TCP targets use the MoveIt end-effector link ({model?.end_effector_link??"—"}) in {model?.base_frame??"the planning frame"}.
+                  Controller ToolVectorActual values may use a different tool/user frame or TCP offset; copying them directly is not guaranteed to reproduce the same pose.
+                  A failed plan can mean unreachable position/orientation, joint limits, collision, stale start state, or a missing transform. Check the MoveIt error code below.
+                </p>
                 <Button className="mt-4 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget||!actualJoints.length}>
                   {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan TCP target
                 </Button>
@@ -302,6 +333,9 @@ export function VisualizerPage(){
                 <div className="mt-1 font-mono text-sm">{plan?.trajectory?.joint_trajectory?.points?.length??0}</div>
               </div>
             </div>
+            {plan?.status==="FAILED"&&<div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+              {planErrorDetail(plan.error_code)??"Planning failed without a reported MoveIt error code. Check MoveIt logs and verify target frame, orientation, reachability, and collision state."}
+            </div>}
             <Button className="mt-3 w-full" variant="secondary" onClick={execute}
               disabled={!hasPlan||!canExecute||busy!==null}>
               {busy==="execute"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Execute trajectory
