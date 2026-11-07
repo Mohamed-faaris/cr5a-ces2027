@@ -40,10 +40,12 @@ For RViz GUI access, allow the local container root user to connect to the host 
 xhost +local:root
 ~~~
 
-Start the container from the repository root. The `$PWD` bind mount uses the current directory, so this works regardless of the host username or where the repository is cloned:
+Start the container from the repository root. The `$PWD` bind mount uses the current directory, so this works regardless of the host username or where the repository is cloned.
+
+This version runs the container in the background. That keeps it alive when you close a terminal and lets you open multiple independent shells with `docker exec`:
 
 ~~~bash
-docker run -it \
+docker run -d \
   --name cr5a-moveit \
   --network host \
   --ipc host \
@@ -53,16 +55,75 @@ docker run -it \
   -v "$PWD:/root/cr5a_ws/src/cr5a-ces2027" \
   -w /root/cr5a_ws \
   moveit/moveit2:humble-release \
-  bash
+  sleep infinity
 ~~~
+
+The `sleep infinity` process keeps the container running. It does not start ROS nodes by itself.
 
 Inside the container, the host repository is available at `/root/cr5a_ws/src/cr5a-ces2027`. Source files are edited on the host and immediately visible inside the container. Build output (`build/`, `install/`, and `log/`) is stored in the container workspace; it remains while this container exists, but is removed if you delete the container. The source checkout remains on the host.
 
-To reopen the same container later:
+### Container lifecycle and terminals
+
+**Open a terminal inside the running container**
+
+Run this from any new host terminal:
 
 ~~~bash
-docker start -ai cr5a-moveit
+docker exec -it cr5a-moveit bash
 ~~~
+
+Then source ROS 2 and your workspace in that shell:
+
+~~~bash
+source /opt/ros/humble/setup.bash
+source /root/cr5a_ws/install/setup.bash
+~~~
+
+You can repeat `docker exec -it cr5a-moveit bash` in multiple host terminals. Each command opens a separate shell inside the same container. ROS nodes started in one shell are visible to the other shells because they share the container's ROS environment and host network.
+
+For RViz GUI access, run `xhost +local:root` on the host before opening the container shell that will launch RViz. The container already has the host `DISPLAY` value and X11 socket mounted.
+
+**Start the existing stopped container**
+
+~~~bash
+docker start cr5a-moveit
+~~~
+
+Then open a shell with `docker exec` as shown above.
+
+**Check whether the container is running**
+
+~~~bash
+docker ps --filter name=cr5a-moveit
+~~~
+
+**Stop the container**
+
+First stop ROS launch processes cleanly with `Ctrl+C` in their terminals and make sure the robot is in a safe state. Then, from the host:
+
+~~~bash
+docker stop cr5a-moveit
+~~~
+
+This stops the container but keeps it and its build output. Start it again later with `docker start cr5a-moveit`.
+
+**Remove the container**
+
+~~~bash
+docker rm cr5a-moveit
+~~~
+
+Removing the container deletes files stored only in its writable layer, including this workspace's `build/`, `install/`, and `log/` directories. The repository source remains on the host because it is bind-mounted.
+
+**If you previously created the old interactive container**
+
+The earlier command used `-it ... bash`. To switch that existing container to this background workflow, recreate it once:
+
+~~~bash
+docker rm -f cr5a-moveit
+~~~
+
+Then run the new `docker run -d ... sleep infinity` command above. This removes the old container and its container-only build output, but not your host repository.
 
 When finished using the GUI, you can revoke the X server permission on the host:
 
