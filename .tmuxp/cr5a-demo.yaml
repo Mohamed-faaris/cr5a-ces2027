@@ -1,0 +1,22 @@
+# Run from the CR5A ROS 2 workspace root, inside the moveit-dev
+# Distrobox (Ubuntu 22.04 / ROS 2 Humble):
+#   tmuxp load .tmuxp/cr5a-demo.yaml
+#
+# This profile starts MoveIt's fake-hardware demo. It does NOT start the
+# physical Dobot driver or the hardware-specific CR5A bridge.
+
+session_name: cr5a-demo
+start_directory: .
+windows:
+  - window_name: demo
+    layout: tiled
+    focus: true
+    panes:
+      - shell_command:
+          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && ros2 launch cr5_moveit demo.launch.py
+      - shell_command:
+          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && watch -n 5 'ros2 node list 2>/dev/null'
+      - shell_command:
+          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && watch -n 10 'ros2 topic list 2>/dev/null'
+      - shell_command:
+          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && echo 'Demo terminal ready. Run ROS 2 test commands here.' && exec zsh
