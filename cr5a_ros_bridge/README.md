@@ -221,7 +221,7 @@ The application WebSocket also supports request/response RPC. Each request has a
 {"op":"request","id":"req_001","method":"robot.get_snapshot","params":{}}
 ```
 
-Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel` and `motion.cancel_execution`.
+Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.get_error_details`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel` and `motion.cancel_execution`.
 
 Mutating requests use the same safety gates as their REST equivalents. CR5 mesh assets are served under `/assets/dobot_rviz/meshes/`; the URDF, scene, live state, planning and commands are requested through the application WebSocket.
 
