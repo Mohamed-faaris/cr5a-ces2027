@@ -9,17 +9,17 @@
 # with the demo profile.
 
 session_name: cr5a-hardware
-start_directory: ../
+start_directory: ../../../
 windows:
   - window_name: hardware
     layout: tiled
     focus: true
     panes:
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py'
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && ros2 launch cr5_moveit dobot_moveit.launch.py
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit dobot_moveit.launch.py'
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && ros2 launch cr5a_ros_bridge bridge.launch.py start_rosbridge:=false
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py start_rosbridge:=false'
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && watch -n 5 'ros2 node list 2>/dev/null'
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 "ros2 node list 2>/dev/null"'
