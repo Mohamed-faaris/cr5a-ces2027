@@ -10,7 +10,8 @@ ros:
   node_name: cr5a_ros_bridge
   service_timeout_sec: 3.0
   action_timeout_sec: 45.0
-  generic_service_calls_enabled: true
+  generic_service_calls_enabled: false
+  topic_publish_enabled: false
   auto_subscribe:
     - topic: /joint_states
       type: sensor_msgs/msg/JointState
@@ -43,11 +44,14 @@ moveit:
   get_planning_scene_service: /get_planning_scene
   apply_planning_scene_service: /apply_planning_scene
   display_trajectory_topic: /display_planned_path
+  allow_execution: false
 
 robot:
   service_prefix: /dobot_bringup_ros2/srv/
   status_topic: /dobot_msgs_v4/msg/RobotStatus
   tcp_topic: /dobot_msgs_v4/msg/ToolVectorActual
+  allow_commands: false
+  allow_error_clear: false
 
 auth:
   enabled: false

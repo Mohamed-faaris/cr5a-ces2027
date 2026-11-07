@@ -189,12 +189,27 @@ class BridgeNode(Node):
                     if namespace != "/" else "/" + name
                 ),
             })
-        actions = []
-        if hasattr(self, "get_action_names_and_types"):
-            actions = [
-                {"name": name, "types": types}
-                for name, types in self.get_action_names_and_types()
-            ]
+        services = self.get_service_names_and_types()
+        service_map = dict(services)
+        action_candidates = {}
+        for service_name, service_types in services:
+            for suffix, role in (
+                ("/_action/send_goal", "send_goal"),
+                ("/_action/get_result", "get_result"),
+                ("/_action/cancel_goal", "cancel_goal"),
+            ):
+                if service_name.endswith(suffix) and service_types:
+                    action_name = service_name[:-len(suffix)]
+                    type_name = service_types[0]
+                    if role == "send_goal" and type_name.endswith("_SendGoal"):
+                        action_type = type_name[:-len("_SendGoal")]
+                        action_candidates.setdefault(action_name, {})["type"] = action_type
+                    action_candidates.setdefault(action_name, {})[role] = service_name
+        actions = [
+            {"name": name, **details}
+            for name, details in sorted(action_candidates.items())
+            if "send_goal" in details and "get_result" in details
+        ]
         return {
             "nodes": nodes,
             "topics": [
@@ -203,7 +218,7 @@ class BridgeNode(Node):
             ],
             "services": [
                 {"name": name, "types": types}
-                for name, types in self.get_service_names_and_types()
+                for name, types in services
             ],
             "actions": actions,
         }

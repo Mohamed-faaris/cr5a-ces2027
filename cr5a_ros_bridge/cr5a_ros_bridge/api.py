@@ -425,10 +425,39 @@ def create_app(backend, config):
         if existing is None:
             raise HTTPException(status_code=404, detail="World collision object not found")
         link = payload.get("link_name", config.get("moveit", {}).get("end_effector_link", "Link6"))
+        link_pose = payload.get("link_frame_pose")
+        if not isinstance(link_pose, dict):
+            raise HTTPException(
+                status_code=422,
+                detail="link_frame_pose is required; provide the object's pose relative to the attachment link",
+            )
+        link_position = link_pose.get("position_m")
+        link_orientation = link_pose.get("orientation_xyzw")
+        if (
+            not isinstance(link_position, list) or len(link_position) != 3
+            or not isinstance(link_orientation, list) or len(link_orientation) != 4
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="link_frame_pose requires position_m[3] and orientation_xyzw[4]",
+            )
+        if len(existing.primitives) != 1 or len(existing.primitive_poses) != 1 or existing.meshes:
+            raise HTTPException(
+                status_code=422,
+                detail="Attach currently supports one bridge-created primitive object",
+            )
         attached = AttachedCollisionObject()
         attached.link_name = link
         attached.touch_links = payload.get("touch_links", [])
         attached.object = copy.deepcopy(existing)
+        attached.object.header.frame_id = link
+        relative_pose = Pose()
+        relative_pose.position.x, relative_pose.position.y, relative_pose.position.z = map(float, link_position)
+        (
+            relative_pose.orientation.x, relative_pose.orientation.y,
+            relative_pose.orientation.z, relative_pose.orientation.w,
+        ) = map(float, link_orientation)
+        attached.object.primitive_poses = [relative_pose]
         attached.object.operation = CollisionObject.ADD
         remove = CollisionObject()
         remove.id = object_id

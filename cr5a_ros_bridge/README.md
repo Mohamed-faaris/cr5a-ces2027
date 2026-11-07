@@ -137,7 +137,7 @@ Example box:
 }
 ```
 
-Detach requires a new world pose and shape description in the request body. The caller must provide a correct world-frame pose; the API does not guess the transform.
+Attach requires an explicit `link_frame_pose` containing the object's pose relative to the attachment link; the API does not guess this transform. The initial implementation supports one primitive per attached object. Detach requires a new world pose and shape description in the request body. The caller must provide a correct world-frame pose.
 
 ### Motion planning
 
