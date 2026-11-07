@@ -319,18 +319,19 @@ class BridgeNode(Node):
         publisher.publish(message)
         return {"published": True, "topic": topic, "type": type_name}
 
-    def parameter_client(self, node_name, service_suffix, service_type):
+    def parameter_service_name(self, node_name, service_suffix):
         normalized = node_name if node_name.startswith("/") else "/" + node_name
-        service_name = normalized.rstrip("/") + "/" + service_suffix
+        return normalized.rstrip("/") + "/" + service_suffix
+
+    def parameter_client(self, node_name, service_suffix, service_type):
+        service_name = self.parameter_service_name(node_name, service_suffix)
         return self._client(service_name, service_type)
 
     def list_parameter_names(self, node_name):
         request = ListParameters.Request()
         request.depth = 0
-        client = self.parameter_client(node_name, "list_parameters", ListParameters)
-        return self.call_service(
-            client.service_name, ListParameters, request
-        )
+        service_name = self.parameter_service_name(node_name, "list_parameters")
+        return self.call_service(service_name, ListParameters, request)
 
     def robot_service(self, name, payload=None):
         service_type = get_service("dobot_msgs_v4/srv/" + name)
