@@ -340,6 +340,7 @@ colcon build \
   --symlink-install \
   --packages-up-to \
     cr5_moveit \
+    dobot_simulation \
     dobot_bringup_v4 \
     cr5a_ros_bridge \
     dobot_demo \
