@@ -3,7 +3,9 @@ import math
 import unittest
 from decimal import Decimal
 
-from cr5a_ros_bridge.json_utils import finite_float, finite_vector, json_safe
+from cr5a_ros_bridge.json_utils import (
+    finite_float, finite_quaternion, finite_vector, json_safe,
+)
 
 
 class JSONSafeTests(unittest.TestCase):
@@ -67,6 +69,17 @@ class JSONSafeTests(unittest.TestCase):
             with self.subTest(values=values):
                 with self.assertRaises(ValueError):
                     finite_vector(values, 3, "vector")
+
+    def test_finite_quaternion_is_normalized_and_rejects_invalid_values(self):
+        self.assertEqual(finite_quaternion([0, 0, 0, 2], "quaternion"), [0.0, 0.0, 0.0, 1.0])
+        for values in (
+            [0, 0, 0, 0],
+            [0, 0, 0, float("inf")],
+            [1e308, 1e308, 1e308, 1e308],
+        ):
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    finite_quaternion(values, "quaternion")
 
 
 if __name__ == "__main__":
