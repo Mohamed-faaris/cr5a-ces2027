@@ -812,8 +812,19 @@ def create_app(backend, config):
         planned_names = list(getattr(joint_trajectory, "joint_names", []) or [])
         planned_state_names = list(getattr(planned_joint_state, "name", []) or [])
         planned_state_positions = list(getattr(planned_joint_state, "position", []) or [])
+        if (
+            not planned_names
+            or any(not isinstance(name, str) or not name for name in planned_names)
+            or len(set(planned_names)) != len(planned_names)
+            or len(planned_state_names) != len(planned_state_positions)
+            or len(set(planned_state_names)) != len(planned_state_names)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Stored plan has incomplete or duplicate joint-state data; create a new plan",
+            )
         current_snapshot = backend.topic_snapshot("/joint_states")
-        if not planned_names or not current_snapshot:
+        if not current_snapshot:
             raise HTTPException(status_code=409, detail="Cannot verify the robot start state; wait for joint telemetry and plan again")
 
         try:
@@ -839,6 +850,15 @@ def create_app(backend, config):
         current_data = current_snapshot.get("data", {})
         current_names = list(current_data.get("name", []) or [])
         current_positions = list(current_data.get("position", []) or [])
+        if (
+            len(current_names) != len(current_positions)
+            or any(not isinstance(name, str) or not name for name in current_names)
+            or len(set(current_names)) != len(current_names)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Current joint telemetry has missing or duplicate joint positions; wait for a valid joint state and plan again",
+            )
         try:
             current_by_name = {
                 name: finite_vector([position], 1, f"current joint {name}")[0]
