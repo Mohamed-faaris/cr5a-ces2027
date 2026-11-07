@@ -99,8 +99,8 @@ async def _await_ros(future, timeout=5.0):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-def _parameter_client(backend, node_name, suffix, service_type):
-    return backend.parameter_client(node_name, suffix, service_type)
+def _parameter_service_name(backend, node_name, suffix):
+    return backend.parameter_service_name(node_name, suffix)
 
 
 def _parameter_value_to_python(value):
@@ -134,21 +134,21 @@ async def _read_parameters(backend, node_name, names=None, describe=True):
     if names:
         parameter_names = list(names)
     else:
-        list_client = _parameter_client(backend, node_name, "list_parameters", ListParameters)
+        list_service = _parameter_service_name(backend, node_name, "list_parameters")
         list_request = ListParameters.Request()
         list_request.depth = 0
         listed = await _await_ros(
-            backend.call_service(list_client.service_name, ListParameters, list_request)
+            backend.call_service(list_service, ListParameters, list_request)
         )
         parameter_names = list(listed.result.names)
     if not parameter_names:
         return {"parameters": {}, "descriptors": {}}
 
-    get_client = _parameter_client(backend, node_name, "get_parameters", GetParameters)
+    get_service = _parameter_service_name(backend, node_name, "get_parameters")
     get_request = GetParameters.Request()
     get_request.names = parameter_names
     values = await _await_ros(
-        backend.call_service(get_client.service_name, GetParameters, get_request)
+        backend.call_service(get_service, GetParameters, get_request)
     )
     output = {}
     for name, value in zip(parameter_names, values.values):
@@ -156,14 +156,14 @@ async def _read_parameters(backend, node_name, names=None, describe=True):
 
     descriptors = {}
     if describe:
-        describe_client = _parameter_client(
-            backend, node_name, "describe_parameters", DescribeParameters
+        describe_service = _parameter_service_name(
+            backend, node_name, "describe_parameters"
         )
         describe_request = DescribeParameters.Request()
         describe_request.names = parameter_names
         described = await _await_ros(
             backend.call_service(
-                describe_client.service_name, DescribeParameters, describe_request
+                describe_service, DescribeParameters, describe_request
             )
         )
         descriptors = {
@@ -324,8 +324,8 @@ def create_app(backend, config):
         if not node_name or not isinstance(values, dict) or not values:
             raise HTTPException(status_code=422, detail="node and non-empty parameters object are required")
         _validate_finite_json(values, "parameters")
-        client = _parameter_client(
-            backend, node_name, "set_parameters_atomically", SetParametersAtomically
+        service_name = _parameter_service_name(
+            backend, node_name, "set_parameters_atomically"
         )
         request = SetParametersAtomically.Request()
         try:
@@ -336,7 +336,7 @@ def create_app(backend, config):
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Invalid parameter value: {exc}") from exc
         result = await _await_ros(
-            backend.call_service(client.service_name, SetParametersAtomically, request)
+            backend.call_service(service_name, SetParametersAtomically, request)
         )
         return {"successful": result.result.successful, "reason": result.result.reason}
 
