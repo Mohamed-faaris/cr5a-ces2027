@@ -314,11 +314,41 @@ Source the overlay after the build:
 source /root/cr5a_ws/install/setup.bash
 ~~~
 
-For every new terminal, source both layers in this order:
+### Automatically configure every new terminal
+
+The CR5A controller defaults in `dobot_bringup_v4/config/param.json` are IP `192.168.5.1` and robot type `cr5`. The launch files already fall back to those values, so exporting them is optional. To make the values explicit and automatically load ROS + the workspace in every new Bash terminal, add this block to the container user's `~/.bashrc`:
 
 ~~~bash
+cat >> /root/.bashrc <<'EOF'
+
+# CR5A ROS 2 Humble environment
+export IP_address="192.168.5.1"
+export DOBOT_TYPE="cr5"
+
 source /opt/ros/humble/setup.bash
-source /root/cr5a_ws/install/setup.bash
+if [ -f /root/cr5a_ws/install/setup.bash ]; then
+  source /root/cr5a_ws/install/setup.bash
+fi
+EOF
+~~~
+
+Apply it to the current terminal immediately:
+
+~~~bash
+source /root/.bashrc
+~~~
+
+After this, every new Bash terminal inside the container automatically gets the Humble environment, the workspace overlay (once it has been built), and the CR5A defaults. You no longer need to manually source those setup files in each terminal.
+
+If the controller IP or robot type ever changes, edit these two exports in `/root/.bashrc`. The values here match the repository's current default configuration.
+
+Check the environment:
+
+~~~bash
+echo "$ROS_DISTRO"
+echo "$IP_address"
+echo "$DOBOT_TYPE"
+ros2 pkg prefix cr5_moveit
 ~~~
 
 Check that the main packages are discoverable:
@@ -328,6 +358,35 @@ ros2 pkg prefix cr5_moveit
 ros2 pkg prefix dobot_bringup_v4
 ros2 pkg prefix cr5a_ros_bridge
 ~~~
+
+### Building a package after making changes
+
+After editing a package or adding a new package under `src/`, build it from the workspace root. For an existing package:
+
+~~~bash
+cd /root/cr5a_ws
+colcon build --symlink-install --packages-up-to <package_name> --cmake-args -DCMAKE_BUILD_TYPE=Release
+~~~
+
+Replace `<package_name>` with the ROS package name from its `package.xml`, not the folder name unless they match. For example:
+
+~~~bash
+colcon build --symlink-install --packages-up-to cr5a_ros_bridge
+~~~
+
+For a newly added package, first make sure its dependencies are installed:
+
+~~~bash
+rosdep install --from-paths src/<path-to-package> --ignore-src --rosdistro humble -r -y
+~~~
+
+Then build it:
+
+~~~bash
+colcon build --symlink-install --packages-up-to <package_name>
+~~~
+
+Because the `.bashrc` block above sources `install/setup.bash` when it exists, open a new terminal after the build (or run `source install/setup.bash` in the current terminal) to load the newly built package. If you add a brand-new package, `colcon` will discover it automatically as long as it is under the workspace `src/` directory and contains a valid `package.xml`.
 
 ## 8. Run the MoveIt fake-hardware demo
 
