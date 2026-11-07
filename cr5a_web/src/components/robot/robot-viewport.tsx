@@ -57,15 +57,23 @@ function RobotModelNode({
   return robot?<primitive object={robot}/>:null;
 }
 
+function isFiniteNumber(value:unknown):value is number{
+  return typeof value==="number"&&Number.isFinite(value);
+}
+
 function ScenePrimitive({object}:{object:CollisionObject}) {
   const primitive=object.primitives?.[0];
   const pose=object.primitive_poses?.[0];
   if(!primitive||!pose)return null;
-  const position:[number,number,number]=[pose.position.x,pose.position.y,pose.position.z];
-  const quaternion:[number,number,number,number]=[
+  const positionValues=[pose.position.x,pose.position.y,pose.position.z];
+  const quaternionValues=[
     pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w
   ];
   const dimensions=primitive.dimensions??[];
+  if(!positionValues.every(isFiniteNumber)||!quaternionValues.every(isFiniteNumber)||
+    !dimensions.every(isFiniteNumber)||dimensions.some((value)=>value<=0))return null;
+  const position=positionValues as [number,number,number];
+  const quaternion=quaternionValues as [number,number,number,number];
   return <mesh position={position} quaternion={quaternion}>
     {primitive.type===1&&dimensions.length>=3&&<boxGeometry args={[dimensions[0],dimensions[1],dimensions[2]]}/>}
     {primitive.type===2&&dimensions.length>=1&&<sphereGeometry args={[dimensions[0],24,16]}/>}
@@ -89,13 +97,22 @@ function TrajectoryPreview({
     const names:string[]=trajectory.joint_names??[];
     const points=trajectory.points??[];
     const actual:Record<string,number>={};
-    (jointState?.name??[]).forEach((name,index)=>{actual[name]=jointState?.position?.[index]??0;});
+    (jointState?.name??[]).forEach((name,index)=>{
+      const value=jointState?.position?.[index];
+      if(isFiniteNumber(value))actual[name]=value;
+    });
+    if(!names.length||names.some((name)=>!isFiniteNumber(actual[name]))||
+      !points.length||!points.every((point:any)=>Array.isArray(point.positions)&&
+        point.positions.length===names.length&&point.positions.every(isFiniteNumber))){
+      setLine(null);
+      return;
+    }
     const root=rootRef.current;
     const path:THREE.Vector3[]=[];
     try{
       points.forEach((point:any)=>{
         const values:Record<string,number>={};
-        names.forEach((name,index)=>{values[name]=point.positions?.[index]??0;});
+        names.forEach((name,index)=>{values[name]=point.positions[index];});
         robot.setJointValues(values);robot.updateMatrixWorld(true);
         const link=robot.links[model.end_effector_link];
         if(link){
