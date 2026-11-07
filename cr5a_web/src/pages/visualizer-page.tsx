@@ -2,9 +2,7 @@ import {useEffect,useMemo,useState} from "react";
 import {Box,CheckCircle2,CircleAlert,Crosshair,Gauge,Move3D,Play,RefreshCw,Route} from "lucide-react";
 import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
-import {StatusBadge} from "@/components/status-badge";
 import {RobotViewport} from "@/components/robot/robot-viewport";
-import {deriveRobotStatus} from "@/lib/status";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
@@ -29,8 +27,6 @@ export function VisualizerPage(){
   const robotStatus=useRobotStore((s)=>s.robotStatus);
   const robotMode=useRobotStore((s)=>s.robotMode);
   const errors=useRobotStore((s)=>s.errors);
-  const lastCommand=useRobotStore((s)=>s.lastCommand);
-  const lastJointChangeAt=useRobotStore((s)=>s.lastJointChangeAt);
   const joints=useRobotStore((s)=>s.joints);
   const tcp=useRobotStore((s)=>s.tcp);
   const model=useRobotStore((s)=>s.model);
@@ -54,11 +50,6 @@ export function VisualizerPage(){
   const [jointDirty,setJointDirty]=useState(false);
   const [busy,setBusy]=useState<string|null>(null);
 
-  const status=deriveRobotStatus({
-    bridgeState,connected:robotStatus?.is_connected,enabled:robotStatus?.is_enable,
-    mode:robotMode,errors,lastCommand,planningStatus:plan?.status,
-    executionStatus,lastJointChangeAt
-  });
   const bounds=useMemo(()=>parseJointBounds(model?.urdf),[model?.urdf]);
   const jointNames=joints?.name??[];
   const actualJoints=joints?.position??[];
@@ -165,10 +156,7 @@ export function VisualizerPage(){
         <h1 className="page-title">Scene visualizer</h1>
         <p className="mt-1 text-sm text-zinc-500">CR5 model, MoveIt collision scene and trajectory planning.</p>
       </div>
-      <div className="flex items-center gap-2">
-        <StatusBadge state={status.key}/>
-        <Button variant="outline" size="sm" onClick={resetTargets}><RefreshCw size={13}/> Use actual state</Button>
-      </div>
+      <Button variant="outline" size="sm" onClick={resetTargets}><RefreshCw size={13}/> Use actual state</Button>
     </div>
 
     {notice&&<div className={notice.tone==="error"?"notice notice-error":notice.tone==="success"?"notice notice-success":"notice"}>{notice.message}</div>}
