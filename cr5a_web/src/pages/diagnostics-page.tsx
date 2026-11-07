@@ -10,6 +10,7 @@ import {useRobotStore} from "@/store/robot-store";
 export function DiagnosticsPage(){
   const {request}=useRobotSocket();
   const bridgeState=useRobotStore((s)=>s.bridgeState);
+  const simulation=useRobotStore((s)=>s.simulation);
   const robotStatus=useRobotStore((s)=>s.robotStatus);
   const robotMode=useRobotStore((s)=>s.robotMode);
   const errors=useRobotStore((s)=>s.errors);
@@ -70,12 +71,14 @@ export function DiagnosticsPage(){
     return {
       captured_at:new Date().toISOString(),
       robot:{
+        source:simulation?"simulation":"physical",
         connected:robotStatus?.is_connected??null,
         enabled:robotStatus?.is_enable??null,
         mode:robotMode?.value??null,
         status:status.label
       },
       tcp:tcp?{
+        source:simulation?"TF-derived simulated end-effector pose":"controller-reported TCP",
         source_topic:"/dobot_msgs_v4/msg/ToolVectorActual",
         position_mm:[tcp.x??null,tcp.y??null,tcp.z??null],
         rpy_degrees:[tcp.rx??null,tcp.ry??null,tcp.rz??null],
@@ -90,7 +93,7 @@ export function DiagnosticsPage(){
       }:null,
       errors
     };
-  },[joints,tcp,timestamps,robotStatus,robotMode,status.label,errors]);
+  },[joints,tcp,timestamps,robotStatus,robotMode,status.label,errors,simulation]);
 
   const runCommand=async(command:string,label:string)=>{
     setBusy(command);setNotice(null);
@@ -195,7 +198,7 @@ export function DiagnosticsPage(){
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-100 text-zinc-700"><Activity size={19}/></div>
           <div>
             <div className="text-sm font-semibold">Robot controller</div>
-            <div className="mt-0.5 text-xs text-zinc-500">Dobot CR5A · Driver status topic</div>
+            <div className="mt-0.5 text-xs text-zinc-500">{simulation?"MoveIt fake hardware · simulated Dobot driver interfaces":"Dobot CR5A · Driver status topic"}</div>
           </div>
         </div>
       </div>
@@ -248,7 +251,7 @@ export function DiagnosticsPage(){
         <div className="panel-header">
           <div>
             <div className="text-sm font-semibold">Live TCP coordinates</div>
-            <div className="mt-0.5 text-xs text-zinc-500">ToolVectorActual · controller-reported values</div>
+            <div className="mt-0.5 text-xs text-zinc-500">{simulation?"ToolVectorActual · derived from the simulated TF tree":"ToolVectorActual · controller-reported values"}</div>
           </div>
           <span className="text-[11px] text-zinc-400">{safeDate(timestamps.tcp)}</span>
         </div>
