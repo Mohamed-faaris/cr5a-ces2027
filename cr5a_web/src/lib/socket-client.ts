@@ -76,58 +76,92 @@ async function loadInitialState(){
   await Promise.allSettled(tasks);
 }
 export function startSocket(){
+  const generation=++socketGeneration;
   stopRequested=false;
   let firstAttempt=true;
   const scheduleReconnect=()=>{
-    if(stopRequested||reconnectTimer!==undefined)return;
+    if(generation!==socketGeneration||stopRequested||reconnectTimer!==undefined)return;
     const delay=Math.min(1000*Math.pow(1.6,retryCount++),8000);
-    reconnectTimer=window.setTimeout(()=>{reconnectTimer=undefined;connect();},delay);
+    reconnectTimer=window.setTimeout(()=>{
+      reconnectTimer=undefined;
+      connect();
+    },delay);
   };
   const connect=()=>{
-    if(stopRequested)return;
+    if(generation!==socketGeneration||stopRequested)return;
     useRobotStore.getState().setBridgeState(firstAttempt?"connecting":"reconnecting");
     firstAttempt=false;
-    try{socket=new WebSocket(wsUrl());}
-    catch(error){
-      useRobotStore.getState().setBridgeState("disconnected",String(error));scheduleReconnect();return;
+    let currentSocket:WebSocket;
+    try{
+      currentSocket=new WebSocket(wsUrl());
+      socket=currentSocket;
+    }catch(error){
+      useRobotStore.getState().setBridgeState("disconnected",String(error));
+      scheduleReconnect();
+      return;
     }
-    socket.onopen=()=>{
-      retryCount=0;useRobotStore.getState().setBridgeState("connected");
-      socket?.send(JSON.stringify({op:"subscribe",channels:[
+    currentSocket.onopen=()=>{
+      if(generation!==socketGeneration||socket!==currentSocket)return;
+      retryCount=0;
+      useRobotStore.getState().setBridgeState("connected");
+      currentSocket.send(JSON.stringify({op:"subscribe",channels:[
         "robot.status","robot.mode","robot.joints","robot.tcp","robot.errors",
         "robot.state","moveit.scene","motion.plan","motion.execution","bridge.health"
       ]}));
       void loadInitialState();
       pingTimer=window.setInterval(()=>{
-        if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({op:"ping"}));
+        if(socket===currentSocket&&currentSocket.readyState===WebSocket.OPEN){
+          currentSocket.send(JSON.stringify({op:"ping"}));
+        }
       },15000);
     };
-    socket.onmessage=(event)=>{
+    currentSocket.onmessage=(event)=>{
+      if(generation!==socketGeneration||socket!==currentSocket)return;
       let message:any;
       try{message=JSON.parse(event.data);}catch{return;}
       if(message.op==="response"){
-        const item=pending.get(String(message.id));if(!item)return;
-        window.clearTimeout(item.timeout);pending.delete(String(message.id));
+        const item=pending.get(String(message.id));
+        if(!item)return;
+        window.clearTimeout(item.timeout);
+        pending.delete(String(message.id));
         if(message.ok)item.resolve(message.data);
         else item.reject(new Error(message.error?.message||"WebSocket request failed"));
-      }else if(message.op==="event")handleEvent(message.channel,message.data,message.timestamp);
+      }else if(message.op==="event"){
+        handleEvent(message.channel,message.data,message.timestamp);
+      }
     };
-    socket.onerror=()=>useRobotStore.getState().setBridgeState("reconnecting","WebSocket connection error");
-    socket.onclose=()=>{
-      if(pingTimer!==undefined)window.clearInterval(pingTimer);pingTimer=undefined;
-      rejectPending("WebSocket disconnected");socket=null;
+    currentSocket.onerror=()=>{
+      if(generation===socketGeneration&&socket===currentSocket){
+        useRobotStore.getState().setBridgeState("reconnecting","WebSocket connection error");
+      }
+    };
+    currentSocket.onclose=()=>{
+      if(socket===currentSocket)socket=null;
+      if(generation!==socketGeneration)return;
+      if(pingTimer!==undefined)window.clearInterval(pingTimer);
+      pingTimer=undefined;
+      rejectPending("WebSocket disconnected");
       if(!stopRequested){
-        useRobotStore.getState().setBridgeState("reconnecting","Waiting for the ROS bridge");scheduleReconnect();
+        useRobotStore.getState().setBridgeState("reconnecting","Waiting for the ROS bridge");
+        scheduleReconnect();
       }
     };
   };
   connect();
   return ()=>{
+    if(generation!==socketGeneration)return;
+    socketGeneration++;
     stopRequested=true;
     if(reconnectTimer!==undefined)window.clearTimeout(reconnectTimer);
     if(pingTimer!==undefined)window.clearInterval(pingTimer);
-    reconnectTimer=undefined;pingTimer=undefined;rejectPending("WebSocket client stopped");
-    const current=socket;socket=null;current?.close();
+    if(sceneRefreshTimer!==undefined)window.clearTimeout(sceneRefreshTimer);
+    reconnectTimer=undefined;
+    pingTimer=undefined;
+    sceneRefreshTimer=undefined;
+    rejectPending("WebSocket client stopped");
+    const current=socket;
+    socket=null;
+    current?.close();
     useRobotStore.getState().setBridgeState("disconnected");
   };
 }
