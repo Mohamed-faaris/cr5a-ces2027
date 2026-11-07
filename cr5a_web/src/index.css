@@ -20,7 +20,7 @@ button{cursor:pointer}
   .panel-header{@apply flex items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4}
   .notice{@apply rounded-lg border border-zinc-200 bg-white px-4 py-3 text-xs text-zinc-700}
   .notice-success{@apply border-emerald-200 bg-emerald-50 text-emerald-800}
-  .notice-error{@apply border-red-200 bg-red-50 text-red-800}
+  .notice-error{border-color:var(--status-border);background:var(--status-bg);color:var(--status-text)}
 }
 .status-badge{
   display:inline-flex;align-items:center;gap:7px;border:1px solid var(--status-border);
@@ -33,7 +33,7 @@ button{cursor:pointer}
 .status-paused{--status-text:#a16207;--status-bg:#fefce8;--status-border:#fde68a}
 .status-moving{--status-text:#1d4ed8;--status-bg:#eff6ff;--status-border:#bfdbfe}
 .status-planning{--status-text:#7e22ce;--status-bg:#faf5ff;--status-border:#e9d5ff}
-.status-connecting{--status-text:#0e7490;--status-bg:#ecfeff;--status-border:#a5f3fc}
+.status-connecting,.status-initializing{--status-text:#0e7490;--status-bg:#ecfeff;--status-border:#a5f3fc}
 .status-disabled,.status-disconnected,.status-unknown{
   --status-text:#52525b;--status-bg:#f4f4f5;--status-border:#e4e4e7;
 }

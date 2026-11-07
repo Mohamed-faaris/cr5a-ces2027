@@ -46,7 +46,7 @@ function handleEvent(channel:string,data:any){
     case "robot.tcp":store.setTcp(data);break;
     case "robot.errors":store.setErrors(data);break;
     case "robot.state":if(data?.command)store.setCommand(data.command,data.response);break;
-    case "motion.plan":store.setPlan({...store.plan,...data});break;
+    case "motion.plan":store.setPlan({...(store.plan??{}),...data});break;
     case "motion.execution":store.setExecutionStatus(data?.status??null);break;
     case "moveit.scene":
       store.setSceneLoading(true);

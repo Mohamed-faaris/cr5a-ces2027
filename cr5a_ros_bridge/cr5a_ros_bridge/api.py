@@ -137,7 +137,8 @@ def create_app(backend, config):
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        if auth_enabled and request.url.path not in ("/health",):
+        # CR5 visual meshes are read-only geometry assets; all robot data and commands stay authenticated.
+        if auth_enabled and request.url.path != "/health" and not request.url.path.startswith("/assets/dobot_rviz/meshes/"):
             supplied = request.headers.get("Authorization", "")
             if supplied != "Bearer " + token:
                 return JSONResponse(status_code=401, content={"detail": "Bearer token required"})

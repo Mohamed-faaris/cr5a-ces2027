@@ -3,15 +3,10 @@ import {Activity,AlertCircle,Check,Clipboard,Pause,Play,RefreshCw,Square} from "
 import {Button} from "@/components/ui/button";
 import {Metric} from "@/components/metric";
 import {StatusBadge} from "@/components/status-badge";
-import {deriveRobotStatus,hasActiveError} from "@/lib/status";
+import {deriveRobotStatus,formatRobotMode,hasActiveError} from "@/lib/status";
 import {formatNumber,safeDate} from "@/lib/utils";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
-
-function modeLabel(value?:string){
-  if(!value)return "Unavailable";
-  return value.length>32?value.slice(0,32)+"…":value;
-}
 
 export function DiagnosticsPage(){
   const {request}=useRobotSocket();
@@ -133,7 +128,7 @@ export function DiagnosticsPage(){
         <StatusBadge state={status.key}/>
       </div>
       <div className="grid gap-5 px-5 py-5 sm:grid-cols-3">
-        <Metric label="Robot mode" value={modeLabel(robotMode?.value)} hint={robotMode?.res===0?"RobotMode service · successful":"Raw controller response"}/>
+        <Metric label="Robot mode" value={formatRobotMode(robotMode?.value)} hint={robotMode?.res===0?"RobotMode service · successful":"Raw controller response"}/>
         <Metric label="Connection" value={robotStatus?.is_connected===true?"Connected":robotStatus?.is_connected===false?"Disconnected":"Unknown"}/>
         <Metric label="Motors" value={robotStatus?.is_enable===true?"Enabled":robotStatus?.is_enable===false?"Disabled":"Unknown"}/>
       </div>

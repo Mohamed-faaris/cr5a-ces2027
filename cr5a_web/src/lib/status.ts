@@ -1,6 +1,6 @@
 import type { BridgeState, RobotModeMessage } from "./types";
 
-export type RobotStatusKey = "error" | "idle" | "paused" | "moving" | "planning" | "connecting" | "disabled" | "disconnected" | "unknown";
+export type RobotStatusKey = "error" | "idle" | "paused" | "moving" | "planning" | "connecting" | "initializing" | "disabled" | "disconnected" | "unknown";
 export interface RobotStatusInfo { key: RobotStatusKey; label: string; hint: string; }
 
 export const ROBOT_STATUS: Record<RobotStatusKey, RobotStatusInfo> = {
@@ -10,6 +10,7 @@ export const ROBOT_STATUS: Record<RobotStatusKey, RobotStatusInfo> = {
   moving:{key:"moving",label:"Moving",hint:"Robot motion is active"},
   planning:{key:"planning",label:"Planning",hint:"MoveIt is computing a trajectory"},
   connecting:{key:"connecting",label:"Connecting",hint:"Connecting to the ROS bridge"},
+  initializing:{key:"initializing",label:"Initializing",hint:"Controller is initializing"},
   disabled:{key:"disabled",label:"Disabled",hint:"Robot is connected but not enabled"},
   disconnected:{key:"disconnected",label:"Disconnected",hint:"Robot controller is not connected"},
   unknown:{key:"unknown",label:"Awaiting data",hint:"Waiting for reliable robot telemetry"}
@@ -39,17 +40,44 @@ export function deriveRobotStatus(input: StatusInput): RobotStatusInfo {
     return input.bridgeState === "connecting" || input.bridgeState === "reconnecting" ? ROBOT_STATUS.connecting : ROBOT_STATUS.disconnected;
   }
   const payload = input.errors?.GetErrorID ?? input.errors?.robot_return ?? input.errors;
-  if (errorPresent(payload)) return ROBOT_STATUS.error;
   const mode = String(input.mode?.value ?? "").toLowerCase();
-  if (mode.includes("pause") || input.lastCommand === "pause") return ROBOT_STATUS.paused;
-  const recentMotion = input.lastJointChangeAt !== undefined && Date.now() - input.lastJointChangeAt < 650;
-  if (mode.includes("running") || mode.includes("moving") || mode.includes("jog") || input.executionStatus === "EXECUTING" || recentMotion) return ROBOT_STATUS.moving;
-  if (input.planningStatus === "PLANNING") return ROBOT_STATUS.planning;
+  const modeMatch = mode.match(/^\\s*(-?\\d+)/);
+  const modeCode = modeMatch ? Number(modeMatch[1]) : null;
+
+  if (errorPresent(payload) || mode.includes("error") || modeCode === 9) return ROBOT_STATUS.error;
   if (input.connected === false) return ROBOT_STATUS.disconnected;
+  if (mode.includes("pause") || modeCode === 10 || (!mode && input.lastCommand === "pause")) return ROBOT_STATUS.paused;
+
+  if (modeCode === 1) return ROBOT_STATUS.initializing;
+  if (
+    [6, 7, 8, 11].includes(modeCode ?? -1) ||
+    mode.includes("running") || mode.includes("moving") || mode.includes("jog") ||
+    mode.includes("backdrive") || mode.includes("recording") ||
+    input.executionStatus === "EXECUTING" ||
+    (input.lastJointChangeAt !== undefined && Date.now() - input.lastJointChangeAt < 650)
+  ) return ROBOT_STATUS.moving;
+
+  if ([2, 3, 4].includes(modeCode ?? -1)) return ROBOT_STATUS.disabled;
+  if (input.planningStatus === "PLANNING") return ROBOT_STATUS.planning;
   if (input.connected === true && input.enabled === false) return ROBOT_STATUS.disabled;
-  if (input.connected === true && input.enabled === true) return ROBOT_STATUS.idle;
+  if (modeCode === 5 || (input.connected === true && input.enabled === true)) return ROBOT_STATUS.idle;
   return ROBOT_STATUS.unknown;
 }
+
+export function formatRobotMode(value?: string): string {
+  if (!value) return "Unavailable";
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(-?\\d+)/);
+  if (!match) return trimmed.length > 32 ? trimmed.slice(0, 32) + "…" : trimmed;
+  const code = Number(match[1]);
+  const labels: Record<number, string> = {
+    1: "Initializing", 2: "Brake open", 3: "Power off", 4: "Disabled",
+    5: "Enabled / idle", 6: "Backdrive", 7: "Running",
+    8: "Recording / single move", 9: "Error", 10: "Paused", 11: "Jog"
+  };
+  return labels[code] ? labels[code] + " (" + code + ")" : trimmed;
+}
+
 export function hasActiveError(errors?: Record<string,unknown> | null): boolean {
   return errorPresent(errors?.GetErrorID ?? errors?.robot_return ?? errors);
 }
