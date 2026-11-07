@@ -1,4 +1,4 @@
-import {useMemo,useState} from "react";
+import {useEffect,useMemo,useState} from "react";
 import {Activity,AlertCircle,Check,Clipboard,Pause,Play,RefreshCw,Square} from "lucide-react";
 import {Button} from "@/components/ui/button";
 import {Metric} from "@/components/metric";
@@ -25,6 +25,9 @@ export function DiagnosticsPage(){
   const setNotice=useRobotStore((s)=>s.setNotice);
   const [busy,setBusy]=useState<string|null>(null);
   const [copied,setCopied]=useState(false);
+  const [dragTransition,setDragTransition]=useState<"starting"|"stopping"|null>(null);
+  const [errorDetails,setErrorDetails]=useState<Record<string,unknown>|null>(null);
+  const [errorDetailsError,setErrorDetailsError]=useState<string|null>(null);
 
   const status=deriveRobotStatus({
     bridgeState,connected:robotStatus?.is_connected,enabled:robotStatus?.is_enable,
@@ -34,7 +37,21 @@ export function DiagnosticsPage(){
   const activeError=hasActiveError(errors)||status.key==="error";
   const canCommand=bridgeState==="connected"&&robotStatus?.is_connected===true&&capabilities.robot_commands_enabled===true;
   const paused=status.key==="paused";
-  const dragActive=status.key==="moving"&&/backdrive|\b6\b/i.test(robotMode?.value??"");
+  const enabled=robotStatus?.is_enable;
+  const dragActive=/backdrive|\b6\b/i.test(robotMode?.value??"");
+  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&(enabled||!activeError);
+  const canToggleDrag=canCommand&&busy===null&&!activeError&&(dragActive||enabled===true);
+
+  useEffect(()=>{
+    if(!dragTransition)return;
+    const confirmed=dragTransition==="starting"?dragActive:!dragActive;
+    if(confirmed){setDragTransition(null);return;}
+    const timeout=window.setTimeout(()=>{
+      setDragTransition(null);
+      setNotice({tone:"error",message:"Controller mode did not confirm the drag-mode change. Check the RobotMode telemetry."});
+    },5000);
+    return ()=>window.clearTimeout(timeout);
+  },[dragTransition,dragActive,setNotice]);
 
   const copyPayload=useMemo(()=>{
     const names=joints?.name??[];
@@ -78,8 +95,35 @@ export function DiagnosticsPage(){
     }finally{setBusy(null);}
   };
 
+  const toggleDrag=async()=>{
+    const starting=!dragActive;
+    const command=starting?"start-drag":"stop-drag";
+    setBusy(command);setNotice(null);setDragTransition(null);
+    try{
+      const response=await request("robot.command",{command});
+      if(response?.res!==undefined&&response.res!==0){
+        setNotice({tone:"error",message:(starting?"Start":"Stop")+" drag rejected by controller (code "+String(response.res)+")."});
+        return;
+      }
+      setDragTransition(starting?"starting":"stopping");
+      setNotice({tone:"neutral",message:(starting?"Start":"Stop")+" drag request accepted; waiting for RobotMode confirmation."});
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  };
+
+  const fetchErrorDetails=async()=>{
+    setBusy("error-details");setErrorDetailsError(null);
+    try{
+      const result=await request("robot.get_error_details",{language:"English"});
+      setErrorDetails(result);
+    }catch(error){
+      setErrorDetailsError(error instanceof Error?error.message:String(error));
+    }finally{setBusy(null);}
+  };
+
   const clearErrors=async()=>{
-    setBusy("clear-errors");setNotice(null);
+    setBusy("clear-errors");setNotice(null);setErrorDetails(null);setErrorDetailsError(null);
     try{
       const response=await request("robot.clear_errors");
       const refreshed=await request("robot.get_errors");
@@ -142,25 +186,32 @@ export function DiagnosticsPage(){
           {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Play
         </Button>
         <div className="flex-1"/>
-        <Button variant="outline" onClick={()=>runCommand("start-drag","Enable drag mode")}
-          disabled={!canCommand||busy!==null||dragActive||activeError||robotStatus?.is_enable!==true}>
-          {busy==="start-drag"?<RefreshCw size={14} className="animate-spin"/>:null} Start drag
+        <Button variant={enabled?"outline":"default"} onClick={()=>runCommand(enabled?"disable":"enable",enabled?"Disable robot":"Enable robot")}
+          disabled={!canToggleEnable}>
+          {busy==="disable"||busy==="enable"?<RefreshCw size={14} className="animate-spin"/>:enabled?<Pause size={14}/>:<Play size={14}/>} {enabled?"Disable robot":"Enable robot"}
         </Button>
-        <Button variant="outline" onClick={()=>runCommand("stop-drag","Disable drag mode")}
-          disabled={!canCommand||busy!==null}>
-          {busy==="stop-drag"?<RefreshCw size={14} className="animate-spin"/>:null} Stop drag
+        <Button variant="outline" onClick={toggleDrag}
+          disabled={!canToggleDrag||dragTransition!==null}>
+          {busy==="start-drag"||busy==="stop-drag"||dragTransition!==null?<RefreshCw size={14} className="animate-spin"/>:<Activity size={14}/>} {dragTransition==="starting"?"Starting drag…":dragTransition==="stopping"?"Stopping drag…":dragActive?"Disable drag mode":"Enable drag mode"}
         </Button>
         <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||robotStatus?.is_connected!==true||capabilities.error_clear_enabled!==true||busy!==null}>
           <RefreshCw size={14}/> Clear errors
         </Button>
       </div>
-      <div className="border-t border-zinc-100 px-5 py-2 text-xs text-zinc-500">Drag mode allows hand-guiding the arm. Confirm the workspace is clear and support the tool/load before enabling. Controller mode 6 (Backdrive) indicates drag mode; a successful request alone does not confirm activation.</div>
+      <div className="border-t border-zinc-100 px-5 py-2 text-xs text-zinc-500">Drag mode allows hand-guiding the arm. Confirm the workspace is clear and support the tool/load before enabling. The toggle follows RobotMode (6 = Backdrive) and waits for telemetry to confirm each change.</div>
       {!canCommand&&<div className="border-t border-zinc-100 px-5 py-2.5 text-xs text-zinc-500">Robot commands are disabled by the bridge safety configuration.</div>}
     </section>
 
     {activeError&&<section className="rounded-xl border border-red-200 bg-red-50 px-5 py-4">
-      <div className="flex items-center gap-2 text-sm font-semibold text-red-800"><AlertCircle size={16}/> Controller error reported</div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-red-800"><AlertCircle size={16}/> Controller error reported</div>
+        <Button variant="outline" size="sm" onClick={fetchErrorDetails} disabled={bridgeState!=="connected"||busy!==null}>
+          {busy==="error-details"?<RefreshCw size={14} className="animate-spin"/>:<RefreshCw size={14}/>} Get description
+        </Button>
+      </div>
       <pre className="mt-3 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border border-red-100 bg-white/70 p-3 font-mono text-xs text-red-900">{JSON.stringify(errors,null,2)}</pre>
+      {errorDetailsError&&<p className="mt-2 text-xs text-red-800">Description unavailable: {errorDetailsError}</p>}
+      {errorDetails&&<pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-red-100 bg-white/70 p-3 font-mono text-xs text-red-900">{JSON.stringify(errorDetails,null,2)}</pre>}
     </section>}
 
     <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
