@@ -234,8 +234,6 @@ class DobotSimulation(Node):
     def _set_result(self, response, result=0):
         if hasattr(response, "res"):
             response.res = int(result)
-        if hasattr(response, "robot_return"):
-            response.robot_return = str(self._mode)
         return response
 
     def _handle_service(self, name, request, response):
@@ -244,6 +242,7 @@ class DobotSimulation(Node):
         if name == "RobotMode":
             if not self._connected():
                 self._mode = 1
+            response.robot_return = str(self._mode)
             return self._set_result(response)
 
         if name in ("GetErrorID", "GetError"):
@@ -279,6 +278,7 @@ class DobotSimulation(Node):
             self._paused = False
             self._dragging = False
             self._mode = 4
+            response.robot_return = str(self._mode)
             return self._set_result(response)
 
         if name == "StartDrag":
