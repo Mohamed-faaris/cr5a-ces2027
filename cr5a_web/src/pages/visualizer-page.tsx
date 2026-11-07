@@ -50,6 +50,7 @@ export function VisualizerPage(){
   const [tcpDirty,setTcpDirty]=useState(false);
   const [jointTargets,setJointTargets]=useState<Record<string,number>>({});
   const [jointDirty,setJointDirty]=useState(false);
+  const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
 
   const bounds=useMemo(()=>parseJointBounds(model?.urdf),[model?.urdf]);
@@ -73,11 +74,28 @@ export function VisualizerPage(){
     setJointTargets(next);
   },[jointNames.join("|"),actualJoints.join("|"),jointDirty]);
 
+  useEffect(()=>{
+    if(plan?.status!=="SUCCEEDED"||!plannedJointSnapshot)return;
+    const current:Record<string,number>={};
+    jointNames.forEach((name,index)=>{current[name]=actualJoints[index]??0;});
+    const names=Object.keys(plannedJointSnapshot);
+    const changed=names.length===0||names.some((name)=>
+      current[name]===undefined||Math.abs(current[name]-plannedJointSnapshot[name])>0.03
+    );
+    if(changed){
+      setPlan(null);
+      setExecutionStatus(null);
+      setPlannedJointSnapshot(null);
+      setNotice({tone:"neutral",message:"Robot joints changed after planning. The old plan was cleared; plan again."});
+    }
+  },[actualJoints.join("|"),jointNames.join("|"),plan?.status,plannedJointSnapshot]);
+
   const canExecute=capabilities.motion_execution_enabled===true&&bridgeState==="connected"&&
     robotStatus?.is_connected===true&&robotStatus?.is_enable===true;
   const hasPlan=plan?.status==="SUCCEEDED"&&Boolean(plan.plan_id);
 
   const resetTargets=()=>{
+    setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
     setTcpDirty(false);setJointDirty(false);
     if(tcp)setTcpTarget({
       x:tcp.x??0,y:tcp.y??0,z:tcp.z??0,rx:tcp.rx??0,ry:tcp.ry??0,rz:tcp.rz??0
@@ -89,7 +107,9 @@ export function VisualizerPage(){
 
   const planTcp=async()=>{
     if(!tcpTarget||!model)return;
-    setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});
+    const startJoints:Record<string,number>={};
+    jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index]??0;});
+    setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
     try{
       const quaternion=rpyDegreesToQuaternion(tcpTarget.rx,tcpTarget.ry,tcpTarget.rz);
       const result=await request("motion.plan",{
@@ -102,6 +122,7 @@ export function VisualizerPage(){
         allowed_planning_time:5,max_velocity_scaling:0.2,max_acceleration_scaling:0.2
       });
       setPlan(result);
+      setPlannedJointSnapshot(result.status==="SUCCEEDED"?startJoints:null);
       setNotice({
         tone:result.status==="SUCCEEDED"?"success":"error",
         message:result.status==="SUCCEEDED"?"Plan generated. Inspect the path before execution.":"MoveIt could not find a valid plan."
@@ -114,7 +135,9 @@ export function VisualizerPage(){
 
   const planJoints=async()=>{
     if(!model||!jointNames.length)return;
-    setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});
+    const startJoints:Record<string,number>={};
+    jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index]??0;});
+    setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
     try{
       const result=await request("motion.plan",{
         group_name:model.group_name,
@@ -125,6 +148,7 @@ export function VisualizerPage(){
         allowed_planning_time:5,max_velocity_scaling:0.2,max_acceleration_scaling:0.2
       });
       setPlan(result);
+      setPlannedJointSnapshot(result.status==="SUCCEEDED"?startJoints:null);
       setNotice({
         tone:result.status==="SUCCEEDED"?"success":"error",
         message:result.status==="SUCCEEDED"?"Joint-space plan generated.":"MoveIt could not find a valid plan."
@@ -201,6 +225,7 @@ export function VisualizerPage(){
                   {(["x","y","z"] as const).map((key)=><NumericInput key={key} label={key.toUpperCase()}
                     value={tcpTarget?.[key]??0} suffix="mm"
                     onChange={(value)=>{
+                      setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
                       setTcpDirty(true);
                       setTcpTarget((current)=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));
                     }}/>)}
@@ -214,7 +239,7 @@ export function VisualizerPage(){
                 <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-400">
                   <span>Position mm · RPY degrees</span><span>Frame: {model?.base_frame??"—"}</span>
                 </div>
-                <Button className="mt-4 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget}>
+                <Button className="mt-4 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget||!actualJoints.length}>
                   {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan TCP target
                 </Button>
               </TabsContent>

@@ -31,8 +31,8 @@ export function DiagnosticsPage(){
     mode:robotMode,errors,lastCommand,planningStatus:plan?.status,
     executionStatus,lastJointChangeAt
   });
-  const activeError=hasActiveError(errors);
-  const canCommand=bridgeState==="connected"&&capabilities.robot_commands_enabled===true;
+  const activeError=hasActiveError(errors)||status.key==="error";
+  const canCommand=bridgeState==="connected"&&robotStatus?.is_connected===true&&capabilities.robot_commands_enabled===true;
   const paused=status.key==="paused";
 
   const copyPayload=useMemo(()=>{
@@ -141,7 +141,7 @@ export function DiagnosticsPage(){
           {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Play
         </Button>
         <div className="flex-1"/>
-        <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||capabilities.error_clear_enabled!==true||busy!==null}>
+        <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||robotStatus?.is_connected!==true||capabilities.error_clear_enabled!==true||busy!==null}>
           <RefreshCw size={14}/> Clear errors
         </Button>
       </div>
