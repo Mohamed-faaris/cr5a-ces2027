@@ -194,7 +194,6 @@ rosdep install \
     src/cr5a-ces2027/cr5a_ros_bridge \
   --ignore-src \
   --rosdistro humble \
-  --as-root apt:true \
   -r -y
 ~~~
 
