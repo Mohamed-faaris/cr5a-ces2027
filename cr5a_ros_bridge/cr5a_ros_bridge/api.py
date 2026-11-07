@@ -750,6 +750,11 @@ def create_app(backend, config):
                     "joints": joints.get("timestamp") if joints else None,
                     "tcp": tcp.get("timestamp") if tcp else None,
                 },
+                "capabilities": {
+                    "robot_commands_enabled": bool(config.get("robot", {}).get("allow_commands", False)),
+                    "error_clear_enabled": bool(config.get("robot", {}).get("allow_error_clear", False)),
+                    "motion_execution_enabled": bool(config.get("moveit", {}).get("allow_execution", False)),
+                },
             }
 
         if method == "robot.get_model":
