@@ -192,12 +192,6 @@ tmuxp --version
 
 The symlink makes `tmuxp` available in every new container terminal without changing PATH.
 
-Install tmuxp:
-
-~~~bash
-pipx install tmuxp
-export PATH="$PATH:/root/.local/bin"
-~~~
 
 ### Install Node.js and pnpm (for the React web console)
 
@@ -630,6 +624,34 @@ tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 
 The tmux session is named `cr5a-demo`. Click the window names in the bottom status bar to switch between MoveIt, Gazebo, bridge, frontend, monitor, and shell.
 
+### Automatic session logs
+
+Both tmuxp profiles automatically capture each pane's terminal output. Every new tmux session gets its own timestamped directory under:
+
+~~~text
+/root/cr5a_ws/logs/tmux/YYYYMMDD-HHMMSS/
+~~~
+
+The demo profile creates separate files for MoveIt, Gazebo, bridge, frontend, both monitor panes, and the interactive shell. The hardware profile creates separate files for the driver, MoveIt, bridge, and node monitor.
+
+List saved sessions:
+
+~~~bash
+ls -lt /root/cr5a_ws/logs/tmux
+~~~
+
+Inspect the newest session and follow a log:
+
+~~~bash
+LOG_DIR="$(find /root/cr5a_ws/logs/tmux -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+ls -lh "$LOG_DIR"
+tail -f "$LOG_DIR/hardware-driver.log"
+~~~
+
+Replace the filename with the pane you want to inspect, such as `moveit-demo.log` or `gazebo.log`. Logs remain after the tmux session exits. They are stored in the container workspace, so copy them to the host or a persistent volume if you need them after removing the container.
+
+The profiles use `.tmuxp/log-pane.sh` to attach tmux's pane-output pipe when each pane starts. If logging does not start, update the checkout with `git pull origin main` and confirm that this helper script exists.
+
 Useful tmux controls:
 
 | Action | Control |
@@ -656,6 +678,8 @@ The separate hardware profile starts the physical Dobot driver, MoveIt, bridge, 
 cd /root/cr5a_ws
 tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-hardware.yaml
 ~~~
+
+The hardware profile uses the same automatic timestamped logging. Its pane logs are saved as `hardware-driver.log`, `moveit.log`, `bridge.log`, and `monitor-nodes.log` inside that session's log directory.
 
 Stop the active demo stack before starting the hardware profile. Verify the controller network and physical safety systems before launching the real robot.
 
@@ -702,6 +726,7 @@ Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and 
 | Symptom | Check |
 |---|---|
 | `tmuxp: command not found` | Complete the isolated tmuxp installation in section 3, then verify with `tmuxp --version`. |
+| No tmux pane log files appear | Pull the latest repository version and confirm `.tmuxp/log-pane.sh` exists. Check that the session was started with the updated tmuxp profile. |
 | `node`, `npm`, or `pnpm` command not found | Complete the Node.js and pnpm installation in section 3. |
 | ROS_DISTRO is empty or wrong | Run source /opt/ros/humble/setup.bash in that terminal. |
 | Package cr5_moveit not found | Source /root/cr5a_ws/install/setup.bash after a successful build. |
