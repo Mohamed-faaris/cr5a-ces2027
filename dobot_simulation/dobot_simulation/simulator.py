@@ -6,6 +6,7 @@ fake ros2_control system; TCP coordinates are computed from the simulated TF
 tree. Dashboard services update a small deterministic simulated state machine.
 """
 
+import json
 import math
 import time
 
@@ -28,6 +29,7 @@ from dobot_msgs_v4.srv import (
     StopDrag,
 )
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -70,6 +72,7 @@ class DobotSimulation(Node):
         self.declare_parameter("joint_state_timeout_sec", 1.0)
         self.declare_parameter("joint_motion_threshold_rad", 0.0002)
         self.declare_parameter("idle_timeout_sec", 0.5)
+        self.declare_parameter("simulated_error_code", 0)
         self.declare_parameter("controller_action_name", "/cr5_group_controller/follow_joint_trajectory")
 
         self._base_frame = self.get_parameter("base_frame").value
@@ -86,7 +89,10 @@ class DobotSimulation(Node):
         self._last_joint_state_at = 0.0
         self._last_motion_at = 0.0
         self._joint_positions = {}
-        self._errors = []
+        self._active_error_code = max(0, int(self.get_parameter("simulated_error_code").value))
+        self._errors = [self._active_error_code] if self._active_error_code else []
+        if self._errors:
+            self._mode = 9
 
         self._status_pub = self.create_publisher(
             RobotStatus, "/dobot_msgs_v4/msg/RobotStatus", 10
@@ -193,7 +199,20 @@ class DobotSimulation(Node):
         ):
             self._mode = 5 if self._enabled else 4
 
+    def _sync_simulated_error(self):
+        configured_code = max(0, int(self.get_parameter("simulated_error_code").value))
+        if configured_code == self._active_error_code:
+            return
+        self._active_error_code = configured_code
+        self._errors = [configured_code] if configured_code else []
+        self._cancel_active_trajectory()
+        self._enabled = False
+        self._paused = False
+        self._dragging = False
+        self._mode = 9 if self._errors else 4
+
     def _publish_telemetry(self):
+        self._sync_simulated_error()
         connected = self._connected()
 
         status = RobotStatus()
@@ -248,13 +267,23 @@ class DobotSimulation(Node):
             response.robot_return = str(self._mode)
             return self._set_result(response)
 
-        if name in ("GetErrorID", "GetError"):
-            if hasattr(response, "robot_return"):
-                response.robot_return = "[]" if not self._errors else str(self._errors)
+        if name == "GetErrorID":
+            response.robot_return = json.dumps(self._errors)
+            return self._set_result(response)
+
+        if name == "GetError":
+            response.robot_return = json.dumps([
+                {"id": code, "description": "Injected simulation fault"}
+                for code in self._errors
+            ])
             return self._set_result(response)
 
         if name == "ClearError":
+            self.set_parameters([Parameter("simulated_error_code", value=0)])
+            self._active_error_code = 0
             self._errors.clear()
+            self._enabled = False
+            self._mode = 4
             return self._set_result(response)
 
         if name == "PowerOn":
@@ -331,6 +360,8 @@ class DobotSimulation(Node):
 
         if name == "ResetRobot":
             self._cancel_active_trajectory()
+            self.set_parameters([Parameter("simulated_error_code", value=0)])
+            self._active_error_code = 0
             self._errors.clear()
             self._paused = False
             self._dragging = False
