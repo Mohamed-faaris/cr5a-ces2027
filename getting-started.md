@@ -168,14 +168,29 @@ apt-get install -y \
   python3-rosdep \
   python3-vcstool \
   python3-setuptools \
-  python3-pip \
+  python3-venv \
   ros-humble-ros2-control \
   ros-humble-ros2-controllers \
   ros-humble-xacro \
   ros-humble-joint-state-publisher-gui \
-  tmux \
-  pipx
+  tmux
 ~~~
+
+Install tmuxp in an isolated Python virtual environment. This works with the older pip version shipped in the Humble container and avoids installing Python packages into Ubuntu's system Python:
+
+~~~bash
+python3 -m venv /opt/tmuxp-venv
+/opt/tmuxp-venv/bin/pip install tmuxp
+ln -sf /opt/tmuxp-venv/bin/tmuxp /usr/local/bin/tmuxp
+~~~
+
+Verify:
+
+~~~bash
+tmuxp --version
+~~~
+
+The symlink makes `tmuxp` available in every new container terminal without changing PATH.
 
 Install tmuxp:
 
@@ -579,9 +594,11 @@ The demo profile opens each part of the development stack in its own tmux window
 Install tmux and tmuxp if you have not already completed section 3:
 
 ~~~bash
-apt-get install -y tmux pipx
-pipx install tmuxp
-export PATH="$PATH:/root/.local/bin"
+apt-get install -y tmux python3-venv
+python3 -m venv /opt/tmuxp-venv
+/opt/tmuxp-venv/bin/pip install tmuxp
+ln -sf /opt/tmuxp-venv/bin/tmuxp /usr/local/bin/tmuxp
+tmuxp --version
 ~~~
 
 Enable mouse support so you can click window names in the tmux status bar, click panes to focus them, and scroll terminal output:
@@ -684,6 +701,7 @@ Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and 
 
 | Symptom | Check |
 |---|---|
+| `tmuxp: command not found` | Complete the isolated tmuxp installation in section 3, then verify with `tmuxp --version`. |
 | `node`, `npm`, or `pnpm` command not found | Complete the Node.js and pnpm installation in section 3. |
 | ROS_DISTRO is empty or wrong | Run source /opt/ros/humble/setup.bash in that terminal. |
 | Package cr5_moveit not found | Source /root/cr5a_ws/install/setup.bash after a successful build. |
