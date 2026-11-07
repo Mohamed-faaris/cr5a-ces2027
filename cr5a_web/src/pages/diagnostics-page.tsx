@@ -26,6 +26,7 @@ export function DiagnosticsPage(){
   const [busy,setBusy]=useState<string|null>(null);
   const [copied,setCopied]=useState(false);
   const [dragTransition,setDragTransition]=useState<"starting"|"stopping"|null>(null);
+  const [enableTransition,setEnableTransition]=useState<boolean|null>(null);
   const [errorDetails,setErrorDetails]=useState<Record<string,unknown>|null>(null);
   const [errorDetailsError,setErrorDetailsError]=useState<string|null>(null);
 
@@ -39,8 +40,18 @@ export function DiagnosticsPage(){
   const paused=status.key==="paused";
   const enabled=robotStatus?.is_enable;
   const dragActive=/backdrive|\b6\b/i.test(robotMode?.value??"");
-  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&(enabled||!activeError);
+  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&enableTransition===null&&(enabled||!activeError);
   const canToggleDrag=canCommand&&busy===null&&(dragActive||(enabled===true&&!activeError));
+
+  useEffect(()=>{
+    if(enableTransition===null)return;
+    if(enabled===enableTransition){setEnableTransition(null);return;}
+    const timeout=window.setTimeout(()=>{
+      setEnableTransition(null);
+      setNotice({tone:"error",message:"RobotStatus did not confirm the enable-state change."});
+    },5000);
+    return ()=>window.clearTimeout(timeout);
+  },[enableTransition,enabled,setNotice]);
 
   useEffect(()=>{
     if(!dragTransition)return;
@@ -90,6 +101,24 @@ export function DiagnosticsPage(){
         tone:response?.res===0||response?.res===undefined?"success":"error",
         message:label+" request returned controller code "+String(response?.res??"unknown")
       });
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  };
+
+  const toggleEnable=async()=>{
+    const target=!enabled;
+    const command=target?"enable":"disable";
+    setBusy(command);setNotice(null);setEnableTransition(null);
+    try{
+      const response=await request("robot.command",{command});
+      if(response?.res!==undefined&&response.res!==0){
+        setNotice({tone:"error",message:(target?"Enable":"Disable")+" rejected by controller (code "+String(response.res)+")."});
+        return;
+      }
+      useRobotStore.getState().setCommand(command,response);
+      setEnableTransition(target);
+      setNotice({tone:"neutral",message:(target?"Enable":"Disable")+" request accepted; waiting for RobotStatus confirmation."});
     }catch(error){
       setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
     }finally{setBusy(null);}
@@ -186,9 +215,9 @@ export function DiagnosticsPage(){
           {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Play
         </Button>
         <div className="flex-1"/>
-        <Button variant={enabled?"outline":"default"} onClick={()=>runCommand(enabled?"disable":"enable",enabled?"Disable robot":"Enable robot")}
+        <Button variant={enabled?"outline":"default"} onClick={toggleEnable}
           disabled={!canToggleEnable}>
-          {busy==="disable"||busy==="enable"?<RefreshCw size={14} className="animate-spin"/>:enabled?<Pause size={14}/>:<Play size={14}/>} {enabled?"Disable robot":"Enable robot"}
+          {busy==="disable"||busy==="enable"||enableTransition!==null?<RefreshCw size={14} className="animate-spin"/>:enabled?<Pause size={14}/>:<Play size={14}/>} {enableTransition===true?"Enabling…":enableTransition===false?"Disabling…":enabled?"Disable robot":"Enable robot"}
         </Button>
         <Button variant="outline" onClick={toggleDrag}
           disabled={!canToggleDrag||dragTransition!==null}>
