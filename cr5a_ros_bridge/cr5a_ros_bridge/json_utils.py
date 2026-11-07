@@ -89,3 +89,12 @@ def finite_vector(values, length, field_name):
         finite_float(value, f"{field_name}[{index}]")
         for index, value in enumerate(values)
     ]
+
+
+def finite_quaternion(values, field_name):
+    """Validate a quaternion and normalize it to unit length."""
+    components = finite_vector(values, 4, field_name)
+    norm = math.hypot(*components)
+    if not math.isfinite(norm) or norm <= 1e-9:
+        raise ValueError(f"{field_name} must be a valid non-zero quaternion")
+    return [component / norm for component in components]
