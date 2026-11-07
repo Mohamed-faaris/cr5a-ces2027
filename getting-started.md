@@ -226,6 +226,14 @@ ls src/cr5a-ces2027
 
 The repository contains the CR5A packages directly; no separate `vcs import` step is required.
 
+Update the checkout before installing dependencies. This includes the ROS dependency-manifest fixes referenced below:
+
+~~~bash
+cd /root/cr5a_ws/src/cr5a-ces2027
+git pull origin main
+cd /root/cr5a_ws
+~~~
+
 The relevant package layout is:
 
 ~~~text
@@ -249,6 +257,13 @@ cr5a-ces2027/
 
 Run rosdep against the packages needed for the MoveIt demo, physical robot driver, and bridge. This deliberately leaves the Gazebo Classic package out of the core dependency install.
 
+The repository manifests have been corrected for ROS 2 Humble:
+- Removed the unused ROS 1 `message_generation` dependency from `dobot_bringup_v4`.
+- Removed the optional `warehouse_ros_mongo` dependency from `cr5_moveit`. Normal MoveIt planning-scene collision objects do not require MongoDB warehouse persistence.
+- Kept `ament_python` as the `cr5a_ros_bridge` package build type under `<export>`, but removed it as a `<buildtool_depend>`. It is a build-type identifier, not a rosdep key to install.
+
+If you previously cloned the repository before these fixes, run the `git pull` command in section 5 before continuing.
+
 ~~~bash
 cd /root/cr5a_ws
 
@@ -269,7 +284,9 @@ rosdep install \
   -r -y
 ~~~
 
-If rosdep reports that a key is not known, check the package name and update the rosdep database before installing a manually guessed package.
+The distro messages printed by `rosdep update` (for example, adding Jazzy/Kilted/Rolling rules or skipping end-of-life distributions) are informational. They do not mean that your Humble environment has changed: the install command explicitly selects `--rosdistro humble`.
+
+If rosdep reports an unresolved key or an APT package that cannot be located, do not guess a replacement package. Confirm that the checkout is up to date with `git pull origin main`, then inspect the package manifest that declares the key.
 
 ## 7. Build the CR5A workspace overlay
 
@@ -484,7 +501,9 @@ Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and 
 |---|---|
 | ROS_DISTRO is empty or wrong | Run source /opt/ros/humble/setup.bash in that terminal. |
 | Package cr5_moveit not found | Source /root/cr5a_ws/install/setup.bash after a successful build. |
-| rosdep cannot resolve packages | Run rosdep update, then rerun the dependency command. |
+| rosdep reports `message_generation`, `ament_python`, or `warehouse_ros_mongo` as unresolved | Pull the latest `main` branch in section 5, then rerun the dependency command. These obsolete/unneeded dependency declarations were removed from the manifests. |
+| rosdep prints distro messages about Iron/Jazzy/Kilted/Rolling | These are rosdep rule-cache status messages. The install command still targets Humble through `--rosdistro humble`. |
+| rosdep cannot resolve another key | Check the package manifest that declares it; do not install a guessed package name. Run `rosdep update` and retry after verifying the source checkout. |
 | RViz cannot open a display | Check DISPLAY, the X11 socket mount, and the host xhost permission. |
 | Driver cannot connect | Confirm controller IP, host network connectivity, Ethernet route, and IP_address. |
 | MoveIt has no current joint state | Check that the correct driver or fake-hardware demo is running and publishing joint states. |
