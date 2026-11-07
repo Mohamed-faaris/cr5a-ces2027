@@ -75,7 +75,7 @@ export function VisualizerPage(){
   },[jointNames.join("|"),actualJoints.join("|"),jointDirty]);
 
   useEffect(()=>{
-    if(plan?.status!=="SUCCEEDED"||!plannedJointSnapshot)return;
+    if(plan?.status!=="SUCCEEDED"||!plannedJointSnapshot||executionStatus==="EXECUTING")return;
     const current:Record<string,number>={};
     jointNames.forEach((name,index)=>{current[name]=actualJoints[index]??0;});
     const names=Object.keys(plannedJointSnapshot);
@@ -88,7 +88,7 @@ export function VisualizerPage(){
       setPlannedJointSnapshot(null);
       setNotice({tone:"neutral",message:"Robot joints changed after planning. The old plan was cleared; plan again."});
     }
-  },[actualJoints.join("|"),jointNames.join("|"),plan?.status,plannedJointSnapshot]);
+  },[actualJoints.join("|"),jointNames.join("|"),plan?.status,plannedJointSnapshot,executionStatus]);
 
   const canExecute=capabilities.motion_execution_enabled===true&&bridgeState==="connected"&&
     robotStatus?.is_connected===true&&robotStatus?.is_enable===true;
