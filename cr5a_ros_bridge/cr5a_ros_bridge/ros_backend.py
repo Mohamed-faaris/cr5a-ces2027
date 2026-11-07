@@ -37,9 +37,9 @@ class BridgeNode(Node):
         super().__init__("cr5a_ros_bridge")
         self.config = config
         self._lock = threading.RLock()
-        self._clients = {}
-        self._subscriptions = {}
-        self._publishers = {}
+        self._service_clients = {}
+        self._topic_subscriptions = {}
+        self._topic_publishers = {}
         self._topic_cache = {}
         self._topic_seq = {}
         self._events = {}
@@ -102,7 +102,7 @@ class BridgeNode(Node):
             return dict(value) if value else None
 
     def subscribe_topic(self, topic, type_name=None, qos_config=None):
-        if topic in self._subscriptions:
+        if topic in self._topic_subscriptions:
             return
         qos_config = qos_config or {}
         if not type_name:
@@ -143,7 +143,7 @@ class BridgeNode(Node):
                 self.emit(channel, payload)
             self.emit("topic:" + topic_name, payload)
 
-        self._subscriptions[topic] = self.create_subscription(
+        self._topic_subscriptions[topic] = self.create_subscription(
             msg_type, topic, callback, qos
         )
         self.get_logger().info(f"Auto-subscribed: {topic} [{type_name}]")
@@ -252,9 +252,9 @@ class BridgeNode(Node):
 
     def _client(self, service_name, service_type):
         key = (service_name, service_type)
-        if key not in self._clients:
-            self._clients[key] = self.create_client(service_type, service_name)
-        return self._clients[key]
+        if key not in self._service_clients:
+            self._service_clients[key] = self.create_client(service_type, service_name)
+        return self._service_clients[key]
 
     def call_service(self, service_name, service_type, request):
         client = self._client(service_name, service_type)
@@ -282,10 +282,10 @@ class BridgeNode(Node):
 
     def publish_topic(self, topic, type_name, payload):
         msg_type = get_message(type_name)
-        publisher = self._publishers.get((topic, type_name))
+        publisher = self._topic_publishers.get((topic, type_name))
         if publisher is None:
             publisher = self.create_publisher(msg_type, topic, 10)
-            self._publishers[(topic, type_name)] = publisher
+            self._topic_publishers[(topic, type_name)] = publisher
         message = msg_type()
         set_message_fields(message, payload or {})
         publisher.publish(message)

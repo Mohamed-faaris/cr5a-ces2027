@@ -1,7 +1,7 @@
 # CR5A demo stack
 # Run from the ROS 2 workspace root inside moveit-dev:
 #   tmux set-option -g mouse on
-#   tmuxp load .tmuxp/cr5a-demo.yaml
+#   tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 #
 # Windows:
 #   0 MoveIt demo (fake hardware)
@@ -36,7 +36,7 @@ windows:
   - window_name: frontend
     panes:
       - shell_command:
-          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh frontend bash -lc "cd cr5a_web && exec pnpm dev"'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh frontend bash -lc "cd src/cr5a-ces2027/cr5a_web && exec pnpm dev"'
 
   - window_name: monitor
     layout: even-horizontal

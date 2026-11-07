@@ -3,6 +3,7 @@ import copy
 import os
 import time
 from pathlib import Path
+from typing import Optional
 import uuid
 
 import yaml
@@ -374,7 +375,7 @@ def create_app(backend, config):
     }
 
     @app.post("/api/v1/robot/commands/{command}")
-    async def robot_command(command: str, payload: dict | None = None):
+    async def robot_command(command: str, payload: Optional[dict] = None):
         if not config.get("robot", {}).get("allow_commands", False):
             raise HTTPException(status_code=403, detail="Robot commands are disabled by bridge safety configuration")
         service_name = command_services.get(command)

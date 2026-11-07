@@ -1,0 +1,27 @@
+# Python bytecode and packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Node.js / pnpm
+node_modules/
+dist/
+.pnpm-store/
+*.tsbuildinfo
+
+# Workspace build and log output
+/build/
+/install/
+/log/
+/logs/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/

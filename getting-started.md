@@ -184,13 +184,22 @@ python3 -m venv /opt/tmuxp-venv
 ln -sf /opt/tmuxp-venv/bin/tmuxp /usr/local/bin/tmuxp
 ~~~
 
-Verify:
+Verify that the installed binary is on PATH:
 
 ~~~bash
+ln -sf /opt/tmuxp-venv/bin/tmuxp /usr/local/bin/tmuxp
+hash -r
+command -v tmuxp
 tmuxp --version
 ~~~
 
-The symlink makes `tmuxp` available in every new container terminal without changing PATH.
+The symlink makes `tmuxp` available in every new container terminal without changing PATH. If `tmuxp` still reports `command not found`, confirm that `/usr/local/bin` is on PATH and that the symlink points to an existing file:
+
+~~~bash
+echo "$PATH"
+ls -l /usr/local/bin/tmuxp
+/opt/tmuxp-venv/bin/tmuxp --version
+~~~
 
 
 ### Install Node.js and pnpm (for the React web console)
@@ -645,12 +654,54 @@ Inspect the newest session and follow a log:
 ~~~bash
 LOG_DIR="$(find /root/cr5a_ws/logs/tmux -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
 ls -lh "$LOG_DIR"
-tail -f "$LOG_DIR/hardware-driver.log"
+tail -f "$LOG_DIR/moveit-demo.log"
 ~~~
 
 Replace the filename with the pane you want to inspect, such as `moveit-demo.log` or `gazebo.log`. Logs remain after the tmux session exits. They are stored in the container workspace, so copy them to the host or a persistent volume if you need them after removing the container.
 
 The profiles use `.tmuxp/log-pane.sh` to attach tmux's pane-output pipe when each pane starts. If logging does not start, update the checkout with `git pull origin main` and confirm that this helper script exists.
+
+### If a window exits immediately
+
+tmuxp can create the session successfully while one pane command fails. Inspect the newest pane logs first:
+
+~~~bash
+LOG_DIR="$(find /root/cr5a_ws/logs/tmux -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+ls -lh "$LOG_DIR"
+tail -n 100 "$LOG_DIR/frontend.log"
+~~~
+
+Known first-run failures and fixes:
+
+- `frontend.log` contains `cd: cr5a_web: No such file or directory`: the profile is out of date. Pull the latest `main` branch and confirm the frontend pane runs `cd src/cr5a-ces2027/cr5a_web`. Then install the web dependencies once:
+
+  ~~~bash
+  cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
+  pnpm install
+  ~~~
+
+- `gazebo.log` contains `executable 'joint_state_relay.py' not found`: the installed relay is a symlink to a source file without execute permission. Pull the latest `main` branch, where the source file is committed as executable, or repair the mode and restart:
+
+  ~~~bash
+  chmod +x /root/cr5a_ws/src/cr5a-ces2027/dobot_rviz/dobot_rviz/joint_state_relay.py
+  test -x /root/cr5a_ws/install/dobot_rviz/lib/dobot_rviz/joint_state_relay.py
+  ~~~
+
+- `bridge.log` contains `AttributeError: 'dict' object has no attribute 'append'`: the bridge build is stale. Pull the latest `main` branch, rebuild the bridge, and source the overlay:
+
+  ~~~bash
+  cd /root/cr5a_ws
+  colcon build --symlink-install --packages-select cr5a_ros_bridge
+  source install/setup.bash
+  ~~~
+
+- `bridge.log` contains `Fields of type "<class 'types.UnionType'>" are not supported`: the bridge build is stale. Pull the latest `main` branch and rebuild it with the same command. Humble ships pydantic 1.x, so bridge API annotations must use `typing.Optional` instead of `X | None`.
+
+If the `cr5a-demo` session is left in a broken state, remove it before loading the profile again:
+
+~~~bash
+tmux kill-session -t cr5a-demo
+~~~
 
 Useful tmux controls:
 
@@ -725,8 +776,12 @@ Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and 
 
 | Symptom | Check |
 |---|---|
-| `tmuxp: command not found` | Complete the isolated tmuxp installation in section 3, then verify with `tmuxp --version`. |
+| `tmuxp: command not found` | Recreate the symlink with `ln -sf /opt/tmuxp-venv/bin/tmuxp /usr/local/bin/tmuxp`, run `hash -r`, then verify with `tmuxp --version`. |
 | No tmux pane log files appear | Pull the latest repository version and confirm `.tmuxp/log-pane.sh` exists. Check that the session was started with the updated tmuxp profile. |
+| Frontend pane exits with `cd: cr5a_web: No such file or directory` | Pull the latest `main` branch so the profile uses `src/cr5a-ces2027/cr5a_web`, then run `pnpm install` there. |
+| Gazebo pane exits with `executable 'joint_state_relay.py' not found` | Pull the latest `main` branch, or run `chmod +x src/cr5a-ces2027/dobot_rviz/dobot_rviz/joint_state_relay.py` and confirm `test -x install/dobot_rviz/lib/dobot_rviz/joint_state_relay.py`. |
+| Bridge pane exits with `'dict' object has no attribute 'append'` | Pull the latest `main` branch, rebuild with `colcon build --symlink-install --packages-select cr5a_ros_bridge`, and source `install/setup.bash`. The old build shadowed rclpy's internal publisher list. |
+| Bridge pane exits with `Fields of type "<class 'types.UnionType'>" are not supported` | Pull the latest `main` branch and rebuild `cr5a_ros_bridge`. Humble ships pydantic 1.x, which does not support `X \| None` annotations. |
 | `node`, `npm`, or `pnpm` command not found | Complete the Node.js and pnpm installation in section 3. |
 | ROS_DISTRO is empty or wrong | Run source /opt/ros/humble/setup.bash in that terminal. |
 | Package cr5_moveit not found | Source /root/cr5a_ws/install/setup.bash after a successful build. |
