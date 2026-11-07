@@ -1,36 +1,54 @@
-name: CR5A web build
+name: CR5A tests
 
 on:
-  push:
-    paths:
-      - "cr5a_web/**"
-      - ".github/workflows/cr5a-web.yml"
-  pull_request:
-    paths:
-      - "cr5a_web/**"
-      - ".github/workflows/cr5a-web.yml"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: Run ROS 2 bridge tests
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  web-build:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cr5a_web
+  ros-bridge-tests:
+    if: inputs.test == true
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up ROS 2 Humble
+        uses: ros-tooling/setup-ros@v0.7
         with:
-          version: 9.15.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile || pnpm install
-      - name: Build React application
-        run: pnpm build
-      - name: Check Python syntax
-        working-directory: .
-        run: python -m compileall -q cr5a_ros_bridge
+          required-ros-distributions: humble
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          sudo apt-get update
+          rosdep update
+          rosdep install --from-paths . --ignore-src -r -y
+
+      - name: Build bridge and dependencies
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build --symlink-install --packages-up-to cr5a_ros_bridge
+
+      - name: Run bridge API tests
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
+          colcon test --packages-select cr5a_ros_bridge --event-handlers console_direct+
+
+      - name: Report test results
+        if: always()
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon test-result --verbose
