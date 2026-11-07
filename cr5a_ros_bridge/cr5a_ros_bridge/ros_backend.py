@@ -28,7 +28,8 @@ def stamp():
 
 
 def message_dict(message, invalid_paths=None):
-    return json_safe(dict(message_to_ordereddict(message)), invalid_paths)
+    payload = dict(message_to_ordereddict(message))
+    return json_safe(payload, invalid_paths) if invalid_paths is not None else payload
 
 
 class BridgeNode(Node):
@@ -204,7 +205,9 @@ class BridgeNode(Node):
 
         def completed(done):
             try:
-                payload = message_dict(done.result())
+                invalid_paths = []
+                payload = message_dict(done.result(), invalid_paths)
+                self._warn_non_finite("robot.errors", invalid_paths)
                 if payload != self._last_error_payload:
                     self._last_error_payload = payload
                     self.emit("robot.errors", payload)
@@ -457,10 +460,13 @@ class BridgeNode(Node):
 
         def feedback(feedback_message):
             try:
+                invalid_paths = []
+                feedback_data = message_dict(feedback_message.feedback, invalid_paths)
+                self._warn_non_finite("motion.plan.feedback", invalid_paths)
                 self.emit("motion.plan", {
                     "plan_id": plan_id,
                     "status": "PLANNING",
-                    "feedback": message_dict(feedback_message.feedback),
+                    "feedback": feedback_data,
                 })
             except Exception:
                 pass
@@ -497,10 +503,13 @@ class BridgeNode(Node):
         goal.trajectory = trajectory
         def feedback(feedback_message):
             try:
+                invalid_paths = []
+                feedback_data = message_dict(feedback_message.feedback, invalid_paths)
+                self._warn_non_finite("motion.execution.feedback", invalid_paths)
                 self.emit("motion.execution", {
                     "plan_id": plan_id,
                     "status": "EXECUTING",
-                    "feedback": message_dict(feedback_message.feedback),
+                    "feedback": feedback_data,
                 })
             except Exception:
                 pass
