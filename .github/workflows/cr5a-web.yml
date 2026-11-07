@@ -1,0 +1,40 @@
+name: CR5A web build
+
+on:
+  push:
+    paths:
+      - "cr5a_web/**"
+      - "cr5a_ros_bridge/**"
+      - ".github/workflows/cr5a-web.yml"
+  pull_request:
+    paths:
+      - "cr5a_web/**"
+      - "cr5a_ros_bridge/**"
+      - ".github/workflows/cr5a-web.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  web-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cr5a_web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: cr5a_web/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Build React application
+        run: pnpm build
+      - name: Check Python syntax
+        working-directory: .
+        run: python -m compileall -q cr5a_ros_bridge
