@@ -69,7 +69,9 @@ def json_safe(value, invalid_paths=None, path="$"):
 
 
 def finite_float(value, field_name):
-    """Convert a numeric input to float, rejecting NaN and infinities."""
+    """Convert a numeric input to float, rejecting booleans and non-finite values."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a finite number")
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
