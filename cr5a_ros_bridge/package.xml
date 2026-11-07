@@ -5,7 +5,6 @@
   <description>Headless REST, WebSocket and rosbridge gateway for the Dobot CR5A ROS 2 Humble stack.</description>
   <maintainer email="mohamedfaaris.dev@gmail.com">Mohamed Faaris</maintainer>
   <license>MIT</license>
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>dobot_rviz</exec_depend>
   <exec_depend>cr5_moveit</exec_depend>
