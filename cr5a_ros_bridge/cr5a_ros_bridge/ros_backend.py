@@ -70,7 +70,10 @@ class BridgeNode(Node):
         }
         self._error_poll_busy = False
         self._last_error_payload = None
+        self._robot_mode_poll_busy = False
+        self._last_robot_mode_payload = None
         self._last_graph_signature = None
+        self.create_timer(1.0, self._poll_robot_mode)
         self.create_timer(2.0, self._poll_robot_errors)
         self.create_timer(5.0, self._poll_graph_changes)
         for entry in config.get("ros", {}).get("auto_subscribe", []):
@@ -144,6 +147,30 @@ class BridgeNode(Node):
             msg_type, topic, callback, qos
         )
         self.get_logger().info(f"Auto-subscribed: {topic} [{type_name}]")
+
+    def _poll_robot_mode(self):
+        if self._robot_mode_poll_busy:
+            return
+        self._robot_mode_poll_busy = True
+        try:
+            future = self.robot_service("RobotMode")
+        except Exception:
+            self._robot_mode_poll_busy = False
+            return
+
+        def completed(done):
+            try:
+                response = done.result()
+                payload = {"value": response.robot_return, "res": response.res}
+                if payload != self._last_robot_mode_payload:
+                    self._last_robot_mode_payload = payload
+                    self.emit("robot.mode", payload)
+            except Exception:
+                pass
+            finally:
+                self._robot_mode_poll_busy = False
+
+        future.add_done_callback(completed)
 
     def _poll_robot_errors(self):
         if self._error_poll_busy:

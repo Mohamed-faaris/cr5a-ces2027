@@ -65,7 +65,7 @@ The application WSS route is WebSocket-capable, but TLS is not terminated by thi
 - `POST /api/v1/ros/topics/publish`
 - `POST /api/v1/ros/services/call`
 
-Generic service calls are enabled by default for local development. They can invoke motion-capable driver services; keep the API loopback-only or enable authentication before allowing other clients.
+Generic service calls and topic publishing are disabled by default. Keep these safety gates disabled unless the API is protected and the effects of the requested ROS operation are understood.
 
 Topic publish body:
 
@@ -200,6 +200,7 @@ Connect to `ws://127.0.0.1:8000/ws/v1` and send:
   "op": "subscribe",
   "channels": [
     "robot.status",
+    "robot.mode",
     "robot.joints",
     "robot.tcp",
     "robot.errors",
@@ -213,6 +214,16 @@ Connect to `ws://127.0.0.1:8000/ws/v1` and send:
 ```
 
 Send `{"op":"unsubscribe","channels":["robot.joints"]}` to stop receiving a channel. Send `{"op":"ping"}` for a pong response. Arbitrary topic subscription is available with `topic:/fully/qualified/topic`; the topic type must be discoverable or be present in auto-subscribe configuration.
+
+The application WebSocket also supports request/response RPC. Each request has a caller-generated ID and receives a matching response:
+
+```json
+{"op":"request","id":"req_001","method":"robot.get_snapshot","params":{}}
+```
+
+Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel` and `motion.cancel_execution`.
+
+Mutating requests use the same safety gates as their REST equivalents. CR5 mesh assets are served under `/assets/dobot_rviz/meshes/`; the URDF, scene, live state, planning and commands are requested through the application WebSocket.
 
 ## Authentication
 

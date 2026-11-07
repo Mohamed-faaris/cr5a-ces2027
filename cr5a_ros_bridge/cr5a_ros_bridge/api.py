@@ -2,11 +2,13 @@ import asyncio
 import copy
 import os
 import time
+from pathlib import Path
 import uuid
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -111,6 +113,18 @@ def create_app(backend, config):
         version="0.1.0",
         description="Headless REST and WebSocket gateway for ROS 2 Humble, Dobot CR5A and MoveIt 2.",
     )
+    # Static meshes only; robot state and commands are carried over the application WebSocket.
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        mesh_root = Path(get_package_share_directory("dobot_rviz")) / "meshes"
+        app.mount(
+            "/assets/dobot_rviz/meshes",
+            StaticFiles(directory=str(mesh_root), check_dir=False),
+            name="dobot-rviz-meshes",
+        )
+    except Exception:
+        pass
+
     auth = config.get("auth", {})
     auth_enabled = bool(auth.get("enabled", False))
     token_name = auth.get("token_env", "CR5A_BRIDGE_TOKEN")
@@ -581,8 +595,7 @@ def create_app(backend, config):
         await apply_scene(scene)
         return {"id": object_id, "detached": True}
 
-    @app.post("/api/v1/motion-plans")
-    async def create_motion_plan(payload: dict):
+    async def create_motion_plan_impl(payload: dict):
         plan_id = "plan_" + uuid.uuid4().hex[:12]
         backend.plans[plan_id] = {
             "id": plan_id, "status": "PLANNING", "created_at": time.time(),
@@ -627,6 +640,10 @@ def create_app(backend, config):
         backend.emit("motion.plan", data)
         return data
 
+    @app.post("/api/v1/motion-plans")
+    async def create_motion_plan(payload: dict):
+        return await create_motion_plan_impl(payload)
+
     @app.get("/api/v1/motion-plans")
     async def list_motion_plans():
         return [
@@ -657,8 +674,7 @@ def create_app(backend, config):
             "trajectory_start": _dict(plan["trajectory_start"]),
         }
 
-    @app.post("/api/v1/motion-plans/{plan_id}/execute")
-    async def execute_motion_plan(plan_id: str):
+    async def execute_motion_plan_impl(plan_id: str):
         if not config.get("moveit", {}).get("allow_execution", False):
             raise HTTPException(status_code=403, detail="Physical motion execution is disabled by bridge safety configuration")
         plan = backend.plans.get(plan_id)
@@ -687,6 +703,10 @@ def create_app(backend, config):
         })
         return {"plan_id": plan_id, "status": state, "error_code": error_code}
 
+    @app.post("/api/v1/motion-plans/{plan_id}/execute")
+    async def execute_motion_plan(plan_id: str):
+        return await execute_motion_plan_impl(plan_id)
+
     @app.post("/api/v1/motion-plans/{plan_id}/cancel")
     async def cancel_motion_plan(plan_id: str):
         try:
@@ -705,6 +725,174 @@ def create_app(backend, config):
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    async def websocket_request(method: str, params: dict):
+        if method == "robot.get_snapshot":
+            robot_cfg = config.get("robot", {})
+            status = backend.topic_snapshot(robot_cfg.get(
+                "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
+            ))
+            joints = backend.topic_snapshot("/joint_states")
+            tcp = backend.topic_snapshot(robot_cfg.get(
+                "tcp_topic", "/dobot_msgs_v4/msg/ToolVectorActual"
+            ))
+            mode = backend.event_snapshot("robot.mode")
+            errors = backend.event_snapshot("robot.errors")
+            status_data = status.get("data", {}) if status else {}
+            return {
+                "connected": status_data.get("is_connected"),
+                "enabled": status_data.get("is_enable"),
+                "mode": mode.get("data") if mode else None,
+                "errors": errors.get("data") if errors else None,
+                "joints": joints.get("data") if joints else None,
+                "tcp": tcp.get("data") if tcp else None,
+                "timestamps": {
+                    "status": status.get("timestamp") if status else None,
+                    "joints": joints.get("timestamp") if joints else None,
+                    "tcp": tcp.get("timestamp") if tcp else None,
+                },
+            }
+
+        if method == "robot.get_model":
+            descriptions = {}
+            for node_name in ("/robot_state_publisher", "/move_group"):
+                try:
+                    result = await _read_parameters(
+                        backend, node_name,
+                        ["robot_description", "robot_description_semantic"],
+                        describe=False,
+                    )
+                    descriptions.update(result["parameters"])
+                except Exception:
+                    continue
+            urdf = descriptions.get("robot_description")
+            if not urdf:
+                raise HTTPException(
+                    status_code=503,
+                    detail="robot_description is unavailable; start robot_state_publisher or MoveGroup",
+                )
+            return {
+                "urdf": urdf,
+                "srdf": descriptions.get("robot_description_semantic"),
+                "mesh_prefix": "package://dobot_rviz/meshes/",
+                "mesh_base_url": "/assets/dobot_rviz/meshes/",
+                "base_frame": config.get("moveit", {}).get("base_frame", "dummy_link"),
+                "end_effector_link": config.get("moveit", {}).get("end_effector_link", "Link6"),
+                "group_name": config.get("moveit", {}).get("group_name", "cr5_group"),
+            }
+
+        if method == "robot.get_joint_limits":
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                path = Path(get_package_share_directory("cr5_moveit")) / "config" / "joint_limits.yaml"
+                with path.open("r", encoding="utf-8") as stream:
+                    return yaml.safe_load(stream) or {}
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Joint limits unavailable: {exc}") from exc
+
+        if method == "robot.get_errors":
+            result = await _await_ros(backend.robot_service("GetErrorID"), 2.0)
+            data = _dict(result)
+            backend.emit("robot.errors", data)
+            return data
+
+        if method == "robot.command":
+            if not config.get("robot", {}).get("allow_commands", False):
+                raise HTTPException(status_code=403, detail="Robot commands are disabled by bridge safety configuration")
+            command = str(params.get("command", ""))
+            service_name = command_services.get(command)
+            if service_name is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Unsupported command. Emergency stop is not exposed through this network API.",
+                )
+            result = await _await_ros(
+                backend.robot_service(service_name, params.get("payload", {}))
+            )
+            data = _dict(result)
+            backend.emit("robot.state", {"command": command, "response": data})
+            return data
+
+        if method == "robot.clear_errors":
+            if not config.get("robot", {}).get("allow_error_clear", False):
+                raise HTTPException(status_code=403, detail="Error clearing is disabled by bridge safety configuration")
+            result = await _await_ros(backend.robot_service("ClearError"))
+            data = _dict(result)
+            backend.emit("robot.state", {"command": "clear-errors", "response": data})
+            return data
+
+        if method == "moveit.get_scene":
+            return _dict(await get_scene())
+
+        if method in ("scene.add", "scene.update"):
+            object_id = params.get("id") if method == "scene.update" else None
+            try:
+                obj = collision_object(params, object_id)
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            scene = PlanningScene()
+            scene.is_diff = True
+            scene.world.collision_objects.append(obj)
+            await apply_scene(scene)
+            return {"id": obj.id, "updated": method == "scene.update"}
+
+        if method == "scene.remove":
+            object_id = params.get("id")
+            if not object_id:
+                raise HTTPException(status_code=422, detail="id is required")
+            obj = CollisionObject()
+            obj.id = str(object_id)
+            obj.operation = CollisionObject.REMOVE
+            scene = PlanningScene()
+            scene.is_diff = True
+            scene.world.collision_objects.append(obj)
+            await apply_scene(scene)
+            return {"id": object_id, "removed": True}
+
+        if method == "scene.clear":
+            current = await get_scene()
+            scene = PlanningScene()
+            scene.is_diff = True
+            for existing in current.world.collision_objects:
+                obj = CollisionObject()
+                obj.id = existing.id
+                obj.operation = CollisionObject.REMOVE
+                scene.world.collision_objects.append(obj)
+            await apply_scene(scene)
+            return {"removed_world_objects": len(scene.world.collision_objects)}
+
+        if method == "motion.plan":
+            return await create_motion_plan_impl(params)
+
+        if method == "motion.get_plan":
+            plan_id = params.get("plan_id")
+            plan = backend.plans.get(plan_id)
+            if plan is None:
+                raise HTTPException(status_code=404, detail="Plan not found")
+            result = {
+                key: value for key, value in plan.items()
+                if key not in ("trajectory", "trajectory_start")
+            }
+            if plan.get("trajectory") is not None:
+                result["trajectory"] = _dict(plan["trajectory"])
+                result["trajectory_start"] = _dict(plan["trajectory_start"])
+            return result
+
+        if method == "motion.execute":
+            return await execute_motion_plan_impl(str(params.get("plan_id", "")))
+
+        if method in ("motion.cancel", "motion.cancel_execution"):
+            plan_id = str(params.get("plan_id", ""))
+            key = "execute:" + plan_id if method == "motion.cancel_execution" else plan_id
+            if method == "motion.cancel_execution" and not config.get("moveit", {}).get("allow_execution", False):
+                raise HTTPException(status_code=403, detail="Motion execution control is disabled by bridge safety configuration")
+            try:
+                result = await _await_ros(backend.cancel_action(key), 3.0)
+                return _dict(result)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        raise HTTPException(status_code=404, detail=f"Unknown WebSocket request method: {method}")
+
     @app.websocket("/ws/v1")
     async def websocket_events(websocket: WebSocket):
         if auth_enabled and websocket.query_params.get("token") != token:
@@ -713,19 +901,46 @@ def create_app(backend, config):
         await websocket.accept()
         channels = set()
         sent_sequences = {}
-        await websocket.send_json({
+        send_lock = asyncio.Lock()
+
+        async def safe_send(payload):
+            async with send_lock:
+                await websocket.send_json(payload)
+
+        async def respond(request_id, method, params):
+            try:
+                data = await websocket_request(method, params)
+                response = {"op": "response", "id": request_id, "method": method, "ok": True, "data": data}
+            except HTTPException as exc:
+                response = {
+                    "op": "response", "id": request_id, "method": method, "ok": False,
+                    "error": {"code": exc.status_code, "message": str(exc.detail)},
+                }
+            except Exception as exc:
+                response = {
+                    "op": "response", "id": request_id, "method": method, "ok": False,
+                    "error": {"code": 500, "message": str(exc)},
+                }
+            try:
+                await safe_send(response)
+            except (WebSocketDisconnect, RuntimeError):
+                return
+
+        await safe_send({
             "op": "hello", "api_version": "v1",
+            "capabilities": ["request-response", "subscriptions"],
             "available_channels": [
-                "robot.status", "robot.joints", "robot.tcp", "robot.errors",
-                "robot.state", "moveit.scene", "motion.plan", "motion.execution",
-                "bridge.health", "ros.graph",
+                "robot.status", "robot.mode", "robot.joints", "robot.tcp",
+                "robot.errors", "robot.state", "moveit.scene", "motion.plan",
+                "motion.execution", "bridge.health", "ros.graph",
             ],
         })
         try:
             while True:
                 try:
                     incoming = await asyncio.wait_for(websocket.receive_json(), timeout=0.05)
-                    if incoming.get("op") == "subscribe":
+                    operation = incoming.get("op")
+                    if operation == "subscribe":
                         for channel in incoming.get("channels", []):
                             channels.add(channel)
                             if channel.startswith("topic:"):
@@ -733,21 +948,29 @@ def create_app(backend, config):
                                 try:
                                     backend.subscribe_topic(topic)
                                 except Exception as exc:
-                                    await websocket.send_json({
+                                    await safe_send({
                                         "op": "subscription_error", "channel": channel,
                                         "detail": str(exc),
                                     })
-                        await websocket.send_json({
-                            "op": "subscribed", "channels": sorted(channels)
-                        })
-                    elif incoming.get("op") == "unsubscribe":
+                        await safe_send({"op": "subscribed", "channels": sorted(channels)})
+                    elif operation == "unsubscribe":
                         for channel in incoming.get("channels", []):
                             channels.discard(channel)
-                        await websocket.send_json({
-                            "op": "unsubscribed", "channels": sorted(channels)
-                        })
-                    elif incoming.get("op") == "ping":
-                        await websocket.send_json({"op": "pong", "timestamp": time.time()})
+                        await safe_send({"op": "unsubscribed", "channels": sorted(channels)})
+                    elif operation == "ping":
+                        await safe_send({"op": "pong", "timestamp": time.time()})
+                    elif operation == "request":
+                        request_id = str(incoming.get("id") or uuid.uuid4().hex)
+                        method = str(incoming.get("method") or "")
+                        params = incoming.get("params") or {}
+                        if not method or not isinstance(params, dict):
+                            await safe_send({
+                                "op": "response", "id": request_id, "method": method,
+                                "ok": False,
+                                "error": {"code": 422, "message": "method and object params are required"},
+                            })
+                        else:
+                            asyncio.create_task(respond(request_id, method, params))
                 except asyncio.TimeoutError:
                     pass
 
@@ -759,7 +982,7 @@ def create_app(backend, config):
                     )
                     if event and event.get("sequence") != sent_sequences.get(channel):
                         sent_sequences[channel] = event["sequence"]
-                        await websocket.send_json({
+                        await safe_send({
                             "op": "event", "channel": channel,
                             "sequence": event["sequence"],
                             "timestamp": event["timestamp"], "data": event["data"],
