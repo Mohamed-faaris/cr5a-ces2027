@@ -195,7 +195,7 @@ class DobotSimulation(Node):
 
         status = RobotStatus()
         status.is_connected = connected
-        status.is_enable = self._enabled
+        status.is_enable = self._enabled and self._mode == 5
         self._status_pub.publish(status)
 
         if not connected:
