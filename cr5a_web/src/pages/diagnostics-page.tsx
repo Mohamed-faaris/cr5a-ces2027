@@ -40,8 +40,8 @@ export function DiagnosticsPage(){
   const paused=status.key==="paused";
   const enabled=robotStatus?.is_enable;
   const dragActive=/backdrive|\b6\b/i.test(robotMode?.value??"");
-  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&enableTransition===null&&(enabled||!activeError);
-  const canToggleDrag=canCommand&&busy===null&&(dragActive||(enabled===true&&!activeError));
+  const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&enableTransition===null&&dragTransition===null&&(enabled||!activeError);
+  const canToggleDrag=canCommand&&busy===null&&enableTransition===null&&(dragActive||(enabled===true&&!activeError));
 
   useEffect(()=>{
     if(enableTransition===null)return;
