@@ -12,6 +12,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.parameter import Parameter
 from rosidl_runtime_py.convert import message_to_ordereddict
 from rosidl_runtime_py.set_message import set_message_fields
+from .json_utils import finite_float, finite_vector, json_safe
 from rosidl_runtime_py.utilities import get_message, get_service
 
 from rcl_interfaces.srv import (
@@ -26,8 +27,8 @@ def stamp():
     return datetime.now(timezone.utc).isoformat()
 
 
-def message_dict(message):
-    return dict(message_to_ordereddict(message))
+def message_dict(message, invalid_paths=None):
+    return json_safe(dict(message_to_ordereddict(message)), invalid_paths)
 
 
 class BridgeNode(Node):
@@ -44,6 +45,7 @@ class BridgeNode(Node):
         self._topic_seq = {}
         self._events = {}
         self._event_seq = {}
+        self._non_finite_warnings = set()
         self.plans = {}
         self.action_handles = {}
 
@@ -82,13 +84,29 @@ class BridgeNode(Node):
             )
         self.emit("bridge.health", {"state": "ready", "started_at": stamp()})
 
+    def _warn_non_finite(self, source, paths):
+        if not paths:
+            return
+        with self._lock:
+            if source in self._non_finite_warnings:
+                return
+            self._non_finite_warnings.add(source)
+        examples = ", ".join(paths[:5])
+        suffix = " ..." if len(paths) > 5 else ""
+        self.get_logger().warning(
+            f"Non-finite numeric values received from {source}; exposed as null: {examples}{suffix}"
+        )
+
     def emit(self, channel, data):
+        invalid_paths = []
+        safe_data = json_safe(data, invalid_paths)
+        self._warn_non_finite("event:" + channel, invalid_paths)
         with self._lock:
             seq = self._event_seq.get(channel, 0) + 1
             self._event_seq[channel] = seq
             self._events[channel] = {
                 "channel": channel, "sequence": seq,
-                "timestamp": stamp(), "data": data,
+                "timestamp": stamp(), "data": safe_data,
             }
 
     def event_snapshot(self, channel):
@@ -130,7 +148,9 @@ class BridgeNode(Node):
         )
 
         def callback(message, topic_name=topic, ros_type=type_name):
-            payload = message_dict(message)
+            invalid_paths = []
+            payload = message_dict(message, invalid_paths)
+            self._warn_non_finite(topic_name, invalid_paths)
             with self._lock:
                 seq = self._topic_seq.get(topic_name, 0) + 1
                 self._topic_seq[topic_name] = seq
@@ -198,7 +218,7 @@ class BridgeNode(Node):
     def _poll_graph_changes(self):
         try:
             graph = self.graph()
-            signature = json.dumps(graph, sort_keys=True)
+            signature = json.dumps(graph, sort_keys=True, allow_nan=False)
             if signature != self._last_graph_signature:
                 self._last_graph_signature = signature
                 self.emit("ros.graph", graph)
@@ -326,46 +346,76 @@ class BridgeNode(Node):
         request = goal.request
         request.group_name = payload.get("group_name", moveit.get("group_name", "cr5_group"))
         request.num_planning_attempts = int(payload.get("num_planning_attempts", 5))
-        request.allowed_planning_time = float(payload.get("allowed_planning_time", 5.0))
-        request.max_velocity_scaling_factor = float(payload.get("max_velocity_scaling", 0.2))
-        request.max_acceleration_scaling_factor = float(payload.get("max_acceleration_scaling", 0.2))
-        request.planner_id = payload.get("planner_id", "")
+        if request.num_planning_attempts < 1:
+            raise ValueError("num_planning_attempts must be at least 1")
+        request.allowed_planning_time = finite_float(
+            payload.get("allowed_planning_time", 5.0), "allowed_planning_time"
+        )
+        if request.allowed_planning_time <= 0:
+            raise ValueError("allowed_planning_time must be greater than zero")
+        velocity_scaling = finite_float(
+            payload.get("max_velocity_scaling", 0.2), "max_velocity_scaling"
+        )
+        acceleration_scaling = finite_float(
+            payload.get("max_acceleration_scaling", 0.2), "max_acceleration_scaling"
+        )
+        if not 0 < velocity_scaling <= 1:
+            raise ValueError("max_velocity_scaling must be greater than 0 and at most 1")
+        if not 0 < acceleration_scaling <= 1:
+            raise ValueError("max_acceleration_scaling must be greater than 0 and at most 1")
+        request.max_velocity_scaling_factor = velocity_scaling
+        request.max_acceleration_scaling_factor = acceleration_scaling
+        request.planner_id = str(payload.get("planner_id", ""))
         constraints = Constraints()
 
         target = payload.get("target", {})
         target_type = target.get("type")
         if target_type == "joints":
             names = target.get("joint_names", [])
-            values = target.get("positions_rad", [])
-            if not names or len(names) != len(values):
-                raise ValueError("joint_names and positions_rad must have equal non-zero lengths")
+            if (
+                not isinstance(names, list) or not names
+                or any(not isinstance(name, str) or not name for name in names)
+                or len(set(names)) != len(names)
+            ):
+                raise ValueError("joint_names must be a non-empty list of unique joint names")
+            values = finite_vector(
+                target.get("positions_rad", []), len(names), "positions_rad"
+            )
+            tolerance = finite_float(target.get("tolerance_rad", 0.01), "tolerance_rad")
+            if tolerance <= 0:
+                raise ValueError("tolerance_rad must be greater than zero")
             for name, value in zip(names, values):
                 item = JointConstraint()
-                item.joint_name = str(name)
-                item.position = float(value)
-                item.tolerance_above = float(target.get("tolerance_rad", 0.01))
-                item.tolerance_below = float(target.get("tolerance_rad", 0.01))
+                item.joint_name = name
+                item.position = value
+                item.tolerance_above = tolerance
+                item.tolerance_below = tolerance
                 item.weight = 1.0
                 constraints.joint_constraints.append(item)
         elif target_type == "pose":
             frame = target.get("frame_id", moveit.get("base_frame", "dummy_link"))
             link = target.get("link_name", moveit.get("end_effector_link", "Link6"))
-            position = target.get("position_m")
-            orientation = target.get("orientation_xyzw")
-            if not position or len(position) != 3 or not orientation or len(orientation) != 4:
-                raise ValueError("pose target requires position_m[3] and orientation_xyzw[4]")
+            position = finite_vector(target.get("position_m"), 3, "position_m")
+            orientation = finite_vector(target.get("orientation_xyzw"), 4, "orientation_xyzw")
+            if sum(component * component for component in orientation) <= 1e-12:
+                raise ValueError("orientation_xyzw must be a non-zero quaternion")
+            position_tolerance = finite_float(
+                target.get("position_tolerance_m", 0.001), "position_tolerance_m"
+            )
+            if position_tolerance <= 0:
+                raise ValueError("position_tolerance_m must be greater than zero")
             stamped = PoseStamped()
             stamped.header.frame_id = frame
-            stamped.pose.position.x, stamped.pose.position.y, stamped.pose.position.z = map(float, position)
+            stamped.pose.position.x, stamped.pose.position.y, stamped.pose.position.z = position
             (
                 stamped.pose.orientation.x, stamped.pose.orientation.y,
                 stamped.pose.orientation.z, stamped.pose.orientation.w,
-            ) = map(float, orientation)
+            ) = orientation
 
             region = BoundingVolume()
             sphere = SolidPrimitive()
             sphere.type = SolidPrimitive.SPHERE
-            sphere.dimensions = [float(target.get("position_tolerance_m", 0.001))]
+            sphere.dimensions = [position_tolerance]
             region.primitives.append(sphere)
             region.primitive_poses.append(stamped.pose)
 
@@ -380,7 +430,11 @@ class BridgeNode(Node):
             orientation_constraint.header = stamped.header
             orientation_constraint.link_name = link
             orientation_constraint.orientation = stamped.pose.orientation
-            tolerance = float(target.get("orientation_tolerance_rad", 0.01))
+            tolerance = finite_float(
+                target.get("orientation_tolerance_rad", 0.01), "orientation_tolerance_rad"
+            )
+            if tolerance <= 0:
+                raise ValueError("orientation_tolerance_rad must be greater than zero")
             orientation_constraint.absolute_x_axis_tolerance = tolerance
             orientation_constraint.absolute_y_axis_tolerance = tolerance
             orientation_constraint.absolute_z_axis_tolerance = tolerance
