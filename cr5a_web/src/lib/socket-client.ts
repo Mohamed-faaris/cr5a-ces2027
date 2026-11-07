@@ -5,6 +5,8 @@ let socket:WebSocket|null=null;
 let reconnectTimer:number|undefined;
 let pingTimer:number|undefined;
 let requestSequence=0;
+let socketGeneration=0;
+let sceneRefreshTimer:number|undefined;
 const pending=new Map<string,PendingRequest>();
 let stopRequested=false;
 let retryCount=0;
@@ -37,21 +39,25 @@ function rejectPending(message:string){
   pending.forEach((item)=>{window.clearTimeout(item.timeout);item.reject(new Error(message));});
   pending.clear();
 }
-function handleEvent(channel:string,data:any){
+function handleEvent(channel:string,data:any,timestamp?:string){
   const store=useRobotStore.getState();
   switch(channel){
-    case "robot.status":store.setRobotStatus(data);break;
+    case "robot.status":store.setRobotStatus(data,timestamp);break;
     case "robot.mode":store.setRobotMode(data);break;
-    case "robot.joints":store.setJoints(data);break;
-    case "robot.tcp":store.setTcp(data);break;
+    case "robot.joints":store.setJoints(data,timestamp);break;
+    case "robot.tcp":store.setTcp(data,timestamp);break;
     case "robot.errors":store.setErrors(data);break;
     case "robot.state":if(data?.command)store.setCommand(data.command,data.response);break;
     case "motion.plan":store.setPlan({...(store.plan??{}),...data});break;
     case "motion.execution":store.setExecutionStatus(data?.status??null);break;
     case "moveit.scene":
       store.setSceneLoading(true);
-      void request("moveit.get_scene").then((scene)=>useRobotStore.getState().setScene(scene))
-        .catch((error)=>useRobotStore.getState().setSceneLoading(false,String(error)));
+      if(sceneRefreshTimer!==undefined)window.clearTimeout(sceneRefreshTimer);
+      sceneRefreshTimer=window.setTimeout(()=>{
+        sceneRefreshTimer=undefined;
+        void request("moveit.get_scene").then((scene)=>useRobotStore.getState().setScene(scene))
+          .catch((error)=>useRobotStore.getState().setSceneLoading(false,String(error)));
+      },120);
       break;
     default:break;
   }
@@ -104,7 +110,7 @@ export function startSocket(){
         window.clearTimeout(item.timeout);pending.delete(String(message.id));
         if(message.ok)item.resolve(message.data);
         else item.reject(new Error(message.error?.message||"WebSocket request failed"));
-      }else if(message.op==="event")handleEvent(message.channel,message.data);
+      }else if(message.op==="event")handleEvent(message.channel,message.data,message.timestamp);
     };
     socket.onerror=()=>useRobotStore.getState().setBridgeState("reconnecting","WebSocket connection error");
     socket.onclose=()=>{

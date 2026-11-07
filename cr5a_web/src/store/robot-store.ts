@@ -15,9 +15,9 @@ interface RobotStore {
   jointLimits: Record<string,any> | null; plan: MotionPlan | null; executionStatus: string | null;
   notice: {tone:"success"|"error"|"neutral";message:string} | null;
   setBridgeState:(value:BridgeState,error?:string|null)=>void;
-  setRobotStatus:(value:RobotStatusMessage)=>void; setRobotMode:(value:RobotModeMessage)=>void;
-  setErrors:(value:Record<string,unknown>|null)=>void; setJoints:(value:JointStateMessage)=>void;
-  setTcp:(value:TcpMessage)=>void; mergeSnapshot:(value:any)=>void;
+  setRobotStatus:(value:RobotStatusMessage,timestamp?:string)=>void; setRobotMode:(value:RobotModeMessage)=>void;
+  setErrors:(value:Record<string,unknown>|null)=>void; setJoints:(value:JointStateMessage,timestamp?:string)=>void;
+  setTcp:(value:TcpMessage,timestamp?:string)=>void; mergeSnapshot:(value:any)=>void;
   setScene:(value:PlanningScene|null)=>void; setSceneLoading:(value:boolean,error?:string|null)=>void;
   setModel:(value:RobotModel|null)=>void; setModelLoading:(value:boolean,error?:string|null)=>void;
   setJointLimits:(value:Record<string,any>)=>void; setPlan:(value:MotionPlan|null)=>void;
@@ -32,16 +32,16 @@ export const useRobotStore = create<RobotStore>((set)=>({
   scene:null,sceneLoading:false,sceneError:null,model:null,modelLoading:false,modelError:null,
   jointLimits:null,plan:null,executionStatus:null,notice:null,
   setBridgeState:(value,error=null)=>set({bridgeState:value,connectionError:error}),
-  setRobotStatus:(value)=>set({robotStatus:value}),
+  setRobotStatus:(value,timestamp)=>set((state)=>({robotStatus:value,timestamps:{...state.timestamps,status:timestamp??state.timestamps.status}})),
   setRobotMode:(value)=>set({robotMode:value}),
   setErrors:(value)=>set({errors:value}),
-  setJoints:(value)=>set((state)=>{
+  setJoints:(value,timestamp)=>set((state)=>{
     const previous=state.joints?.position??[];
     const next=value.position??[];
     const changed=previous.length===next.length && next.some((item,index)=>Math.abs(item-(previous[index]??item))>0.002);
-    return {joints:value,lastJointChangeAt:changed?Date.now():state.lastJointChangeAt};
+    return {joints:value,lastJointChangeAt:changed?Date.now():state.lastJointChangeAt,timestamps:{...state.timestamps,joints:timestamp??state.timestamps.joints}};
   }),
-  setTcp:(value)=>set({tcp:value}),
+  setTcp:(value,timestamp)=>set((state)=>({tcp:value,timestamps:{...state.timestamps,tcp:timestamp??state.timestamps.tcp}})),
   mergeSnapshot:(value)=>set((state)=>({
     robotStatus:{is_connected:value.connected,is_enable:value.enabled},
     robotMode:value.mode??state.robotMode,errors:value.errors??state.errors,

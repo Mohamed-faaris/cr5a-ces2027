@@ -29,6 +29,17 @@ function errorPresent(value: unknown): boolean {
     return numbers ? numbers.some((item) => Number(item) !== 0) : false;
   }
 }
+function extractRobotModeCode(value?: string): number | null {
+  if (!value) return null;
+  const text = String(value).trim();
+  const braced = text.match(/\{([^}]+)\}/);
+  const source = braced ? braced[1] : text;
+  const numbers = source.match(/-?[0-9]+/g);
+  if (!numbers?.length) return null;
+  const code = Number(numbers[numbers.length - 1]);
+  return Number.isFinite(code) ? code : null;
+}
+
 interface StatusInput {
   bridgeState: BridgeState; connected?: boolean; enabled?: boolean;
   mode?: RobotModeMessage | null; errors?: Record<string,unknown> | null;
@@ -41,8 +52,7 @@ export function deriveRobotStatus(input: StatusInput): RobotStatusInfo {
   }
   const payload = input.errors?.GetErrorID ?? input.errors?.robot_return ?? input.errors;
   const mode = String(input.mode?.value ?? "").toLowerCase();
-  const modeMatch = mode.match(/^\s*(-?\d+)/);
-  const modeCode = modeMatch ? Number(modeMatch[1]) : null;
+  const modeCode = extractRobotModeCode(mode);
 
   if (errorPresent(payload) || mode.includes("error") || modeCode === 9) return ROBOT_STATUS.error;
   if (input.connected === false) return ROBOT_STATUS.disconnected;
@@ -67,9 +77,8 @@ export function deriveRobotStatus(input: StatusInput): RobotStatusInfo {
 export function formatRobotMode(value?: string): string {
   if (!value) return "Unavailable";
   const trimmed = value.trim();
-  const match = trimmed.match(/^(-?\d+)/);
-  if (!match) return trimmed.length > 32 ? trimmed.slice(0, 32) + "…" : trimmed;
-  const code = Number(match[1]);
+  const code = extractRobotModeCode(trimmed);
+  if (code === null) return trimmed.length > 32 ? trimmed.slice(0, 32) + "…" : trimmed;
   const labels: Record<number, string> = {
     1: "Initializing", 2: "Brake open", 3: "Power off", 4: "Disabled",
     5: "Enabled / idle", 6: "Backdrive", 7: "Running",
