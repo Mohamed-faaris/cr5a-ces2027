@@ -15,6 +15,16 @@ fi
 session_name="$1"
 cr5_validate_session_name "$session_name"
 
+# Killing the session that owns this script would terminate the restart before
+# tmuxp can recreate it. Require an external terminal in that case.
+if [[ -n "${TMUX:-}" ]]; then
+  current_session="$(tmux display-message -p '#S' 2>/dev/null || true)"
+  if [[ "$current_session" == "$session_name" ]]; then
+    printf 'Run restart-session.sh from a terminal outside tmux session %s.\n' "$session_name" >&2
+    exit 1
+  fi
+fi
+
 command -v tmux >/dev/null 2>&1 || {
   printf 'tmux is not installed or not on PATH.\n' >&2
   exit 127
