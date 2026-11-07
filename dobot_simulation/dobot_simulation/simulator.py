@@ -262,7 +262,7 @@ class DobotSimulation(Node):
         del request
 
         if name == "RobotMode":
-            if not self._connected():
+            if not self._connected() and not self._errors:
                 self._mode = 1
             response.robot_return = str(self._mode)
             return self._set_result(response)
@@ -287,7 +287,7 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "PowerOn":
-            if not self._connected():
+            if not self._connected() or self._errors:
                 return self._set_result(response, -1)
             self._enabled = False
             self._paused = False
@@ -314,7 +314,7 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "StartDrag":
-            if not self._connected() or not self._enabled or self._errors:
+            if not self._connected() or not self._enabled or self._errors or self._mode == 7:
                 return self._set_result(response, -1)
             self._dragging = True
             self._paused = False
