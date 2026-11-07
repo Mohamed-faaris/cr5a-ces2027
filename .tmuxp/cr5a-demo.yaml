@@ -1,22 +1,52 @@
-# Run from the CR5A ROS 2 workspace root, inside the moveit-dev
-# Distrobox (Ubuntu 22.04 / ROS 2 Humble):
+# CR5A demo stack
+# Run from the ROS 2 workspace root inside moveit-dev:
+#   tmux set-option -g mouse on
 #   tmuxp load .tmuxp/cr5a-demo.yaml
 #
-# This profile starts MoveIt's fake-hardware demo. It does NOT start the
-# physical Dobot driver or the hardware-specific CR5A bridge.
+# Windows:
+#   0 MoveIt demo (fake hardware)
+#   1 Gazebo simulation
+#   2 CR5A API + rosbridge
+#   3 Web frontend
+#   4 ROS node/topic monitor
+#   5 Interactive ROS shell
+#
+# NOTE: MoveIt's demo.launch.py uses fake hardware. It is started separately
+# from Gazebo; this profile does not connect MoveIt controllers to Gazebo.
 
 session_name: cr5a-demo
 start_directory: ../../../
 windows:
-  - window_name: demo
-    layout: tiled
+  - window_name: moveit-demo
     focus: true
     panes:
       - shell_command:
           - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit demo.launch.py'
+
+  - window_name: gazebo
+    panes:
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 "ros2 node list 2>/dev/null"'
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_gazebo dobot_gazebo.launch.py'
+
+  - window_name: bridge
+    panes:
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 10 "ros2 topic list 2>/dev/null"'
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py'
+
+  - window_name: frontend
+    panes:
       - shell_command:
-          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && echo "Demo terminal ready. Run ROS 2 test commands here." && exec bash'
+          - bash -lc 'cd cr5a_web && exec pnpm dev'
+
+  - window_name: monitor
+    layout: even-horizontal
+    panes:
+      - shell_command:
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 3 "ros2 node list 2>/dev/null"'
+      - shell_command:
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 "ros2 topic list 2>/dev/null"'
+
+  - window_name: shell
+    panes:
+      - shell_command:
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash'
