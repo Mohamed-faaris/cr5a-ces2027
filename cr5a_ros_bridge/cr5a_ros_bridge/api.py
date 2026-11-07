@@ -56,8 +56,8 @@ class StrictJSONRoute(APIRoute):
         original_handler = super().get_route_handler()
 
         async def strict_handler(request):
-            content_type = request.headers.get("content-type", "").lower()
-            if "application/json" in content_type:
+            content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == "application/json" or content_type.endswith("+json"):
                 body = await request.body()
                 if body:
                     try:
