@@ -1,4 +1,4 @@
-# ROS 2 Humble CR5A bridge defaults.
+# Simulation-only bridge profile. Never use this profile with physical hardware.
 # The API and raw rosbridge are loopback-only. Put them behind an authenticated
 # TLS reverse proxy before exposing them to another machine.
 api:
