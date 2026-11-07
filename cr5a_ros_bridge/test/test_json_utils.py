@@ -4,7 +4,7 @@ import unittest
 from decimal import Decimal
 
 from cr5a_ros_bridge.json_utils import (
-    finite_float, finite_quaternion, finite_vector, json_safe,
+    finite_float, finite_quaternion, finite_vector, json_safe, strict_json_loads,
 )
 
 
@@ -57,6 +57,20 @@ class JSONSafeTests(unittest.TestCase):
 
         self.assertIsNone(json_safe(Scalar()))
         self.assertEqual(json_safe(Array()), [1.0, None])
+
+    def test_strict_json_decoder_rejects_non_standard_and_overflow_numbers(self):
+        for raw in (
+            '{"value":NaN}',
+            '{"value":Infinity}',
+            '{"value":-Infinity}',
+            '{"value":1e999}',
+            '{"nested":[0,-1e999]}',
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    strict_json_loads(raw)
+
+        self.assertEqual(strict_json_loads('{"value":1.25}'), {"value": 1.25})
 
     def test_finite_float_rejects_invalid_values(self):
         for value in (float("nan"), float("inf"), float("-inf"), True, None, "not-a-number"):
