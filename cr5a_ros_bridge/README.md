@@ -91,8 +91,10 @@ Generic service body:
 
 - `GET /api/v1/ros/parameters` — enumerate parameters on discoverable nodes.
 - `POST /api/v1/ros/parameters/get` — body: `{"node":"/move_group","names":["planning_pipelines"],"describe":true}`.
+- `POST /api/v1/ros/parameters/describe` — return parameter descriptors for selected or all parameters on one node.
 - `POST /api/v1/ros/parameters/set` — body: `{"node":"/move_group","parameters":{"some_parameter":true}}`; uses atomic set.
 - `GET /api/v1/ros/parameters/dump` — returns a YAML document in JSON.
+- `POST /api/v1/ros/parameters/load` — accept a YAML document or a `node` + `parameters` mapping. Updates are atomic per node, not globally atomic.
 
 Nodes that do not expose parameter services are returned with an `unavailable` reason. Parameter changes can be rejected by the target node.
 
