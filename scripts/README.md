@@ -18,6 +18,8 @@ Known profiles:
 Restart stops the existing session when it is running, then loads the matching
 tmuxp profile. If the session is not running, it simply loads that profile.
 The profile filename and its `session_name` field must match the supplied name.
+Run `restart-session.sh` from a terminal **outside** the session being restarted;
+killing the current tmux session would terminate the command running inside it.
 
 **Hardware safety:** stopping or restarting `cr5a-hardware` terminates the
 physical driver and MoveIt processes. The scripts require interactive
