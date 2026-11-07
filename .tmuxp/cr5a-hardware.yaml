@@ -2,8 +2,8 @@
 # Distrobox (Ubuntu 22.04 / ROS 2 Humble):
 #   tmuxp load .tmuxp/cr5a-hardware.yaml
 #
-# Set IP_address in this shell before loading to override param.json:
-#   export IP_address=192.168.1.6
+# The driver reads IP_address from its environment when provided;
+# otherwise it uses dobot_bringup_v4/config/param.json.
 #
 # This profile starts the physical Dobot driver. Do not load it together
 # with the demo profile.
