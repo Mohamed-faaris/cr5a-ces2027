@@ -85,7 +85,7 @@ export function DiagnosticsPage(){
       joints:joints?{
         source_topic:"/joint_states",unit:"rad",names,
         positions_rad:positions,
-        positions_degrees:positions.map((value)=>value*180/Math.PI),
+        positions_degrees:positions.map((value)=>typeof value==="number"&&Number.isFinite(value)?value*180/Math.PI:null),
         timestamp:timestamps.joints??null
       }:null,
       errors
