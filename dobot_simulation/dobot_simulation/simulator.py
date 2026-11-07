@@ -154,7 +154,10 @@ class DobotSimulation(Node):
         return True
 
     def _on_joint_state(self, message):
-        if len(message.name) != len(message.position):
+        if (
+            len(message.name) != len(message.position)
+            or len(set(message.name)) != len(message.name)
+        ):
             return
         if not self.JOINT_NAMES.issubset(set(message.name)):
             return
