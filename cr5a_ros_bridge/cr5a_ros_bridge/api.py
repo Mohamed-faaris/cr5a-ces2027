@@ -372,6 +372,8 @@ def create_app(backend, config):
         "resume": "Continue",
         "stop": "Stop",
         "reset": "ResetRobot",
+        "start-drag": "StartDrag",
+        "stop-drag": "StopDrag",
     }
 
     @app.post("/api/v1/robot/commands/{command}")
