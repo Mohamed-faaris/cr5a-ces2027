@@ -47,6 +47,18 @@ def _dict(message, invalid_paths=None):
     return json_safe(dict(message_to_ordereddict(message)), invalid_paths)
 
 
+def _validate_finite_json(value, field_name):
+    invalid_paths = []
+    json_safe(value, invalid_paths)
+    if invalid_paths:
+        examples = ", ".join(invalid_paths[:8])
+        suffix = " ..." if len(invalid_paths) > 8 else ""
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} contains non-finite numbers at {examples}{suffix}",
+        )
+
+
 async def _await_ros(future, timeout=5.0):
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
@@ -204,6 +216,7 @@ def create_app(backend, config):
         required = ("topic", "type", "message")
         if any(key not in payload for key in required):
             raise HTTPException(status_code=422, detail=f"Required fields: {required}")
+        _validate_finite_json(payload["message"], "message")
         try:
             return backend.publish_topic(
                 payload["topic"], payload["type"], payload["message"]
@@ -217,8 +230,10 @@ def create_app(backend, config):
             raise HTTPException(status_code=403, detail="Generic service calls are disabled")
         if not all(key in payload for key in ("service", "type")):
             raise HTTPException(status_code=422, detail="service and type are required")
+        request_payload = payload.get("request", {})
+        _validate_finite_json(request_payload, "request")
         future = backend.call_generic_service(
-            payload["service"], payload["type"], payload.get("request", {})
+            payload["service"], payload["type"], request_payload
         )
         response = await _await_ros(
             future, float(config.get("ros", {}).get("service_timeout_sec", 3.0))
@@ -272,6 +287,7 @@ def create_app(backend, config):
         values = payload.get("parameters")
         if not node_name or not isinstance(values, dict) or not values:
             raise HTTPException(status_code=422, detail="node and non-empty parameters object are required")
+        _validate_finite_json(values, "parameters")
         client = _parameter_client(
             backend, node_name, "set_parameters_atomically", SetParametersAtomically
         )
@@ -310,6 +326,11 @@ def create_app(backend, config):
                 results[node_name] = {"successful": False, "reason": "Expected a parameter mapping"}
                 continue
             values = {key: value for key, value in values.items() if not str(key).startswith("_")}
+            try:
+                _validate_finite_json(values, f"parameters for {node_name}")
+            except HTTPException as exc:
+                results[node_name] = {"successful": False, "reason": exc.detail}
+                continue
             if not values:
                 results[node_name] = {"successful": True, "reason": "No parameters to set"}
                 continue
@@ -407,7 +428,9 @@ def create_app(backend, config):
                 status_code=404,
                 detail="Unsupported command. Emergency stop is deliberately not exposed through this network API.",
             )
-        result = await _await_ros(backend.robot_service(service_name, payload or {}))
+        command_payload = payload or {}
+        _validate_finite_json(command_payload, "command payload")
+        result = await _await_ros(backend.robot_service(service_name, command_payload))
         data = _dict(result)
         backend.emit("robot.state", {"command": command, "response": data})
         return data
@@ -1105,6 +1128,18 @@ def create_app(backend, config):
                         })
                         continue
                     if not isinstance(incoming, dict):
+                        continue
+                    invalid_numeric_paths = []
+                    json_safe(incoming, invalid_numeric_paths)
+                    if invalid_numeric_paths:
+                        await safe_send({
+                            "op": "error",
+                            "error": {
+                                "code": 400,
+                                "message": "Non-finite numeric values are not allowed",
+                                "fields": invalid_numeric_paths[:8],
+                            },
+                        })
                         continue
                     operation = incoming.get("op")
                     if operation in ("subscribe", "unsubscribe"):
