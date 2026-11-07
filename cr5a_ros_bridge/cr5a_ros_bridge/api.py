@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import os
 import time
 from pathlib import Path
@@ -999,7 +1000,26 @@ def create_app(backend, config):
         try:
             while True:
                 try:
-                    incoming = await asyncio.wait_for(websocket.receive_json(), timeout=0.05)
+                    message = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                    # Inspect the raw ASGI message: some older Uvicorn/wsproto
+                    # combinations omit the optional disconnect code. Starlette's
+                    # receive_json() assumes that key exists and can raise KeyError.
+                    if message.get("type") == "websocket.disconnect":
+                        return
+                    if message.get("type") != "websocket.receive":
+                        continue
+                    raw_data = message.get("text")
+                    if raw_data is None:
+                        raw_data = (message.get("bytes") or b"").decode("utf-8")
+                    try:
+                        incoming = json.loads(raw_data)
+                    except (TypeError, ValueError, UnicodeDecodeError):
+                        await safe_send({
+                            "op": "error", "error": {"code": 400, "message": "Invalid JSON message"}
+                        })
+                        continue
+                    if not isinstance(incoming, dict):
+                        continue
                     operation = incoming.get("op")
                     if operation == "subscribe":
                         for channel in incoming.get("channels", []):
