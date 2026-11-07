@@ -3,13 +3,8 @@
 #   tmux set-option -g mouse on
 #   tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 #
-# Windows:
-#   0 MoveIt demo (fake hardware)
-#   1 Gazebo simulation
-#   2 CR5A API + rosbridge
-#   3 Web frontend
-#   4 ROS node/topic monitor
-#   5 Interactive ROS shell
+# Every operational window has a separate logged, interactive Humble shell pane.
+# Window 5 is retained as a full-size workspace shell.
 #
 # NOTE: MoveIt's demo.launch.py uses fake hardware. It is started separately
 # from Gazebo; this profile does not connect MoveIt controllers to Gazebo.
@@ -19,34 +14,48 @@ start_directory: ../../../
 windows:
   - window_name: moveit-demo
     focus: true
+    layout: even-horizontal
     panes:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh moveit-demo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit demo.launch.py"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-moveit-demo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
   - window_name: gazebo
+    layout: even-horizontal
     panes:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh gazebo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_gazebo dobot_gazebo.launch.py"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-gazebo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
   - window_name: bridge
+    layout: even-horizontal
     panes:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh bridge bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5a_ros_bridge bridge.launch.py"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-bridge bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
   - window_name: frontend
+    layout: even-horizontal
     panes:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh frontend bash -lc "cd src/cr5a-ces2027/cr5a_web && exec pnpm dev"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-frontend bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
   - window_name: monitor
-    layout: even-horizontal
+    layout: tiled
     panes:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh monitor-nodes bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 3 ros2 node list"'
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh monitor-topics bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 ros2 topic list"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-monitor bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
   - window_name: shell
     panes:
       - shell_command:
-          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash"'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
