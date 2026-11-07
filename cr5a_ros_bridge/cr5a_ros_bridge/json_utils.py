@@ -17,8 +17,16 @@ def json_safe(value, invalid_paths=None, path="$"):
     if value is None or isinstance(value, (str, bool, int)):
         return value
 
+    if isinstance(value, numbers.Integral):
+        return int(value)
+
     if isinstance(value, (float, Decimal, numbers.Real)):
-        number = float(value)
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            if invalid_paths is not None:
+                invalid_paths.append(path)
+            return None
         if not math.isfinite(number):
             if invalid_paths is not None:
                 invalid_paths.append(path)
