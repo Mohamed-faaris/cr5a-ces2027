@@ -284,6 +284,7 @@ cr5a-ces2027/
 ├── dobot_moveit/
 ├── dobot_rviz/
 ├── dobot_demo/
+├── dobot_simulation/       # MoveIt fake-hardware telemetry and dashboard services
 ├── servo_action/
 ├── dobot_gazebo/           # Optional Gazebo Classic integration
 ├── cr5a_ros_bridge/        # REST + WebSocket bridge
@@ -311,6 +312,7 @@ rosdep install \
     src/cr5a-ces2027/cra_description \
     src/cr5a-ces2027/dobot_bringup_v4 \
     src/cr5a-ces2027/dobot_demo \
+    src/cr5a-ces2027/dobot_simulation \
     src/cr5a-ces2027/dobot_kinematics_plugin \
     src/cr5a-ces2027/dobot_moveit \
     src/cr5a-ces2027/dobot_msgs_v4 \
@@ -490,7 +492,9 @@ source /root/cr5a_ws/install/setup.bash
 ros2 launch cr5_moveit demo.launch.py
 ~~~
 
-The repository's CR5 URDF configuration uses mock_components/GenericSystem for this demo. MoveIt and RViz should start with a simulated joint state. You can test planning without commanding the real robot.
+The repository's CR5 URDF configuration uses `mock_components/GenericSystem`. The launch also starts `dobot_simulation`, which mirrors the physical Dobot driver's telemetry and dashboard-service interfaces. It publishes `RobotStatus`, `RobotMode`, error responses, and `ToolVectorActual`; simulated TCP values are calculated from the `dummy_link` to `Link6` TF transform. No physical controller connection is used.
+
+The simulated robot starts disabled. Use Diagnostics → Enable robot before testing MoveIt execution. Stop, pause, resume, enable/disable, drag-mode, and error-clear commands are handled by the simulator. Pause cancels an active fake trajectory; Continue clears the paused state but does not replay that trajectory, so create a new plan. Drag mode changes state only; it does not model gravity or hand-guiding.
 
 Useful checks from another terminal:
 
@@ -501,6 +505,9 @@ source /root/cr5a_ws/install/setup.bash
 ros2 node list
 ros2 topic list
 ros2 action list
+ros2 topic info -v /dobot_msgs_v4/msg/RobotStatus
+ros2 topic info -v /dobot_msgs_v4/msg/ToolVectorActual
+ros2 service list | grep /dobot_bringup_ros2/srv/RobotMode
 ~~~
 
 Stop the launch with Ctrl+C.
@@ -608,13 +615,12 @@ The bridge's `main.py` pins Uvicorn to `ws="wsproto"`. Rebuilding is required af
 
 ## 10. Run the complete demo stack with tmuxp
 
-The demo profile opens each part of the development stack in its own tmux window:
+The demo profile opens each part of the development stack in its own tmux window. Its bridge uses a simulation-only configuration that enables commands and MoveIt execution for fake hardware; this does not change the hardware profile's safety defaults.
 
 | Window | What it starts |
 |---|---|
-| `moveit-demo` | MoveIt fake-hardware demo and RViz |
-| `gazebo` | Gazebo Classic CR5 simulation |
-| `bridge` | CR5A REST/WebSocket bridge and rosbridge |
+| `moveit-demo` | MoveIt fake-hardware demo, RViz, and Dobot simulation adapter |
+| `bridge` | CR5A REST/WebSocket bridge (simulation profile) and rosbridge |
 | `frontend` | React/Vite web console |
 | `monitor` | ROS node and topic monitors |
 | `shell` | Interactive ROS 2 terminal |
@@ -647,7 +653,7 @@ cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
 pnpm install
 ~~~
 
-The demo profile also starts Gazebo Classic. Install and build its optional dependencies as described in section 11 before using the complete profile.
+The demo profile intentionally does not start Gazebo. The current Gazebo launch is a separate model/state-publisher path and is not connected to MoveIt fake-controller execution.
 
 ### Start the full demo stack
 
@@ -658,7 +664,7 @@ cd /root/cr5a_ws
 tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 ~~~
 
-The tmux session is named `cr5a-demo`. Click the window names in the bottom status bar to switch between MoveIt, Gazebo, bridge, frontend, monitor, and shell.
+The tmux session is named `cr5a-demo`. Click the window names in the bottom status bar to switch between MoveIt, bridge, frontend, monitor, and shell.
 
 ### Automatic session logs
 
@@ -668,7 +674,7 @@ Both tmuxp profiles automatically capture each pane's terminal output. Every new
 /root/cr5a_ws/logs/tmux/YYYYMMDD-HHMMSS/
 ~~~
 
-The demo profile creates separate files for MoveIt, Gazebo, bridge, frontend, both monitor panes, and the interactive shell. The hardware profile creates separate files for the driver, MoveIt, bridge, and node monitor.
+The demo profile creates separate files for MoveIt, bridge, frontend, both monitor panes, and the interactive shell. The hardware profile creates separate files for the driver, MoveIt, bridge, and node monitor.
 
 List saved sessions:
 
@@ -684,7 +690,7 @@ ls -lh "$LOG_DIR"
 tail -f "$LOG_DIR/moveit-demo.log"
 ~~~
 
-Replace the filename with the pane you want to inspect, such as `moveit-demo.log` or `gazebo.log`. Logs remain after the tmux session exits. They are stored in the container workspace, so copy them to the host or a persistent volume if you need them after removing the container.
+Replace the filename with the pane you want to inspect, such as `moveit-demo.log` or `bridge.log`. Logs remain after the tmux session exits. They are stored in the container workspace, so copy them to the host or a persistent volume if you need them after removing the container.
 
 The profiles use `.tmuxp/log-pane.sh` to attach tmux's pane-output pipe when each pane starts. If logging does not start, update the checkout with `git pull origin main` and confirm that this helper script exists.
 
@@ -705,13 +711,6 @@ Known first-run failures and fixes:
   ~~~bash
   cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
   pnpm install
-  ~~~
-
-- `gazebo.log` contains `executable 'joint_state_relay.py' not found`: the installed relay is a symlink to a source file without execute permission. Pull the latest `main` branch, where the source file is committed as executable, or repair the mode and restart:
-
-  ~~~bash
-  chmod +x /root/cr5a_ws/src/cr5a-ces2027/dobot_rviz/dobot_rviz/joint_state_relay.py
-  test -x /root/cr5a_ws/install/dobot_rviz/lib/dobot_rviz/joint_state_relay.py
   ~~~
 
 - `bridge.log` contains `AttributeError: 'dict' object has no attribute 'append'`: the bridge build is stale. Pull the latest `main` branch, rebuild the bridge, and source the overlay:
@@ -744,8 +743,7 @@ Useful tmux controls:
 
 The frontend is served at http://127.0.0.1:5173. The bridge API is at http://127.0.0.1:8000 and its application WebSocket is at ws://127.0.0.1:8000/ws/v1.
 
-**Important simulation distinction:** `cr5_moveit demo.launch.py` starts MoveIt with fake hardware. The `dobot_gazebo` launch starts Gazebo separately. This profile opens both, but does not connect MoveIt's fake controller to Gazebo's simulated robot. Do not interpret the two windows as a single MoveIt-controlled Gazebo simulation.
-To stop the stack, use `Ctrl+C` in each running launch window, then exit the tmux session. Do not use this demo profile alongside the physical hardware profile.
+**Simulation contract:** `cr5_moveit demo.launch.py` starts fake ros2_control hardware plus the `dobot_simulation` adapter. The adapter presents the same status, TCP, mode, and diagnostic service interfaces as the physical driver so the console behaves consistently. The application header remains explicitly marked `SIMULATION`. Do not run `dobot_gazebo` or the physical driver in this ROS domain. To stop the stack, use `Ctrl+C` in each running launch window, then exit the tmux session. Do not use this demo profile alongside the physical hardware profile.
 
 ### Physical hardware profile
 
@@ -762,7 +760,7 @@ Stop the active demo stack before starting the hardware profile. Verify the cont
 
 ## 11. Optional: build the Gazebo Classic package
 
-The repository's dobot_gazebo package depends on Gazebo Classic and gazebo_ros2_control. These are not required for the MoveIt fake-hardware demo or the physical CR5A workflow above.
+The repository's `dobot_gazebo` package depends on Gazebo Classic and gazebo_ros2_control. It is an independent legacy simulator path and is not integrated with MoveIt fake-hardware execution. Do not run it in the same ROS domain as `cr5_moveit demo.launch.py` because it creates a second robot TF tree.
 
 Only install these dependencies if you specifically need the legacy Gazebo Classic launch files:
 
@@ -795,7 +793,7 @@ cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
 pnpm install
 pnpm dev
 ~~~
-Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and bridge first. The frontend connects to the bridge's /ws/v1 endpoint.
+Open http://127.0.0.1:5173 in a browser. For the fake-hardware workflow, start the `cr5-demo` tmux profile. For physical operation, use the separate hardware profile. The frontend connects to the bridge's `/ws/v1` endpoint.
 
 ## Troubleshooting checks
 
