@@ -177,7 +177,6 @@ apt-get install -y \
 ~~~
 
 Install tmuxp in an isolated Python virtual environment. This works with the older pip version shipped in the Humble container and avoids installing Python packages into Ubuntu's system Python:
-
 ~~~bash
 python3 -m venv /opt/tmuxp-venv
 /opt/tmuxp-venv/bin/pip install tmuxp
@@ -231,10 +230,11 @@ apt-get install -y \
   python3-yaml \
   python3-fastapi \
   python3-uvicorn \
+  python3-wsproto \
   python3-websockets
 ~~~
 
-Most package dependencies are resolved from the repository's package.xml files in the next step. The explicit packages above cover the container tooling and important runtime components used by the CR5A configuration.
+Most package dependencies are also declared in the repository's package.xml files and are resolved in section 6. The bridge installs both `python3-wsproto` and `python3-websockets`: the custom FastAPI/Uvicorn API explicitly selects Uvicorn's `wsproto` backend, avoiding older `websockets` releases that pass the removed `loop=` argument to `asyncio.Lock()` on Python 3.10. Do not patch `asyncio` or files under `/usr/lib/python3/dist-packages`.
 
 ## 4. Initialize rosdep
 
@@ -357,8 +357,7 @@ source /root/cr5a_ws/install/setup.bash
 
 Configure the container user's `/root/.bashrc` once. This gives every new interactive Bash terminal:
 
-- A readable colored root prompt: red username, magenta hostname, cyan working directory.
-- ROS 2 Humble and the workspace overlay automatically sourced.
+- A readable colored root prompt: red username, magenta hostname, cyan working directory.- ROS 2 Humble and the workspace overlay automatically sourced.
 - CR5A controller defaults.
 - Useful navigation, listing, grep, ROS and colcon shortcuts.
 - A larger, cleaner command history.
@@ -537,8 +536,7 @@ In terminal 1:
 source /opt/ros/humble/setup.bash
 source /root/cr5a_ws/install/setup.bash
 
-ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py
-~~~
+ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py~~~
 
 ### 9.3 Start MoveIt for the robot
 
@@ -570,6 +568,38 @@ The custom bridge is available at:
 - Application WebSocket: ws://127.0.0.1:8000/ws/v1
 
 The React console uses the custom /ws/v1 WebSocket. The optional standard rosbridge WebSocket is not needed for this frontend workflow.
+
+### Rebuild the bridge after pulling changes (inside the running container)
+
+These commands are run **inside the existing Humble container**. Do not run `docker` or `docker compose` commands from this shell.
+
+~~~bash
+cd /root/cr5a_ws/src/cr5a-ces2027
+git pull origin main
+
+apt-get update
+apt-get install -y python3-wsproto
+
+cd /root/cr5a_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select cr5a_ros_bridge
+source install/setup.bash
+~~~
+
+Stop the old bridge process with `Ctrl+C`, then start it again:
+
+~~~bash
+ros2 launch cr5a_ros_bridge bridge.launch.py start_rosbridge:=false
+~~~
+
+From another shell inside the container, check the API and selected WebSocket backend dependency:
+
+~~~bash
+curl --fail --silent http://127.0.0.1:8000/health
+python3 -c "import wsproto, uvicorn; print('wsproto', wsproto.__version__, '| uvicorn', uvicorn.__version__)"
+~~~
+
+The bridge's `main.py` pins Uvicorn to `ws=\"wsproto\"`. Rebuilding is required after pulling that source change; merely installing `python3-wsproto` does not change an already-running Uvicorn process.
 
 ### Hardware safety notes
 
@@ -718,7 +748,6 @@ Useful tmux controls:
 The frontend is served at http://127.0.0.1:5173. The bridge API is at http://127.0.0.1:8000 and its application WebSocket is at ws://127.0.0.1:8000/ws/v1.
 
 **Important simulation distinction:** `cr5_moveit demo.launch.py` starts MoveIt with fake hardware. The `dobot_gazebo` launch starts Gazebo separately. This profile opens both, but does not connect MoveIt's fake controller to Gazebo's simulated robot. Do not interpret the two windows as a single MoveIt-controlled Gazebo simulation.
-
 To stop the stack, use `Ctrl+C` in each running launch window, then exit the tmux session. Do not use this demo profile alongside the physical hardware profile.
 
 ### Physical hardware profile
@@ -782,6 +811,7 @@ Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and 
 | Gazebo pane exits with `executable 'joint_state_relay.py' not found` | Pull the latest `main` branch, or run `chmod +x src/cr5a-ces2027/dobot_rviz/dobot_rviz/joint_state_relay.py` and confirm `test -x install/dobot_rviz/lib/dobot_rviz/joint_state_relay.py`. |
 | Bridge pane exits with `'dict' object has no attribute 'append'` | Pull the latest `main` branch, rebuild with `colcon build --symlink-install --packages-select cr5a_ros_bridge`, and source `install/setup.bash`. The old build shadowed rclpy's internal publisher list. |
 | Bridge pane exits with `Fields of type "<class 'types.UnionType'>" are not supported` | Pull the latest `main` branch and rebuild `cr5a_ros_bridge`. Humble ships pydantic 1.x, which does not support `X \| None` annotations. |
+| Bridge WebSocket crashes with `TypeError: As of 3.10, the *loop* parameter was removed from Lock()` | Pull the latest `main`, install `python3-wsproto`, rebuild `cr5a_ros_bridge`, and restart it. The current bridge pins Uvicorn to `wsproto`; follow the inside-container commands in section 9.4. Do not modify Python `asyncio` or system `websockets` files. |
 | `node`, `npm`, or `pnpm` command not found | Complete the Node.js and pnpm installation in section 3. |
 | ROS_DISTRO is empty or wrong | Run source /opt/ros/humble/setup.bash in that terminal. |
 | Package cr5_moveit not found | Source /root/cr5a_ws/install/setup.bash after a successful build. |
