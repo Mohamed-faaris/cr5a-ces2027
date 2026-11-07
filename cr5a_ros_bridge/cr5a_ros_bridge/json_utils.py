@@ -76,6 +76,19 @@ def json_safe(value, invalid_paths=None, path="$"):
     return value
 
 
+def strict_json_loads(raw):
+    """Parse standards-compliant JSON and reject all non-finite numeric literals."""
+    import json
+
+    def reject_constant(token):
+        raise ValueError(f"Non-standard JSON numeric constant: {token}")
+
+    def parse_float(token):
+        return finite_float(token, "JSON number")
+
+    return json.loads(raw, parse_constant=reject_constant, parse_float=parse_float)
+
+
 def finite_float(value, field_name):
     """Convert a numeric input to float, rejecting booleans and non-finite values."""
     if isinstance(value, bool):
