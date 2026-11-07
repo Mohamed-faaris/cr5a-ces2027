@@ -417,6 +417,7 @@ def create_app(backend, config):
             "joints": joints["data"] if joints else None,
             "tcp": tcp["data"] if tcp else None,
             "last_status_update": status.get("timestamp") if status else None,
+            "simulation": bool(robot_cfg.get("simulation", False)),
         }
 
     @app.get("/api/v1/robot/errors")
@@ -954,6 +955,7 @@ def create_app(backend, config):
                     "joints": joints.get("timestamp") if joints else None,
                     "tcp": tcp.get("timestamp") if tcp else None,
                 },
+                "simulation": bool(robot_cfg.get("simulation", False)),
                 "capabilities": {
                     "robot_commands_enabled": bool(config.get("robot", {}).get("allow_commands", False)),
                     "error_clear_enabled": bool(config.get("robot", {}).get("allow_error_clear", False)),
