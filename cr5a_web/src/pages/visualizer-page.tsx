@@ -340,6 +340,7 @@ export function VisualizerPage(){
                     </div>;
                   })}
                   {!jointNames.length&&<div className="text-xs text-zinc-400">Waiting for joint state messages.</div>}
+                  {jointNames.length>0&&!actualJointsValid&&<div className="text-xs text-amber-700">One or more joint readings are missing or invalid. Planning is disabled until all current joint positions are finite.</div>}
                 </div>
                 <Button className="mt-4 w-full" onClick={planJoints}
                   disabled={busy!==null||!model||!actualJointsValid||jointNames.some((name)=>!bounds[name])}>
