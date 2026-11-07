@@ -162,6 +162,8 @@ def create_app(backend, config):
 
     @app.post("/api/v1/ros/topics/publish")
     async def publish_topic(payload: dict):
+        if not config.get("ros", {}).get("topic_publish_enabled", False):
+            raise HTTPException(status_code=403, detail="Topic publishing is disabled by bridge safety configuration")
         required = ("topic", "type", "message")
         if any(key not in payload for key in required):
             raise HTTPException(status_code=422, detail=f"Required fields: {required}")
@@ -217,6 +219,16 @@ def create_app(backend, config):
             backend, node_name, payload.get("names"), payload.get("describe", True)
         )
 
+    @app.post("/api/v1/ros/parameters/describe")
+    async def describe_node_parameters(payload: dict):
+        node_name = payload.get("node")
+        if not node_name:
+            raise HTTPException(status_code=422, detail="node is required")
+        result = await _read_parameters(
+            backend, node_name, payload.get("names"), describe=True
+        )
+        return {"node": node_name, "descriptors": result["descriptors"]}
+
     @app.post("/api/v1/ros/parameters/set")
     async def set_node_parameters(payload: dict):
         node_name = payload.get("node")
@@ -238,6 +250,51 @@ def create_app(backend, config):
             backend.call_service(client.service_name, SetParametersAtomically, request)
         )
         return {"successful": result.result.successful, "reason": result.result.reason}
+
+    @app.post("/api/v1/ros/parameters/load")
+    async def load_parameters(payload: dict):
+        document = payload.get("yaml")
+        if document is not None:
+            try:
+                loaded = yaml.safe_load(document) or {}
+            except yaml.YAMLError as exc:
+                raise HTTPException(status_code=422, detail=f"Invalid YAML: {exc}") from exc
+        elif payload.get("node") and isinstance(payload.get("parameters"), dict):
+            loaded = {payload["node"]: payload["parameters"]}
+        else:
+            loaded = payload.get("nodes", payload)
+
+        if not isinstance(loaded, dict) or not loaded:
+            raise HTTPException(status_code=422, detail="Provide yaml, node+parameters, or a nodes mapping")
+
+        results = {}
+        for node_name, values in loaded.items():
+            if not isinstance(values, dict):
+                results[node_name] = {"successful": False, "reason": "Expected a parameter mapping"}
+                continue
+            values = {key: value for key, value in values.items() if not str(key).startswith("_")}
+            if not values:
+                results[node_name] = {"successful": True, "reason": "No parameters to set"}
+                continue
+            client = _parameter_client(
+                backend, node_name, "set_parameters_atomically", SetParametersAtomically
+            )
+            request = SetParametersAtomically.Request()
+            try:
+                request.parameters = [
+                    Parameter(name=name, value=value).to_parameter_msg()
+                    for name, value in values.items()
+                ]
+                result = await _await_ros(
+                    backend.call_service(client.service_name, SetParametersAtomically, request)
+                )
+                results[node_name] = {
+                    "successful": result.result.successful,
+                    "reason": result.result.reason,
+                }
+            except Exception as exc:
+                results[node_name] = {"successful": False, "reason": str(exc)}
+        return {"nodes": results, "atomicity": "per-node; not globally atomic"}
 
     @app.get("/api/v1/ros/parameters/dump")
     async def dump_parameters():
@@ -286,6 +343,8 @@ def create_app(backend, config):
 
     @app.post("/api/v1/robot/errors/clear")
     async def clear_robot_errors():
+        if not config.get("robot", {}).get("allow_error_clear", False):
+            raise HTTPException(status_code=403, detail="Error clearing is disabled by bridge safety configuration")
         result = await _await_ros(backend.robot_service("ClearError"))
         return _dict(result)
 
@@ -301,6 +360,8 @@ def create_app(backend, config):
 
     @app.post("/api/v1/robot/commands/{command}")
     async def robot_command(command: str, payload: dict | None = None):
+        if not config.get("robot", {}).get("allow_commands", False):
+            raise HTTPException(status_code=403, detail="Robot commands are disabled by bridge safety configuration")
         service_name = command_services.get(command)
         if service_name is None:
             raise HTTPException(
@@ -598,6 +659,8 @@ def create_app(backend, config):
 
     @app.post("/api/v1/motion-plans/{plan_id}/execute")
     async def execute_motion_plan(plan_id: str):
+        if not config.get("moveit", {}).get("allow_execution", False):
+            raise HTTPException(status_code=403, detail="Physical motion execution is disabled by bridge safety configuration")
         plan = backend.plans.get(plan_id)
         if plan is None or plan.get("status") != "SUCCEEDED":
             raise HTTPException(status_code=409, detail="Only a successful stored plan can be executed")
@@ -634,6 +697,8 @@ def create_app(backend, config):
 
     @app.post("/api/v1/motion-plans/{plan_id}/cancel-execution")
     async def cancel_motion_execution(plan_id: str):
+        if not config.get("moveit", {}).get("allow_execution", False):
+            raise HTTPException(status_code=403, detail="Motion execution control is disabled by bridge safety configuration")
         try:
             result = await _await_ros(backend.cancel_action("execute:" + plan_id), 3.0)
             return _dict(result)
