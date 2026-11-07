@@ -11,7 +11,7 @@ import {useRobotStore} from "@/store/robot-store";
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
 
-function planErrorDetail(code?:number):string|null{
+function planErrorDetail(code?:number|null):string|null{
   if(code===undefined||code===null)return null;
   const reasons:Record<number,string>={
     [-1]:"Planning failed: no valid trajectory was found.",
