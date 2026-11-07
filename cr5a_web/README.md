@@ -22,3 +22,7 @@ Open http://127.0.0.1:5173.
 The bridge defaults to loopback and has robot commands, error clearing and physical MoveIt execution disabled. Enable those gates explicitly in cr5a_ros_bridge/config/bridge.yaml only after reviewing the safety and deployment setup. Planning remains separate from execution.
 
 Copy .env.example to .env.local only when overriding the bridge URL or using an authentication token. Do not commit tokens.
+
+## UI development
+
+Read [UI_GUIDELINES.md](./UI_GUIDELINES.md) before creating or changing React UI. It defines the CR5A console's visual hierarchy, semantic status colors, WebSocket data flow, viewport rules, and motion-safety interactions.
