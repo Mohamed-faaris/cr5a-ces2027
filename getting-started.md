@@ -497,6 +497,14 @@ The repository's CR5 URDF configuration uses `mock_components/GenericSystem`. Th
 
 The simulated robot starts disabled. Use Diagnostics → Enable robot before testing MoveIt execution. Stop, pause, resume, enable/disable, drag-mode, and error-clear commands are handled by the simulator. Pause cancels an active fake trajectory; Continue clears the paused state but does not replay that trajectory, so create a new plan. Drag mode changes state only; it does not model gravity or hand-guiding.
 
+To test the controller-error workflow, inject a simulated fault from another terminal:
+
+~~~bash
+ros2 param set /dobot_simulation simulated_error_code 123
+~~~
+
+Diagnostics should report an error, reject Enable robot, and show a simulated description. Use Clear errors in Diagnostics to clear it; the robot returns to Disabled and must be enabled again.
+
 Useful checks from another terminal:
 
 ~~~bash
