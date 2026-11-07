@@ -56,6 +56,7 @@ export function VisualizerPage(){
   const errors=useRobotStore((s)=>s.errors);
   const joints=useRobotStore((s)=>s.joints);
   const tcp=useRobotStore((s)=>s.tcp);
+  const jointLimits=useRobotStore((s)=>s.jointLimits);
   const model=useRobotStore((s)=>s.model);
   const modelLoading=useRobotStore((s)=>s.modelLoading);
   const modelError=useRobotStore((s)=>s.modelError);
@@ -78,7 +79,10 @@ export function VisualizerPage(){
   const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
 
-  const bounds=useMemo(()=>parseJointBounds(model?.urdf),[model?.urdf]);
+  const bounds=useMemo(
+    ()=>parseJointBounds(model?.urdf,jointLimits?.joint_limits),
+    [model?.urdf,jointLimits]
+  );
   const jointNames=joints?.name??[];
   const actualJoints=joints?.position??[];
   const actualJointsValid=jointNames.length>0&&jointNames.every((_,index)=>
@@ -317,7 +321,7 @@ export function VisualizerPage(){
                     const rawActual=actualJoints[index];
                     const actual=typeof rawActual==="number"&&Number.isFinite(rawActual)?rawActual:null;
                     const target=jointTargets[name]??actual??0;
-                    if(!bound)return <div key={name} className="text-xs text-zinc-500">{name}: position limits unavailable in URDF.</div>;
+                    if(!bound)return <div key={name} className="text-xs text-zinc-500">{name}: position limits unavailable in URDF and MoveIt configuration.</div>;
                     return <div key={name}>
                       <div className="mb-1.5 flex items-center justify-between">
                         <span className="text-xs font-medium text-zinc-700">{name}</span>
