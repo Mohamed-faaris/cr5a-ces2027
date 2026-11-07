@@ -197,8 +197,7 @@ The symlink makes `tmuxp` available in every new container terminal without chan
 ~~~bash
 echo "$PATH"
 ls -l /usr/local/bin/tmuxp
-/opt/tmuxp-venv/bin/tmuxp --version
-~~~
+/opt/tmuxp-venv/bin/tmuxp --version~~~
 
 
 ### Install Node.js and pnpm (for the React web console)
@@ -398,7 +397,6 @@ alias la='ls -A --color=auto'
 alias l='ls -CF --color=auto'
 alias grep='grep --color=auto'
 alias cls='clear'
-
 # CR5A workspace navigation
 alias cws='cd /root/cr5a_ws'
 alias csrc='cd /root/cr5a_ws/src/cr5a-ces2027'
@@ -598,8 +596,7 @@ From another shell inside the container, check the API and selected WebSocket ba
 curl --fail --silent http://127.0.0.1:8000/health
 python3 -c "import wsproto, uvicorn; print('wsproto', wsproto.__version__, '| uvicorn', uvicorn.__version__)"
 ~~~
-
-The bridge's `main.py` pins Uvicorn to `ws=\"wsproto\"`. Rebuilding is required after pulling that source change; merely installing `python3-wsproto` does not change an already-running Uvicorn process.
+The bridge's `main.py` pins Uvicorn to `ws="wsproto"`. Rebuilding is required after pulling that source change; merely installing `python3-wsproto` does not change an already-running Uvicorn process.
 
 ### Hardware safety notes
 
@@ -798,7 +795,6 @@ cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
 pnpm install
 pnpm dev
 ~~~
-
 Open http://127.0.0.1:5173 in a browser. Start the physical driver, MoveIt, and bridge first. The frontend connects to the bridge's /ws/v1 endpoint.
 
 ## Troubleshooting checks
