@@ -40,6 +40,31 @@ def _parameter_client(backend, node_name, suffix, service_type):
     return backend.parameter_client(node_name, suffix, service_type)
 
 
+def _parameter_value_to_python(value):
+    parameter_type = int(value.type)
+    if parameter_type == 0:
+        return None
+    if parameter_type == 1:
+        return bool(value.bool_value)
+    if parameter_type == 2:
+        return int(value.integer_value)
+    if parameter_type == 3:
+        return float(value.double_value)
+    if parameter_type == 4:
+        return str(value.string_value)
+    if parameter_type == 5:
+        return list(value.byte_array_value)
+    if parameter_type == 6:
+        return list(value.bool_array_value)
+    if parameter_type == 7:
+        return list(value.integer_array_value)
+    if parameter_type == 8:
+        return list(value.double_array_value)
+    if parameter_type == 9:
+        return list(value.string_array_value)
+    return _dict(value)
+
+
 async def _read_parameters(backend, node_name, names=None, describe=True):
     list_client = _parameter_client(backend, node_name, "list_parameters", ListParameters)
     list_request = ListParameters.Request()
@@ -59,10 +84,7 @@ async def _read_parameters(backend, node_name, names=None, describe=True):
     )
     output = {}
     for name, value in zip(parameter_names, values.values):
-        try:
-            output[name] = Parameter.from_parameter_msg(value).value
-        except Exception:
-            output[name] = _dict(value)
+        output[name] = _parameter_value_to_python(value)
 
     descriptors = {}
     if describe:
