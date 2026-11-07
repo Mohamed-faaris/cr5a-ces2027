@@ -561,36 +561,86 @@ The React console uses the custom /ws/v1 WebSocket. The optional standard rosbri
 - In cr5a_ros_bridge/config/bridge.yaml, command and execution permissions are disabled by default. Do not enable them until controller behavior, planning-scene correctness, limits, and physical safety have been validated.
 - The software bridge is not an emergency stop. Keep the robot's safety-rated physical E-stop available and functional.
 
-## 10. Use the tmuxp profiles
+## 10. Run the complete demo stack with tmuxp
 
-The repository includes two separate terminal layouts:
+The demo profile opens each part of the development stack in its own tmux window:
 
-- .tmuxp/cr5a-demo.yaml — fake-hardware MoveIt demo.
-- .tmuxp/cr5a-hardware.yaml — physical driver, MoveIt, bridge, and node monitor.
+| Window | What it starts |
+|---|---|
+| `moveit-demo` | MoveIt fake-hardware demo and RViz |
+| `gazebo` | Gazebo Classic CR5 simulation |
+| `bridge` | CR5A REST/WebSocket bridge and rosbridge |
+| `frontend` | React/Vite web console |
+| `monitor` | ROS node and topic monitors |
+| `shell` | Interactive ROS 2 terminal |
 
-From /root/cr5a_ws, after building and sourcing the workspace:
+### One-time setup
+
+Install tmux and tmuxp if you have not already completed section 3:
 
 ~~~bash
+apt-get install -y tmux pipx
+pipx install tmuxp
+export PATH="$PATH:/root/.local/bin"
+~~~
+
+Enable mouse support so you can click window names in the tmux status bar, click panes to focus them, and scroll terminal output:
+
+~~~bash
+grep -qxF 'set -g mouse on' ~/.tmux.conf 2>/dev/null ||
+  echo 'set -g mouse on' >> ~/.tmux.conf
+
+tmux source-file ~/.tmux.conf
+~~~
+
+Install frontend dependencies once:
+
+~~~bash
+cd /root/cr5a_ws/src/cr5a-ces2027/cr5a_web
+pnpm install
+~~~
+
+The demo profile also starts Gazebo Classic. Install and build its optional dependencies as described in section 11 before using the complete profile.
+
+### Start the full demo stack
+
+Run from the workspace root inside the Humble container:
+
+~~~bash
+cd /root/cr5a_ws
 tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 ~~~
 
-For the real robot, stop the demo session first and load the hardware profile:
+The tmux session is named `cr5a-demo`. Click the window names in the bottom status bar to switch between MoveIt, Gazebo, bridge, frontend, monitor, and shell.
+
+Useful tmux controls:
+
+| Action | Control |
+|---|---|
+| Switch windows | Click a window name in the status bar |
+| Focus a pane | Click inside the pane |
+| Next / previous window | `Ctrl+B`, then `n` / `p` |
+| Choose a window by number | `Ctrl+B`, then its number |
+| Detach without stopping processes | `Ctrl+B`, then `d` |
+| Reattach | `tmux attach -t cr5a-demo` |
+| List sessions | `tmux ls` |
+
+The frontend is served at http://127.0.0.1:5173. The bridge API is at http://127.0.0.1:8000 and its application WebSocket is at ws://127.0.0.1:8000/ws/v1.
+
+**Important simulation distinction:** `cr5_moveit demo.launch.py` starts MoveIt with fake hardware. The `dobot_gazebo` launch starts Gazebo separately. This profile opens both, but does not connect MoveIt's fake controller to Gazebo's simulated robot. Do not interpret the two windows as a single MoveIt-controlled Gazebo simulation.
+
+To stop the stack, use `Ctrl+C` in each running launch window, then exit the tmux session. Do not use this demo profile alongside the physical hardware profile.
+
+### Physical hardware profile
+
+The separate hardware profile starts the physical Dobot driver, MoveIt, bridge, and a node monitor. It does not start Gazebo or the fake-hardware demo.
 
 ~~~bash
-tmux kill-session -t cr5a-demo
+cd /root/cr5a_ws
 tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-hardware.yaml
 ~~~
 
-To switch back, stop the hardware stack and load the demo profile:
-
-~~~bash
-tmux kill-session -t cr5a-hardware
-tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
-~~~
-
-Ctrl+B then D detaches from tmux without stopping its processes. Reattach using tmux attach -t cr5a-demo or tmux attach -t cr5a-hardware.
-
-Always stop the active stack safely before switching profiles. Killing a tmux session is not a safety stop for a robot that is already moving.
+Stop the active demo stack before starting the hardware profile. Verify the controller network and physical safety systems before launching the real robot.
 
 ## 11. Optional: build the Gazebo Classic package
 
