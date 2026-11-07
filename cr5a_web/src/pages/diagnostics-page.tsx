@@ -140,7 +140,7 @@ export function DiagnosticsPage(){
           {busy==="pause"?<RefreshCw size={14} className="animate-spin"/>:<Pause size={14}/>} Pause
         </Button>
         <Button variant="outline" onClick={()=>runCommand("resume","Resume")} disabled={!canCommand||busy!==null||!paused}>
-          {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Resume
+          {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Play
         </Button>
         <div className="flex-1"/>
         <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||capabilities.error_clear_enabled!==true||busy!==null}>
