@@ -1,0 +1,449 @@
+import concurrent.futures
+import json
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.parameter import Parameter
+from rosidl_runtime_py.convert import message_to_ordereddict
+from rosidl_runtime_py.set_message import set_message_fields
+from rosidl_runtime_py.utilities import get_message, get_service
+
+from rcl_interfaces.srv import (
+    ListParameters, GetParameters, DescribeParameters,
+    SetParameters, SetParametersAtomically,
+)
+from moveit_msgs.action import MoveGroup, ExecuteTrajectory
+from moveit_msgs.msg import DisplayTrajectory
+
+
+def stamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def message_dict(message):
+    return dict(message_to_ordereddict(message))
+
+
+class BridgeNode(Node):
+    """ROS graph, topic, parameter, Dobot and MoveIt adapter."""
+
+    def __init__(self, config):
+        super().__init__("cr5a_ros_bridge")
+        self.config = config
+        self._lock = threading.RLock()
+        self._clients = {}
+        self._subscriptions = {}
+        self._publishers = {}
+        self._topic_cache = {}
+        self._topic_seq = {}
+        self._events = {}
+        self._event_seq = {}
+        self.plans = {}
+        self.action_handles = {}
+
+        moveit = config.get("moveit", {})
+        self.move_group_client = ActionClient(
+            self, MoveGroup, moveit.get("move_group_action", "/move_action")
+        )
+        self.execute_client = ActionClient(
+            self, ExecuteTrajectory,
+            moveit.get("execute_trajectory_action", "/execute_trajectory")
+        )
+        self.display_pub = self.create_publisher(
+            DisplayTrajectory,
+            moveit.get("display_trajectory_topic", "/display_planned_path"),
+            10,
+        )
+
+        self._event_topic_map = {
+            "/joint_states": "robot.joints",
+            config.get("robot", {}).get("status_topic", "/dobot_msgs_v4/msg/RobotStatus"): "robot.status",
+            config.get("robot", {}).get("tcp_topic", "/dobot_msgs_v4/msg/ToolVectorActual"): "robot.tcp",
+            "/monitored_planning_scene": "moveit.scene",
+            "/display_planned_path": "motion.plan_path",
+        }
+        self._error_poll_busy = False
+        self._last_error_payload = None
+        self._last_graph_signature = None
+        self.create_timer(2.0, self._poll_robot_errors)
+        self.create_timer(5.0, self._poll_graph_changes)
+        for entry in config.get("ros", {}).get("auto_subscribe", []):
+            self.subscribe_topic(
+                entry["topic"], entry.get("type"), entry.get("qos", {})
+            )
+        self.emit("bridge.health", {"state": "ready", "started_at": stamp()})
+
+    def emit(self, channel, data):
+        with self._lock:
+            seq = self._event_seq.get(channel, 0) + 1
+            self._event_seq[channel] = seq
+            self._events[channel] = {
+                "channel": channel, "sequence": seq,
+                "timestamp": stamp(), "data": data,
+            }
+
+    def event_snapshot(self, channel):
+        with self._lock:
+            event = self._events.get(channel)
+            return dict(event) if event else None
+
+    def topic_snapshot(self, topic):
+        with self._lock:
+            value = self._topic_cache.get(topic)
+            return dict(value) if value else None
+
+    def subscribe_topic(self, topic, type_name=None, qos_config=None):
+        if topic in self._subscriptions:
+            return
+        qos_config = qos_config or {}
+        if not type_name:
+            matches = dict(self.get_topic_names_and_types()).get(topic, [])
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Cannot resolve one message type for {topic}; found {matches}"
+                )
+            type_name = matches[0]
+        msg_type = get_message(type_name)
+        reliability = (
+            ReliabilityPolicy.RELIABLE
+            if qos_config.get("reliability", "reliable") == "reliable"
+            else ReliabilityPolicy.BEST_EFFORT
+        )
+        durability = (
+            DurabilityPolicy.TRANSIENT_LOCAL
+            if qos_config.get("durability", "volatile") == "transient_local"
+            else DurabilityPolicy.VOLATILE
+        )
+        qos = QoSProfile(
+            depth=int(qos_config.get("depth", 10)),
+            reliability=reliability,
+            durability=durability,
+        )
+
+        def callback(message, topic_name=topic, ros_type=type_name):
+            payload = message_dict(message)
+            with self._lock:
+                seq = self._topic_seq.get(topic_name, 0) + 1
+                self._topic_seq[topic_name] = seq
+                self._topic_cache[topic_name] = {
+                    "topic": topic_name, "type": ros_type,
+                    "sequence": seq, "timestamp": stamp(), "data": payload,
+                }
+            channel = self._event_topic_map.get(topic_name)
+            if channel:
+                self.emit(channel, payload)
+            self.emit("topic:" + topic_name, payload)
+
+        self._subscriptions[topic] = self.create_subscription(
+            msg_type, topic, callback, qos
+        )
+        self.get_logger().info(f"Auto-subscribed: {topic} [{type_name}]")
+
+    def _poll_robot_errors(self):
+        if self._error_poll_busy:
+            return
+        self._error_poll_busy = True
+        try:
+            future = self.robot_service("GetErrorID")
+        except Exception:
+            self._error_poll_busy = False
+            return
+
+        def completed(done):
+            try:
+                payload = message_dict(done.result())
+                if payload != self._last_error_payload:
+                    self._last_error_payload = payload
+                    self.emit("robot.errors", payload)
+            except Exception:
+                pass
+            finally:
+                self._error_poll_busy = False
+
+        future.add_done_callback(completed)
+
+    def _poll_graph_changes(self):
+        try:
+            graph = self.graph()
+            signature = json.dumps(graph, sort_keys=True)
+            if signature != self._last_graph_signature:
+                self._last_graph_signature = signature
+                self.emit("ros.graph", graph)
+        except Exception:
+            pass
+
+    def graph(self):
+        nodes = []
+        for name, namespace in self.get_node_names_and_namespaces():
+            nodes.append({
+                "name": name,
+                "namespace": namespace,
+                "fully_qualified_name": (
+                    (namespace.rstrip("/") + "/" + name)
+                    if namespace != "/" else "/" + name
+                ),
+            })
+        actions = []
+        if hasattr(self, "get_action_names_and_types"):
+            actions = [
+                {"name": name, "types": types}
+                for name, types in self.get_action_names_and_types()
+            ]
+        return {
+            "nodes": nodes,
+            "topics": [
+                {"name": name, "types": types}
+                for name, types in self.get_topic_names_and_types()
+            ],
+            "services": [
+                {"name": name, "types": types}
+                for name, types in self.get_service_names_and_types()
+            ],
+            "actions": actions,
+        }
+
+    def _client(self, service_name, service_type):
+        key = (service_name, service_type)
+        if key not in self._clients:
+            self._clients[key] = self.create_client(service_type, service_name)
+        return self._clients[key]
+
+    def call_service(self, service_name, service_type, request):
+        client = self._client(service_name, service_type)
+        result = concurrent.futures.Future()
+        timeout = float(self.config.get("ros", {}).get("service_timeout_sec", 3.0))
+        if not client.wait_for_service(timeout_sec=min(timeout, 0.25)):
+            result.set_exception(TimeoutError(f"Service unavailable: {service_name}"))
+            return result
+        ros_future = client.call_async(request)
+
+        def complete(done):
+            try:
+                result.set_result(done.result())
+            except Exception as exc:
+                result.set_exception(exc)
+
+        ros_future.add_done_callback(complete)
+        return result
+
+    def call_generic_service(self, service_name, type_name, payload):
+        service_type = get_service(type_name)
+        request = service_type.Request()
+        set_message_fields(request, payload or {})
+        return self.call_service(service_name, service_type, request)
+
+    def publish_topic(self, topic, type_name, payload):
+        msg_type = get_message(type_name)
+        publisher = self._publishers.get((topic, type_name))
+        if publisher is None:
+            publisher = self.create_publisher(msg_type, topic, 10)
+            self._publishers[(topic, type_name)] = publisher
+        message = msg_type()
+        set_message_fields(message, payload or {})
+        publisher.publish(message)
+        return {"published": True, "topic": topic, "type": type_name}
+
+    def parameter_client(self, node_name, service_suffix, service_type):
+        normalized = node_name if node_name.startswith("/") else "/" + node_name
+        service_name = normalized.rstrip("/") + "/" + service_suffix
+        return self._client(service_name, service_type)
+
+    def list_parameter_names(self, node_name):
+        request = ListParameters.Request()
+        request.depth = 0
+        client = self.parameter_client(node_name, "list_parameters", ListParameters)
+        return self.call_service(
+            client.service_name, ListParameters, request
+        )
+
+    def robot_service(self, name, payload=None):
+        service_type = get_service("dobot_msgs_v4/srv/" + name)
+        request = service_type.Request()
+        set_message_fields(request, payload or {})
+        prefix = self.config.get("robot", {}).get(
+            "service_prefix", "/dobot_bringup_ros2/srv/"
+        )
+        return self.call_service(prefix + name, service_type, request)
+
+    def make_move_group_goal(self, payload):
+        from geometry_msgs.msg import PoseStamped
+        from moveit_msgs.msg import (
+            Constraints, JointConstraint, PositionConstraint,
+            OrientationConstraint, BoundingVolume,
+        )
+        from shape_msgs.msg import SolidPrimitive
+
+        moveit = self.config.get("moveit", {})
+        goal = MoveGroup.Goal()
+        request = goal.request
+        request.group_name = payload.get("group_name", moveit.get("group_name", "cr5_group"))
+        request.num_planning_attempts = int(payload.get("num_planning_attempts", 5))
+        request.allowed_planning_time = float(payload.get("allowed_planning_time", 5.0))
+        request.max_velocity_scaling_factor = float(payload.get("max_velocity_scaling", 0.2))
+        request.max_acceleration_scaling_factor = float(payload.get("max_acceleration_scaling", 0.2))
+        request.planner_id = payload.get("planner_id", "")
+        constraints = Constraints()
+
+        target = payload.get("target", {})
+        target_type = target.get("type")
+        if target_type == "joints":
+            names = target.get("joint_names", [])
+            values = target.get("positions_rad", [])
+            if not names or len(names) != len(values):
+                raise ValueError("joint_names and positions_rad must have equal non-zero lengths")
+            for name, value in zip(names, values):
+                item = JointConstraint()
+                item.joint_name = str(name)
+                item.position = float(value)
+                item.tolerance_above = float(target.get("tolerance_rad", 0.01))
+                item.tolerance_below = float(target.get("tolerance_rad", 0.01))
+                item.weight = 1.0
+                constraints.joint_constraints.append(item)
+        elif target_type == "pose":
+            frame = target.get("frame_id", moveit.get("base_frame", "dummy_link"))
+            link = target.get("link_name", moveit.get("end_effector_link", "Link6"))
+            position = target.get("position_m")
+            orientation = target.get("orientation_xyzw")
+            if not position or len(position) != 3 or not orientation or len(orientation) != 4:
+                raise ValueError("pose target requires position_m[3] and orientation_xyzw[4]")
+            stamped = PoseStamped()
+            stamped.header.frame_id = frame
+            stamped.pose.position.x, stamped.pose.position.y, stamped.pose.position.z = map(float, position)
+            (
+                stamped.pose.orientation.x, stamped.pose.orientation.y,
+                stamped.pose.orientation.z, stamped.pose.orientation.w,
+            ) = map(float, orientation)
+
+            region = BoundingVolume()
+            sphere = SolidPrimitive()
+            sphere.type = SolidPrimitive.SPHERE
+            sphere.dimensions = [float(target.get("position_tolerance_m", 0.001))]
+            region.primitives.append(sphere)
+            region.primitive_poses.append(stamped.pose)
+
+            position_constraint = PositionConstraint()
+            position_constraint.header = stamped.header
+            position_constraint.link_name = link
+            position_constraint.constraint_region = region
+            position_constraint.weight = 1.0
+            constraints.position_constraints.append(position_constraint)
+
+            orientation_constraint = OrientationConstraint()
+            orientation_constraint.header = stamped.header
+            orientation_constraint.link_name = link
+            orientation_constraint.orientation = stamped.pose.orientation
+            tolerance = float(target.get("orientation_tolerance_rad", 0.01))
+            orientation_constraint.absolute_x_axis_tolerance = tolerance
+            orientation_constraint.absolute_y_axis_tolerance = tolerance
+            orientation_constraint.absolute_z_axis_tolerance = tolerance
+            orientation_constraint.weight = 1.0
+            constraints.orientation_constraints.append(orientation_constraint)
+        else:
+            raise ValueError("target.type must be 'pose' or 'joints'")
+
+        request.goal_constraints = [constraints]
+        goal.planning_options.plan_only = True
+        goal.planning_options.replan = False
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+        return goal
+
+    def send_plan_goal(self, plan_id, goal):
+        result_future = concurrent.futures.Future()
+        timeout = float(self.config.get("ros", {}).get("action_timeout_sec", 45.0))
+        if not self.move_group_client.wait_for_server(timeout_sec=min(timeout, 1.0)):
+            result_future.set_exception(TimeoutError("MoveIt /move_action is unavailable"))
+            return result_future
+
+        def feedback(feedback_message):
+            try:
+                self.emit("motion.plan", {
+                    "plan_id": plan_id,
+                    "status": "PLANNING",
+                    "feedback": message_dict(feedback_message.feedback),
+                })
+            except Exception:
+                pass
+
+        sent = self.move_group_client.send_goal_async(goal, feedback_callback=feedback)
+
+        def accepted(done):
+            try:
+                handle = done.result()
+                if not handle.accepted:
+                    raise RuntimeError("MoveIt rejected the planning goal")
+                self.action_handles[plan_id] = handle
+                result = handle.get_result_async()
+
+                def finished(result_done):
+                    try:
+                        result_future.set_result(result_done.result().result)
+                    except Exception as exc:
+                        result_future.set_exception(exc)
+
+                result.add_done_callback(finished)
+            except Exception as exc:
+                result_future.set_exception(exc)
+
+        sent.add_done_callback(accepted)
+        return result_future
+
+    def send_execute_goal(self, plan_id, trajectory):
+        result_future = concurrent.futures.Future()
+        if not self.execute_client.wait_for_server(timeout_sec=1.0):
+            result_future.set_exception(TimeoutError("MoveIt /execute_trajectory is unavailable"))
+            return result_future
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
+        def feedback(feedback_message):
+            try:
+                self.emit("motion.execution", {
+                    "plan_id": plan_id,
+                    "status": "EXECUTING",
+                    "feedback": message_dict(feedback_message.feedback),
+                })
+            except Exception:
+                pass
+
+        sent = self.execute_client.send_goal_async(
+            goal, feedback_callback=feedback
+        )
+
+        def accepted(done):
+            try:
+                handle = done.result()
+                if not handle.accepted:
+                    raise RuntimeError("MoveIt rejected the execution goal")
+                self.action_handles["execute:" + plan_id] = handle
+                result = handle.get_result_async()
+
+                def finished(result_done):
+                    try:
+                        result_future.set_result(result_done.result().result)
+                    except Exception as exc:
+                        result_future.set_exception(exc)
+
+                result.add_done_callback(finished)
+            except Exception as exc:
+                result_future.set_exception(exc)
+
+        sent.add_done_callback(accepted)
+        return result_future
+
+    def cancel_action(self, key):
+        handle = self.action_handles.get(key)
+        if handle is None:
+            raise KeyError(f"No active action for {key}")
+        return handle.cancel_goal_async()
+
+    def publish_display_trajectory(self, trajectory, trajectory_start):
+        display = DisplayTrajectory()
+        display.trajectory_start = trajectory_start
+        display.trajectory.append(trajectory)
+        self.display_pub.publish(display)
