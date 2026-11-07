@@ -40,7 +40,7 @@ export function DiagnosticsPage(){
   const enabled=robotStatus?.is_enable;
   const dragActive=/backdrive|\b6\b/i.test(robotMode?.value??"");
   const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&(enabled||!activeError);
-  const canToggleDrag=canCommand&&busy===null&&!activeError&&(dragActive||enabled===true);
+  const canToggleDrag=canCommand&&busy===null&&(dragActive||(enabled===true&&!activeError));
 
   useEffect(()=>{
     if(!dragTransition)return;
