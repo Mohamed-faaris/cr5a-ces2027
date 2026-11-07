@@ -824,6 +824,7 @@ Open http://127.0.0.1:5173 in a browser. For the fake-hardware workflow, start t
 | RViz cannot open a display | Check DISPLAY, the X11 socket mount, and the host xhost permission. |
 | Driver cannot connect | Confirm controller IP, host network connectivity, Ethernet route, and IP_address. |
 | MoveIt has no current joint state | Check that the correct driver or fake-hardware demo is running and publishing joint states. |
+| RobotStatus or TCP unavailable in demo | Confirm `dobot_simulation` is running, `/joint_states` is fresh, and TF contains `dummy_link` to `Link6`. |
 | Bridge cannot find MoveIt actions | Start MoveIt first and check ros2 action list. |
 
 ## References
