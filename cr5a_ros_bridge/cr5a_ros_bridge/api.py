@@ -10,9 +10,10 @@ import uuid
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from .json_utils import finite_quaternion, finite_vector, json_safe
+from .json_utils import finite_quaternion, finite_vector, json_safe, strict_json_loads
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -49,14 +50,27 @@ class SafeJSONResponse(JSONResponse):
         return super().render(safe_content)
 
 
-class NonStandardJSONConstant(ValueError):
-    pass
+class StrictJSONRoute(APIRoute):
+    """Reject non-standard and overflowed numbers in every JSON request body."""
 
+    def get_route_handler(self):
+        original_handler = super().get_route_handler()
 
-def _reject_json_constant(value):
-    raise NonStandardJSONConstant(
-        f"Non-standard JSON numeric constant is not allowed: {value}"
-    )
+        async def strict_handler(request):
+            content_type = request.headers.get("content-type", "").lower()
+            if "application/json" in content_type:
+                body = await request.body()
+                if body:
+                    try:
+                        strict_json_loads(body)
+                    except (ValueError, UnicodeDecodeError) as exc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid JSON request body: {exc}",
+                        ) from exc
+            return await original_handler(request)
+
+        return strict_handler
 
 
 def _dict(message, invalid_paths=None):
@@ -162,6 +176,8 @@ def create_app(backend, config):
         version="0.1.0",
         description="Headless REST and WebSocket gateway for ROS 2 Humble, Dobot CR5A and MoveIt 2.",
     )
+    app.router.route_class = StrictJSONRoute
+
     # Static meshes only; robot state and commands are carried over the application WebSocket.
     try:
         from ament_index_python.packages import get_package_share_directory
@@ -1132,7 +1148,7 @@ def create_app(backend, config):
                         raw_data = message.get("text")
                         if raw_data is None:
                             raw_data = (message.get("bytes") or b"").decode("utf-8")
-                        incoming = json.loads(raw_data, parse_constant=_reject_json_constant)
+                        incoming = strict_json_loads(raw_data)
                     except (TypeError, ValueError, UnicodeDecodeError):
                         await safe_send({
                             "op": "error", "error": {"code": 400, "message": "Invalid JSON message"}
