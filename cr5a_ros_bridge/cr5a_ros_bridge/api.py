@@ -11,6 +11,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from .json_utils import finite_vector, json_safe
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -25,8 +26,19 @@ from shape_msgs.msg import SolidPrimitive
 from rosidl_runtime_py.convert import message_to_ordereddict
 
 
-def _dict(message):
-    return dict(message_to_ordereddict(message))
+class SafeJSONResponse(JSONResponse):
+    """JSON response that never emits non-standard NaN/Infinity tokens."""
+
+    def render(self, content):
+        return super().render(json_safe(content))
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"Non-standard JSON numeric constant is not allowed: {value}")
+
+
+def _dict(message, invalid_paths=None):
+    return json_safe(dict(message_to_ordereddict(message)), invalid_paths)
 
 
 async def _await_ros(future, timeout=5.0):
@@ -111,6 +123,7 @@ async def _read_parameters(backend, node_name, names=None, describe=True):
 
 def create_app(backend, config):
     app = FastAPI(
+        default_response_class=SafeJSONResponse,
         title="CR5A Robot API",
         version="0.1.0",
         description="Headless REST and WebSocket gateway for ROS 2 Humble, Dobot CR5A and MoveIt 2.",
@@ -426,10 +439,8 @@ def create_app(backend, config):
     def collision_object(payload, object_id=None):
         shape = payload.get("shape", "box").lower()
         frame = payload.get("frame_id", config.get("moveit", {}).get("base_frame", "dummy_link"))
-        pose_values = payload.get("position_m", [0, 0, 0])
-        orientation = payload.get("orientation_xyzw", [0, 0, 0, 1])
-        if len(pose_values) != 3 or len(orientation) != 4:
-            raise ValueError("position_m must have 3 values and orientation_xyzw must have 4")
+        pose_values = finite_vector(payload.get("position_m", [0, 0, 0]), 3, "position_m")
+        orientation = finite_vector(payload.get("orientation_xyzw", [0, 0, 0, 1]), 4, "orientation_xyzw")
         obj = CollisionObject()
         obj.id = object_id or payload.get("id") or ("object_" + uuid.uuid4().hex[:10])
         obj.header.frame_id = frame
@@ -439,19 +450,25 @@ def create_app(backend, config):
         pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = map(float, orientation)
         primitive = SolidPrimitive()
         if shape == "box":
-            dimensions = payload.get("dimensions_m")
-            if not dimensions or len(dimensions) != 3:
-                raise ValueError("box dimensions_m must be [x, y, z]")
+            dimensions = finite_vector(payload.get("dimensions_m"), 3, "dimensions_m")
+            if any(value <= 0 for value in dimensions):
+                raise ValueError("dimensions_m values must be greater than zero")
             primitive.type = SolidPrimitive.BOX
-            primitive.dimensions = list(map(float, dimensions))
+            primitive.dimensions = dimensions
         elif shape == "sphere":
+            radius = finite_vector([payload.get("radius_m")], 1, "radius_m")[0]
+            if radius <= 0:
+                raise ValueError("radius_m must be greater than zero")
             primitive.type = SolidPrimitive.SPHERE
-            primitive.dimensions = [float(payload["radius_m"])]
+            primitive.dimensions = [radius]
         elif shape == "cylinder":
+            height, radius = finite_vector(
+                [payload.get("height_m"), payload.get("radius_m")], 2, "cylinder dimensions"
+            )
+            if height <= 0 or radius <= 0:
+                raise ValueError("height_m and radius_m must be greater than zero")
             primitive.type = SolidPrimitive.CYLINDER
-            primitive.dimensions = [
-                float(payload["height_m"]), float(payload["radius_m"])
-            ]
+            primitive.dimensions = [height, radius]
         else:
             raise ValueError("Supported shapes: box, sphere, cylinder")
         obj.primitives.append(primitive)
@@ -533,16 +550,11 @@ def create_app(backend, config):
                 status_code=422,
                 detail="link_frame_pose is required; provide the object's pose relative to the attachment link",
             )
-        link_position = link_pose.get("position_m")
-        link_orientation = link_pose.get("orientation_xyzw")
-        if (
-            not isinstance(link_position, list) or len(link_position) != 3
-            or not isinstance(link_orientation, list) or len(link_orientation) != 4
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="link_frame_pose requires position_m[3] and orientation_xyzw[4]",
-            )
+        try:
+            link_position = finite_vector(link_pose.get("position_m"), 3, "link_frame_pose.position_m")
+            link_orientation = finite_vector(link_pose.get("orientation_xyzw"), 4, "link_frame_pose.orientation_xyzw")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if len(existing.primitives) != 1 or len(existing.primitive_poses) != 1 or existing.meshes:
             raise HTTPException(
                 status_code=422,
@@ -718,15 +730,26 @@ def create_app(backend, config):
         current_data = current_snapshot.get("data", {})
         current_names = list(current_data.get("name", []) or [])
         current_positions = list(current_data.get("position", []) or [])
-        current_by_name = {
-            name: float(position)
-            for name, position in zip(current_names, current_positions)
-        }
-        planned_by_name = {
-            name: float(position)
-            for name, position in zip(planned_state_names, planned_state_positions)
-        }
-        tolerance = float(config.get("moveit", {}).get("start_state_tolerance_rad", 0.03))
+        try:
+            current_by_name = {
+                name: finite_vector([position], 1, f"current joint {name}")[0]
+                for name, position in zip(current_names, current_positions)
+            }
+            planned_by_name = {
+                name: finite_vector([position], 1, f"planned joint {name}")[0]
+                for name, position in zip(planned_state_names, planned_state_positions)
+            }
+            tolerance = finite_vector(
+                [config.get("moveit", {}).get("start_state_tolerance_rad", 0.03)],
+                1, "start_state_tolerance_rad",
+            )[0]
+            if tolerance <= 0:
+                raise ValueError("start_state_tolerance_rad must be greater than zero")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot verify joint state safely: {exc}. Refresh telemetry and plan again",
+            ) from exc
         missing = [name for name in planned_names if name not in current_by_name or name not in planned_by_name]
         if missing:
             raise HTTPException(status_code=409, detail="Cannot compare planned and current joints: " + ", ".join(missing))
@@ -966,8 +989,9 @@ def create_app(backend, config):
         send_lock = asyncio.Lock()
 
         async def safe_send(payload):
+            safe_payload = json_safe(payload)
             async with send_lock:
-                await websocket.send_json(payload)
+                await websocket.send_json(safe_payload)
 
         async def respond(request_id, method, params):
             try:
@@ -1008,11 +1032,11 @@ def create_app(backend, config):
                         return
                     if message.get("type") != "websocket.receive":
                         continue
-                    raw_data = message.get("text")
-                    if raw_data is None:
-                        raw_data = (message.get("bytes") or b"").decode("utf-8")
                     try:
-                        incoming = json.loads(raw_data)
+                        raw_data = message.get("text")
+                        if raw_data is None:
+                            raw_data = (message.get("bytes") or b"").decode("utf-8")
+                        incoming = json.loads(raw_data, parse_constant=_reject_json_constant)
                     except (TypeError, ValueError, UnicodeDecodeError):
                         await safe_send({
                             "op": "error", "error": {"code": 400, "message": "Invalid JSON message"}
@@ -1021,23 +1045,34 @@ def create_app(backend, config):
                     if not isinstance(incoming, dict):
                         continue
                     operation = incoming.get("op")
-                    if operation == "subscribe":
-                        for channel in incoming.get("channels", []):
-                            channels.add(channel)
-                            if channel.startswith("topic:"):
-                                topic = channel[len("topic:"):]
-                                try:
-                                    backend.subscribe_topic(topic)
-                                except Exception as exc:
-                                    await safe_send({
-                                        "op": "subscription_error", "channel": channel,
-                                        "detail": str(exc),
-                                    })
-                        await safe_send({"op": "subscribed", "channels": sorted(channels)})
-                    elif operation == "unsubscribe":
-                        for channel in incoming.get("channels", []):
-                            channels.discard(channel)
-                        await safe_send({"op": "unsubscribed", "channels": sorted(channels)})
+                    if operation in ("subscribe", "unsubscribe"):
+                        requested_channels = incoming.get("channels", [])
+                        if (
+                            not isinstance(requested_channels, list)
+                            or any(not isinstance(channel, str) or not channel for channel in requested_channels)
+                        ):
+                            await safe_send({
+                                "op": "error",
+                                "error": {"code": 422, "message": "channels must be a list of non-empty strings"},
+                            })
+                            continue
+                        if operation == "subscribe":
+                            for channel in requested_channels:
+                                channels.add(channel)
+                                if channel.startswith("topic:"):
+                                    topic = channel[len("topic:"):]
+                                    try:
+                                        backend.subscribe_topic(topic)
+                                    except Exception as exc:
+                                        await safe_send({
+                                            "op": "subscription_error", "channel": channel,
+                                            "detail": str(exc),
+                                        })
+                            await safe_send({"op": "subscribed", "channels": sorted(channels)})
+                        else:
+                            for channel in requested_channels:
+                                channels.discard(channel)
+                            await safe_send({"op": "unsubscribed", "channels": sorted(channels)})
                     elif operation == "ping":
                         await safe_send({"op": "pong", "timestamp": time.time()})
                     elif operation == "request":
