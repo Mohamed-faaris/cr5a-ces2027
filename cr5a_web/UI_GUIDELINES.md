@@ -131,14 +131,14 @@ Before committing a UI change:
 
 Use official documentation for APIs and interaction patterns. Check that examples match this repository's installed major versions before copying them.
 
-- [React Quick Start](https://react.dev/learn) — : components, JSX, event handling, and sharing state.
+- [React Quick Start](https://react.dev/learn) — components, JSX, event handling, and sharing state.
 - [Thinking in React](https://react.dev/learn/thinking-in-react) — component hierarchy and minimal state.
 - [React Router v6 concepts](https://reactrouter.com/docs/en/v6/start/concepts) — routes, layouts, and navigation.
 - [shadcn/ui components](https://ui.shadcn.com/docs/components) — component patterns and available primitives.
 - [shadcn/ui theming](https://ui.shadcn.com/docs/theming) — semantic color tokens and CSS-variable theming.
-- [shadcn/ui manual installation](https://ui.shadcn.com/docs/installation/manual) — : project integration reference; do not use it to migrate this existing stack.
-- [Radix accessibility](https://www.radix-ui.com/primitives/docs/overview/accessibility) — keyboard navigation, aria semantics, and focus management.
+- [shadcn/ui manual installation](https://ui.shadcn.com/docs/installation/manual) — project integration reference; do not use it to migrate this existing stack.
+- [Radix accessibility](https://www.radix-ui.com/primitives/docs/overview/accessibility) — keyboard navigation, ARIA semantics, and focus management.
 - [Tailwind responsive design](https://tailwindcss.com/docs/responsive-design) — mobile-first responsive utilities.
-- [Tailwind interaction states](https://tailwindcss.com/docs/hover-focus-and-other-states) — : focus, disabled, and interaction styling.
+- [Tailwind interaction states](https://tailwindcss.com/docs/hover-focus-and-other-states) — focus, disabled, and interaction styling.
 - [WCAG 2.2 non-text contrast](https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast) — control and state-indicator contrast.
 - [React Three Fiber introduction](https://r3f.docs.pmnd.rs/) and [Canvas API](https://r3f.docs.pmnd.rs/api/canvas) — 3D scene structure, render lifecycle, and fallback behavior.
