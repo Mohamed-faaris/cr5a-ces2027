@@ -1,6 +1,15 @@
 export type BridgeState = "connecting" | "connected" | "reconnecting" | "disconnected";
-export interface JointStateMessage { name?: string[]; position?: number[]; velocity?: number[]; effort?: number[]; }
-export interface TcpMessage { x?: number; y?: number; z?: number; rx?: number; ry?: number; rz?: number; }
+export type TelemetryNumber = number | null;
+export interface JointStateMessage {
+  name?: string[];
+  position?: TelemetryNumber[];
+  velocity?: TelemetryNumber[];
+  effort?: TelemetryNumber[];
+}
+export interface TcpMessage {
+  x?: TelemetryNumber; y?: TelemetryNumber; z?: TelemetryNumber;
+  rx?: TelemetryNumber; ry?: TelemetryNumber; rz?: TelemetryNumber;
+}
 export interface RobotModeMessage { value?: string; res?: number; }
 export interface RobotStatusMessage { is_connected?: boolean; is_enable?: boolean; }
 export interface RobotCapabilities {
