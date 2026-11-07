@@ -18,6 +18,10 @@ This file records frontend-specific assumptions that are easy to break or costly
 
 ## Motion UI
 
+- Diagnostics drag controls map to `robot.command` values `start-drag`/`stop-drag`, backed by Dobot `StartDrag`/`StopDrag` services; they share the existing `allow_commands` gate. RobotMode 6 is Backdrive, not a separate bridge capability.
+- `ToolVectorActual` TCP values are controller-reported and do not establish the MoveIt `model.base_frame` / `model.end_effector_link` pose; a manual TCP target must not silently assume these frames and tool offsets match.
+- `motion.plan` responses include `error_code`; retain and show it on failure rather than replacing it with a generic toast.
+
 - Keep live joint/TCP telemetry distinct from editable target values. Editing a target is not a robot command.
 - Planning and execution are separate operations. Do not wire a Plan interaction to execution or present a successful plan as proof that motion occurred.
 - Joint-state positions are radians. Keep them in radians when passed to the URDF model; convert only at a display/input boundary.
