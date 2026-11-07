@@ -2,7 +2,6 @@ import {useMemo,useState} from "react";
 import {Activity,AlertCircle,Check,Clipboard,Pause,Play,RefreshCw,Square} from "lucide-react";
 import {Button} from "@/components/ui/button";
 import {Metric} from "@/components/metric";
-import {StatusBadge} from "@/components/status-badge";
 import {deriveRobotStatus,formatRobotMode,hasActiveError} from "@/lib/status";
 import {formatNumber,safeDate} from "@/lib/utils";
 import {useRobotSocket} from "@/lib/socket";
@@ -125,7 +124,6 @@ export function DiagnosticsPage(){
             <div className="mt-0.5 text-xs text-zinc-500">Dobot CR5A · Driver status topic</div>
           </div>
         </div>
-        <StatusBadge state={status.key}/>
       </div>
       <div className="grid gap-5 px-5 py-5 sm:grid-cols-3">
         <Metric label="Robot mode" value={formatRobotMode(robotMode?.value)} hint={robotMode?.res===0?"RobotMode service · successful":"Raw controller response"}/>
