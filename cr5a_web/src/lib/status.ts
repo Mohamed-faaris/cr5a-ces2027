@@ -54,3 +54,13 @@ export function hasActiveError(errors?: Record<string,unknown> | null): boolean 
   return errorPresent(errors?.GetErrorID ?? errors?.robot_return ?? errors);
 }
 export function statusClass(key: RobotStatusKey) { return "status-" + key; }
+
+export function operationStatus(value?: string | null): { key: RobotStatusKey; label: string } {
+  const normalized = String(value ?? "").toUpperCase();
+  if (normalized === "PLANNING") return { key: "planning", label: "Planning" };
+  if (normalized === "EXECUTING") return { key: "moving", label: "Executing" };
+  if (normalized === "SUCCEEDED") return { key: "idle", label: "Ready" };
+  if (normalized === "FAILED" || normalized === "TIMED_OUT_OR_FAILED") return { key: "error", label: "Failed" };
+  if (normalized === "CANCELED" || normalized === "CANCELLED" || normalized === "ABORTED") return { key: "disabled", label: "Cancelled" };
+  return { key: "unknown", label: value || "Not planned" };
+}

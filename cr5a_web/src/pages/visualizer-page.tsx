@@ -3,7 +3,9 @@ import {Box,CheckCircle2,CircleAlert,Crosshair,Gauge,Move3D,Play,RefreshCw,Route
 import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {RobotViewport} from "@/components/robot/robot-viewport";
+import {StatusBadge} from "@/components/status-badge";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
+import {operationStatus} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
 
@@ -263,7 +265,7 @@ export function VisualizerPage(){
           <div className="px-4 py-4">
             <div className="flex items-center justify-between gap-3">
               <div className="text-xs text-zinc-500">Planning result</div>
-              <span className="text-xs font-medium text-zinc-800">{plan?.status??"No plan"}</span>
+              <StatusBadge state={operationStatus(plan?.status).key} label={operationStatus(plan?.status).label} compact/>
             </div>
             <div className="mt-2 grid grid-cols-2 gap-3">
               <div className="rounded-md bg-zinc-50 p-3">
@@ -280,8 +282,9 @@ export function VisualizerPage(){
               {busy==="execute"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Execute trajectory
             </Button>
             {!canExecute&&<p className="mt-2 text-[11px] text-zinc-400">Execution is disabled by bridge safety configuration or the robot is not enabled.</p>}
-            {executionStatus&&<div className="mt-3 flex items-center gap-2 text-xs text-zinc-600">
-              {executionStatus==="SUCCEEDED"?<CheckCircle2 size={14}/>:<CircleAlert size={14}/>} Execution: {executionStatus}
+            {executionStatus&&<div className="mt-3 flex items-center gap-2">
+              {executionStatus==="SUCCEEDED"?<CheckCircle2 size={14} className="text-emerald-700"/>:executionStatus==="FAILED"?<CircleAlert size={14} className="text-red-700"/>:null}
+              <StatusBadge state={operationStatus(executionStatus).key} label={operationStatus(executionStatus).label} compact/>
             </div>}
           </div>
         </section>

@@ -7,6 +7,8 @@
   <license>MIT</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>dobot_rviz</exec_depend>
+  <exec_depend>cr5_moveit</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
