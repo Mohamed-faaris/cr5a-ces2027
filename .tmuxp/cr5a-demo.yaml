@@ -6,17 +6,17 @@
 # physical Dobot driver or the hardware-specific CR5A bridge.
 
 session_name: cr5a-demo
-start_directory: ../
+start_directory: ../../../
 windows:
   - window_name: demo
     layout: tiled
     focus: true
     panes:
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && ros2 launch cr5_moveit demo.launch.py
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit demo.launch.py'
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && watch -n 5 'ros2 node list 2>/dev/null'
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 "ros2 node list 2>/dev/null"'
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && watch -n 10 'ros2 topic list 2>/dev/null'
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 10 "ros2 topic list 2>/dev/null"'
       - shell_command:
-          - source /opt/ros/humble/setup.zsh && source install/setup.zsh && echo 'Demo terminal ready. Run ROS 2 test commands here.' && exec zsh
+          - bash -lc 'source /opt/ros/humble/setup.bash && source install/setup.bash && echo "Demo terminal ready. Run ROS 2 test commands here." && exec bash'
