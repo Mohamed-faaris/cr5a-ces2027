@@ -41,7 +41,7 @@ export function deriveRobotStatus(input: StatusInput): RobotStatusInfo {
   }
   const payload = input.errors?.GetErrorID ?? input.errors?.robot_return ?? input.errors;
   const mode = String(input.mode?.value ?? "").toLowerCase();
-  const modeMatch = mode.match(/^\\s*(-?\\d+)/);
+  const modeMatch = mode.match(/^\s*(-?\d+)/);
   const modeCode = modeMatch ? Number(modeMatch[1]) : null;
 
   if (errorPresent(payload) || mode.includes("error") || modeCode === 9) return ROBOT_STATUS.error;
@@ -67,7 +67,7 @@ export function deriveRobotStatus(input: StatusInput): RobotStatusInfo {
 export function formatRobotMode(value?: string): string {
   if (!value) return "Unavailable";
   const trimmed = value.trim();
-  const match = trimmed.match(/^(-?\\d+)/);
+  const match = trimmed.match(/^(-?\d+)/);
   if (!match) return trimmed.length > 32 ? trimmed.slice(0, 32) + "…" : trimmed;
   const code = Number(match[1]);
   const labels: Record<number, string> = {
