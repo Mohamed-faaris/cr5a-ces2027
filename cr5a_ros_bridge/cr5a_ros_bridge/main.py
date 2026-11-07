@@ -41,6 +41,9 @@ def main():
             port=int(api_config.get("port", 8000)),
             log_level=api_config.get("log_level", "info"),
             access_log=False,
+            # Avoid the legacy websockets backend, which can pass the removed
+            # asyncio.Lock(loop=...) argument on Python 3.10.
+            ws="wsproto",
         )
     finally:
         executor.shutdown()

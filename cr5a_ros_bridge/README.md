@@ -15,10 +15,18 @@ Install the bridge runtime dependencies:
 
 ```bash
 sudo apt update
-sudo apt install ros-humble-rosbridge-suite python3-yaml python3-fastapi python3-uvicorn
+sudo apt install ros-humble-rosbridge-suite python3-yaml python3-fastapi python3-uvicorn python3-wsproto
 ```
 
 MoveIt 2, `dobot_msgs_v4`, the CR5 description and the Dobot driver must already be built and sourced in the same ROS environment.
+
+### Python 3.10 WebSocket backend
+
+The API explicitly selects Uvicorn's `wsproto` backend. This avoids older
+`websockets` releases that pass the removed `loop=` argument to
+`asyncio.Lock` on Python 3.10. Install `python3-wsproto` as shown above.
+Do not work around this by monkey-patching `asyncio` or editing files under
+`/usr/lib/python3/dist-packages`.
 
 ## Build
 
