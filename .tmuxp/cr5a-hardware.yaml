@@ -9,7 +9,7 @@
 # with the demo profile.
 
 session_name: cr5a-hardware
-start_directory: .
+start_directory: ../
 windows:
   - window_name: hardware
     layout: tiled
