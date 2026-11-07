@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from .json_utils import finite_vector, json_safe
+from .json_utils import finite_quaternion, finite_vector, json_safe
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -26,11 +27,26 @@ from shape_msgs.msg import SolidPrimitive
 from rosidl_runtime_py.convert import message_to_ordereddict
 
 
+_json_logger = logging.getLogger("cr5a_ros_bridge.api")
+_json_non_finite_warnings = set()
+
+
 class SafeJSONResponse(JSONResponse):
     """JSON response that never emits non-standard NaN/Infinity tokens."""
 
     def render(self, content):
-        return super().render(json_safe(content))
+        invalid_paths = []
+        safe_content = json_safe(content, invalid_paths)
+        new_paths = [path for path in invalid_paths if path not in _json_non_finite_warnings]
+        if new_paths:
+            _json_non_finite_warnings.update(new_paths)
+            examples = ", ".join(new_paths[:5])
+            suffix = " ..." if len(new_paths) > 5 else ""
+            _json_logger.warning(
+                "Non-finite values in an API response were replaced with null: %s%s",
+                examples, suffix,
+            )
+        return super().render(safe_content)
 
 
 class NonStandardJSONConstant(ValueError):
@@ -470,9 +486,7 @@ def create_app(backend, config):
         shape = payload.get("shape", "box").lower()
         frame = payload.get("frame_id", config.get("moveit", {}).get("base_frame", "dummy_link"))
         pose_values = finite_vector(payload.get("position_m", [0, 0, 0]), 3, "position_m")
-        orientation = finite_vector(payload.get("orientation_xyzw", [0, 0, 0, 1]), 4, "orientation_xyzw")
-        if sum(component * component for component in orientation) <= 1e-12:
-            raise ValueError("orientation_xyzw must be a non-zero quaternion")
+        orientation = finite_quaternion(payload.get("orientation_xyzw", [0, 0, 0, 1]), "orientation_xyzw")
         obj = CollisionObject()
         obj.id = object_id or payload.get("id") or ("object_" + uuid.uuid4().hex[:10])
         obj.header.frame_id = frame
@@ -584,11 +598,9 @@ def create_app(backend, config):
             )
         try:
             link_position = finite_vector(link_pose.get("position_m"), 3, "link_frame_pose.position_m")
-            link_orientation = finite_vector(link_pose.get("orientation_xyzw"), 4, "link_frame_pose.orientation_xyzw")
+            link_orientation = finite_quaternion(link_pose.get("orientation_xyzw"), "link_frame_pose.orientation_xyzw")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if sum(component * component for component in link_orientation) <= 1e-12:
-            raise HTTPException(status_code=422, detail="link_frame_pose.orientation_xyzw must be a non-zero quaternion")
         if len(existing.primitives) != 1 or len(existing.primitive_poses) != 1 or existing.meshes:
             raise HTTPException(
                 status_code=422,
