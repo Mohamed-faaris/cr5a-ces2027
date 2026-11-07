@@ -182,7 +182,12 @@ class BridgeNode(Node):
         def completed(done):
             try:
                 response = done.result()
-                payload = {"value": response.robot_return, "res": response.res}
+                invalid_paths = []
+                payload = json_safe(
+                    {"value": response.robot_return, "res": response.res},
+                    invalid_paths,
+                )
+                self._warn_non_finite("robot.mode", invalid_paths)
                 if payload != self._last_robot_mode_payload:
                     self._last_robot_mode_payload = payload
                     self.emit("robot.mode", payload)
