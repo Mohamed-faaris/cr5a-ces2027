@@ -11,11 +11,11 @@ Two-page React + TypeScript operations console for the Dobot CR5A.
 
 Start the Dobot driver, robot_state_publisher, MoveIt and cr5a_ros_bridge first.
 
-\`\`\`bash
+```bash
 cd cr5a_web
 pnpm install
 pnpm dev
-\`\`\`
+```
 
 Open http://127.0.0.1:5173.
 
@@ -25,4 +25,4 @@ Copy .env.example to .env.local only when overriding the bridge URL or using an 
 
 ## UI development
 
-Read [UI_GUIDELINES.md](./UI_GUIDELINES.md) before creating or changing React UI. It defines the CR5A console's visual hierarchy, semantic status colors, WebSocket data flow, viewport rules, and motion-safety interactions.
+Read [UI_GUIDELINES.md](./UI_GUIDELINES.md) for frontend-specific status derivation, socket/store ownership, motion-state separation, and URDF/scene-frame assumptions.
