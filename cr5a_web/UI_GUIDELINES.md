@@ -9,6 +9,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Current colors: error = red; idle = green; paused = amber; moving = blue; planning = purple; connecting/initializing = cyan; disabled/disconnected/unknown = zinc.
 - Use `operationStatus()` for plan/execution outcomes. An operation result is not the robot's live status and must not overwrite it.
 - Drag mode is reported as RobotMode `6` (Backdrive); `start-drag`/`stop-drag` are commands, not confirmation. Wait for RobotMode telemetry before treating the toggle as changed.
+- Diagnostics uses `RobotStatus.is_enable` for its single Enable/Disable button. Do not infer the enabled state from a command response; enabling is blocked while controller errors are active.
 - `robot.get_errors` returns `GetErrorID`; `robot.get_error_details` calls `GetError` with a language argument. Keep error IDs and descriptions distinct.
 
 ## Socket and live state
