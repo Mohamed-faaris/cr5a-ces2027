@@ -287,7 +287,11 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "PowerOn":
-            if not self._connected() or self._errors:
+            if (
+                not self._connected()
+                or self._errors
+                or self._mode not in (3, 4)
+            ):
                 return self._set_result(response, -1)
             self._enabled = False
             self._paused = False
@@ -296,7 +300,11 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "EnableRobot":
-            if not self._connected() or self._errors:
+            if (
+                not self._connected()
+                or self._errors
+                or self._mode not in (3, 4)
+            ):
                 return self._set_result(response, -1)
             self._enabled = True
             self._paused = False
@@ -305,7 +313,8 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "DisableRobot":
-            self._cancel_active_trajectory()
+            if self._mode == 7 and not self._cancel_active_trajectory():
+                return self._set_result(response, -1)
             self._enabled = False
             self._paused = False
             self._dragging = False
@@ -314,7 +323,7 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "StartDrag":
-            if not self._connected() or not self._enabled or self._errors or self._mode == 7:
+            if not self._connected() or not self._enabled or self._errors or self._mode != 5:
                 return self._set_result(response, -1)
             self._dragging = True
             self._paused = False
@@ -322,12 +331,14 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "StopDrag":
+            if not self._dragging:
+                return self._set_result(response, -1)
             self._dragging = False
             self._mode = 5 if self._enabled else 4
             return self._set_result(response)
 
         if name == "Pause":
-            if not self._enabled or not self._connected():
+            if not self._enabled or not self._connected() or self._mode not in (5, 7):
                 return self._set_result(response, -1)
             if self._mode == 7 and not self._cancel_active_trajectory():
                 self.get_logger().warning(
@@ -340,7 +351,7 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "Continue":
-            if not self._enabled or not self._connected():
+            if not self._enabled or not self._connected() or not self._paused:
                 return self._set_result(response, -1)
             # A cancelled fake trajectory is not replayed; submit a fresh MoveIt plan.
             self._paused = False
@@ -359,7 +370,8 @@ class DobotSimulation(Node):
             return self._set_result(response)
 
         if name == "ResetRobot":
-            self._cancel_active_trajectory()
+            if self._mode == 7 and not self._cancel_active_trajectory():
+                return self._set_result(response, -1)
             self.set_parameters([Parameter("simulated_error_code", value=0)])
             self._active_error_code = 0
             self._errors.clear()
