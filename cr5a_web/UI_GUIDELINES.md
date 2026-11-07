@@ -15,6 +15,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 ## Socket and live state
 
 - `SocketProvider` starts the shared connection implemented by `src/lib/socket-client.ts`. It owns subscriptions, request correlation, reconnects, and initial snapshot/model/scene loading.
+- Initial `robot.get_model` loading retries transient `robot_description`-unavailable responses while `robot_state_publisher` and MoveGroup initialize; preserve this bounded retry when changing initial state loading.
 - Use `useRobotSocket().request()` for bridge requests and `useRobotStore` for shared live state. Do not create page-specific WebSockets or a second source of truth for telemetry.
 - The socket client updates the store from `robot.*`, `motion.*`, and `moveit.scene` events. A request acknowledgement is not a substitute for the resulting telemetry/event.
 - Endpoint, environment overrides, and the distinction from raw rosbridge are documented in the root `AGENTS.md`.
