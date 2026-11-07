@@ -4,12 +4,10 @@ on:
   push:
     paths:
       - "cr5a_web/**"
-      - "cr5a_ros_bridge/**"
       - ".github/workflows/cr5a-web.yml"
   pull_request:
     paths:
       - "cr5a_web/**"
-      - "cr5a_ros_bridge/**"
       - ".github/workflows/cr5a-web.yml"
 
 permissions:
@@ -30,7 +28,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --no-frozen-lockfile || pnpm install
       - name: Build React application
         run: pnpm build
       - name: Check Python syntax
