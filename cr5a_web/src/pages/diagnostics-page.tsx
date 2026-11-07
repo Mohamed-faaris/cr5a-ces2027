@@ -34,6 +34,7 @@ export function DiagnosticsPage(){
   const activeError=hasActiveError(errors)||status.key==="error";
   const canCommand=bridgeState==="connected"&&robotStatus?.is_connected===true&&capabilities.robot_commands_enabled===true;
   const paused=status.key==="paused";
+  const dragActive=status.key==="moving"&&/backdrive|\b6\b/i.test(robotMode?.value??"");
 
   const copyPayload=useMemo(()=>{
     const names=joints?.name??[];
@@ -141,10 +142,19 @@ export function DiagnosticsPage(){
           {busy==="resume"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Play
         </Button>
         <div className="flex-1"/>
+        <Button variant="outline" onClick={()=>runCommand("start-drag","Enable drag mode")}
+          disabled={!canCommand||busy!==null||dragActive||activeError||robotStatus?.is_enable!==true}>
+          {busy==="start-drag"?<RefreshCw size={14} className="animate-spin"/>:null} Start drag
+        </Button>
+        <Button variant="outline" onClick={()=>runCommand("stop-drag","Disable drag mode")}
+          disabled={!canCommand||busy!==null}>
+          {busy==="stop-drag"?<RefreshCw size={14} className="animate-spin"/>:null} Stop drag
+        </Button>
         <Button variant="outline" onClick={clearErrors} disabled={bridgeState!=="connected"||robotStatus?.is_connected!==true||capabilities.error_clear_enabled!==true||busy!==null}>
           <RefreshCw size={14}/> Clear errors
         </Button>
       </div>
+      <div className="border-t border-zinc-100 px-5 py-2 text-xs text-zinc-500">Drag mode allows hand-guiding the arm. Confirm the workspace is clear and support the tool/load before enabling. Controller mode 6 (Backdrive) indicates drag mode; a successful request alone does not confirm activation.</div>
       {!canCommand&&<div className="border-t border-zinc-100 px-5 py-2.5 text-xs text-zinc-500">Robot commands are disabled by the bridge safety configuration.</div>}
     </section>
 
