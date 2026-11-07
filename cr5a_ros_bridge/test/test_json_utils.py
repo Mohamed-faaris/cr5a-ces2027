@@ -10,6 +10,10 @@ from cr5a_ros_bridge.json_utils import (
 
 class JSONSafeTests(unittest.TestCase):
     def test_non_finite_numbers_are_null_and_reported(self):
+        overflow_number = json.loads("1e999")
+        self.assertTrue(math.isinf(overflow_number))
+        self.assertIsNone(json_safe(overflow_number))
+
         invalid_paths = []
         value = {
             "nan": float("nan"),
