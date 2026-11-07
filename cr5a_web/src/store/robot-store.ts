@@ -38,7 +38,11 @@ export const useRobotStore = create<RobotStore>((set)=>({
   setJoints:(value,timestamp)=>set((state)=>{
     const previous=state.joints?.position??[];
     const next=value.position??[];
-    const changed=previous.length===next.length && next.some((item,index)=>Math.abs(item-(previous[index]??item))>0.002);
+    const changed=previous.length===next.length && next.some((item,index)=>{
+      const before=previous[index];
+      return typeof item==="number"&&Number.isFinite(item)&&
+        typeof before==="number"&&Number.isFinite(before)&&Math.abs(item-before)>0.002;
+    });
     return {joints:value,lastJointChangeAt:changed?Date.now():state.lastJointChangeAt,timestamps:{...state.timestamps,joints:timestamp??state.timestamps.joints}};
   }),
   setTcp:(value,timestamp)=>set((state)=>({tcp:value,timestamps:{...state.timestamps,tcp:timestamp??state.timestamps.tcp}})),
