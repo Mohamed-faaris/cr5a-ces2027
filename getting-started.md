@@ -150,7 +150,7 @@ Expected environment:
 - ROS_DISTRO should be humble.
 - The container OS should be Ubuntu 22.04.
 - ros2 pkg prefix should return a path for moveit_ros_move_group.
-- `ros2 pkg prefix realsense2_camera` should return the installed RealSense wrapper path. Confirm the D415 is visible with `rs-enumerate-devices`.
+- `ros2 pkg prefix realsense2_camera` should return the installed RealSense wrapper path. Confirm the D415 is visible with `lsusb`.
 
 The image already provides the MoveIt 2 underlay. Do not clone and rebuild the entire MoveIt 2 source tree for this repository.
 
@@ -175,7 +175,7 @@ apt-get install -y \
   ros-humble-ros2-controllers \
   ros-humble-xacro \
   ros-humble-joint-state-publisher-gui \
-  ros-humble-librealsense2-tools \
+  ros-humble-librealsense2 \
   ros-humble-realsense2-camera \
   tmux
 ~~~
@@ -835,8 +835,8 @@ Open http://127.0.0.1:5173 in a browser. For the fake-hardware workflow, start t
 | rosdep cannot resolve another key | Check the package manifest that declares it; do not install a guessed package name. Run `rosdep update` and retry after verifying the source checkout. |
 | RViz cannot open a display | Check DISPLAY, the X11 socket mount, and the host xhost permission. |
 | Driver cannot connect | Confirm controller IP, host network connectivity, Ethernet route, and IP_address. |
-| D415 camera pane exits with `package 'realsense2_camera' not found` | Install `ros-humble-realsense2-camera` and `ros-humble-librealsense2-tools`, rebuild is not required for apt packages, then open a new Humble shell. |
-| D415 is not detected | Check USB 3 connection and run `rs-enumerate-devices`; for the Docker workflow, recreate the container with `/dev/bus/usb` passed through. |
+| D415 camera pane exits with `package 'realsense2_camera' not found` | Install `ros-humble-realsense2-camera` and `ros-humble-librealsense2`, rebuild is not required for apt packages, then open a new Humble shell. |
+| D415 is not detected | Check USB 3 connection and run `lsusb`; for the Docker workflow, recreate the container with `/dev/bus/usb` passed through. |
 | MoveIt has no current joint state | Check that the correct driver or fake-hardware demo is running and publishing joint states. |
 | RobotStatus or TCP unavailable in demo | Confirm `dobot_simulation` is running, `/joint_states` is fresh, and TF contains `dummy_link` to `Link6`. |
 | Bridge cannot find MoveIt actions | Start MoveIt first and check ros2 action list. |
