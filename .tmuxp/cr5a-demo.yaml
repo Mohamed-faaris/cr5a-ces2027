@@ -22,6 +22,17 @@ windows:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-moveit-demo bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
+  # The fake PGEA server is started by cr5_moveit demo.launch.py.
+  # This window monitors its action endpoint and provides a ROS shell; do not
+  # launch the physical pgea_gripper node in the simulation ROS domain.
+  - window_name: gripper
+    layout: even-horizontal
+    panes:
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh gripper-monitor bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec watch -n 3 ros2 action list"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-gripper bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
+
   - window_name: bridge
     layout: even-horizontal
     panes:

@@ -631,6 +631,7 @@ The demo profile opens each part of the development stack in its own tmux window
 | Window | What it starts |
 |---|---|
 | `moveit-demo` | MoveIt fake-hardware demo, RViz, and Dobot simulation adapter |
+| `gripper` | Monitor the simulated PGEA action server and run ROS 2 gripper commands from an interactive shell |
 | `bridge` | CR5A REST/WebSocket bridge (simulation profile) and rosbridge |
 | `frontend` | React/Vite web console |
 | `monitor` | ROS node and topic monitors |
@@ -675,7 +676,9 @@ cd /root/cr5a_ws
 tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 ~~~
 
-The tmux session is named `cr5a-demo`. Click the window names in the bottom status bar to switch between MoveIt, bridge, frontend, monitor, and shell.
+The tmux session is named `cr5a-demo`. Click the window names in the bottom status bar to switch between MoveIt, gripper, bridge, frontend, monitor, and shell.
+The demo's PGEA is simulated by `cr5_moveit demo.launch.py`. The `gripper` window does not launch the physical `pgea_gripper` node; use the hardware profile for the real gripper.
+
 
 ### Automatic session logs
 
