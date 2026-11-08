@@ -10,7 +10,13 @@ export type GripperSnapshot={
   position?:number;current?:number;error?:number;temperature?:number|null;
   alarm?:{code?:number;name?:string;remedy?:string};
 };
-
+export type GripperProfile={
+  id:string;name:string;force_percent:number;speed_percent:number;
+};
+export type GripperProfilesState={
+  profiles:GripperProfile[];active_profile_id:string;storage_path:string;
+  runtime_synced:boolean;runtime_error?:string|null;saved_profile?:GripperProfile;
+};
 export type GripperState={
   connected:boolean;simulation:boolean;status:GripperSnapshot|null;
   error:string|null;commands_enabled:boolean;message?:string;
@@ -27,9 +33,15 @@ export function useGripperController(){
   const [gripper,setGripper]=useState<GripperState|null>(null);
   const [targetMm,setTargetMm]=useState("0");
   const [targetDirty,setTargetDirty]=useState(false);
-  const [busy,setBusy]=useState<"move"|"initialize"|"calibrate"|"stop"|null>(null);
+  const [busy,setBusy]=useState<"move"|"initialize"|"calibrate"|"stop"|"profile-save"|"profile-apply"|"profile-delete"|null>(null);
   const [notice,setNotice]=useState<{tone:"success"|"error"|"neutral";message:string}|null>(null);
   const [refreshing,setRefreshing]=useState(false);
+  const [profiles,setProfiles]=useState<GripperProfilesState|null>(null);
+  const [selectedProfileId,setSelectedProfileId]=useState("");
+  const [profileName,setProfileName]=useState("");
+  const [forcePercent,setForcePercent]=useState("60");
+  const [speedPercent,setSpeedPercent]=useState("50");
+  const [profileDraftDirty,setProfileDraftDirty]=useState(false);
 
   const refresh=useCallback(async(syncTarget=false)=>{
     setRefreshing(true);
@@ -51,11 +63,31 @@ export function useGripperController(){
     }
   },[request,simulation,targetDirty]);
 
+  const fetchProfiles=useCallback(async()=>{
+    try{
+      const value=await request("gripper.get_profiles") as GripperProfilesState;
+      setProfiles(value);
+      if(!profileDraftDirty){
+        const active=value.profiles.find((item)=>item.id===value.active_profile_id)??value.profiles[0];
+        if(active){
+          setSelectedProfileId(active.id);
+          setProfileName(active.name);
+          setForcePercent(String(active.force_percent));
+          setSpeedPercent(String(active.speed_percent));
+        }
+      }
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }
+  },[request]);
+
   useEffect(()=>{
     void refresh(true);
     const timer=window.setInterval(()=>{void refresh(false);},1500);
     return ()=>window.clearInterval(timer);
   },[refresh]);
+
+  useEffect(()=>{void fetchProfiles();},[fetchProfiles]);
 
   const status=gripper?.status??null;
   const positionMm=typeof status?.position==="number"
@@ -76,6 +108,95 @@ export function useGripperController(){
   const sourceLabel=gripper?.simulation||simulation?"Fake PGEA":"PGEA-100-40-W";
   const alarm=status?.alarm;
   const alarmActive=typeof alarm?.code==="number"&&alarm.code!==0;
+  const selectedProfile=profiles?.profiles.find((item)=>item.id===selectedProfileId)??null;
+  const numericForce=Number(forcePercent);
+  const numericSpeed=Number(speedPercent);
+  const profileValid=Number.isInteger(numericForce)&&numericForce>=20&&numericForce<=100&&
+    Number.isInteger(numericSpeed)&&numericSpeed>=1&&numericSpeed<=100&&profileName.trim().length>0&&profileName.trim().length<=48;
+
+  const updateProfileDraft=(updates:{name?:string;force?:string;speed?:string})=>{
+    setProfileDraftDirty(true);
+    if(updates.name!==undefined)setProfileName(updates.name);
+    if(updates.force!==undefined)setForcePercent(updates.force);
+    if(updates.speed!==undefined)setSpeedPercent(updates.speed);
+  };
+  const selectProfile=(id:string)=>{
+    if(profileDraftDirty&&!window.confirm("Discard unsaved profile edits?"))return;
+    const profile=profiles?.profiles.find((item)=>item.id===id);
+    if(!profile)return;
+    setSelectedProfileId(id);
+    setProfileName(profile.name);
+    setForcePercent(String(profile.force_percent));
+    setSpeedPercent(String(profile.speed_percent));
+    setProfileDraftDirty(false);
+    setNotice(null);
+  };
+
+  const resetProfileDraft=()=>{
+    const profile=profiles?.profiles.find((item)=>item.id===selectedProfileId);
+    if(!profile)return;
+    setProfileName(profile.name);
+    setForcePercent(String(profile.force_percent));
+    setSpeedPercent(String(profile.speed_percent));
+    setProfileDraftDirty(false);
+  };
+
+  const saveProfile=useCallback(async(asNew=false)=>{
+    if(!profileValid){
+      setNotice({tone:"error",message:"Profile name must be 1–48 characters; force must be 20–100% and speed 1–100% (whole numbers)."});
+      return;
+    }
+    setBusy("profile-save");setNotice(null);
+    try{
+      const profile={
+        ...(!asNew&&selectedProfileId?{id:selectedProfileId}:{}),
+        name:profileName.trim(),force_percent:numericForce,speed_percent:numericSpeed
+      };
+      const value=await request("gripper.save_profile",{profile}) as GripperProfilesState;
+      setProfiles(value);
+      const saved=value.saved_profile??value.profiles.find((item)=>item.id===selectedProfileId);
+      if(saved){
+        setSelectedProfileId(saved.id);
+        setProfileName(saved.name);
+        setForcePercent(String(saved.force_percent));
+        setSpeedPercent(String(saved.speed_percent));
+      }
+      setProfileDraftDirty(false);
+      setNotice(value.runtime_error
+        ?{tone:"error",message:"Profile saved, but the PGEA did not accept the runtime settings: "+value.runtime_error}
+        :{tone:"success",message:asNew?"New gripper profile saved.":"Gripper profile saved."});
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  },[request,profileValid,selectedProfileId,profileName,numericForce,numericSpeed]);
+
+  const applyProfile=useCallback(async()=>{
+    if(!selectedProfileId)return;
+    setBusy("profile-apply");setNotice(null);
+    try{
+      const value=await request("gripper.apply_profile",{profile_id:selectedProfileId}) as GripperProfilesState;
+      setProfiles(value);
+      setProfileDraftDirty(false);
+      setNotice({tone:"success",message:"Active PGEA profile applied. Subsequent position moves will use "+forcePercent+"% force and "+speedPercent+"% speed."});
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  },[request,selectedProfileId,forcePercent,speedPercent]);
+
+  const deleteProfile=useCallback(async()=>{
+    if(!selectedProfileId||selectedProfileId===profiles?.active_profile_id)return;
+    if(!window.confirm("Delete the gripper profile '"+profileName+"'?"))return;
+    setBusy("profile-delete");setNotice(null);
+    try{
+      const value=await request("gripper.delete_profile",{profile_id:selectedProfileId}) as GripperProfilesState;
+      setProfiles(value);
+      const active=value.profiles.find((item)=>item.id===value.active_profile_id)??value.profiles[0];
+      if(active)selectProfile(active.id);
+      setNotice({tone:"success",message:"Gripper profile deleted."});
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  },[request,selectedProfileId,profiles,profileName]);
 
   const sendMove=useCallback(async(mm:number)=>{
     if(!Number.isFinite(mm)||mm<0||mm>PGEA_STROKE_MM){
@@ -160,6 +281,9 @@ export function useGripperController(){
     gripper,status,positionMm,currentLabel,sourceLabel,alarm,alarmActive,
     targetMm,targetValid,busy,notice,refreshing,readiness,
     initialized,controllerEnabled,activeRobotError,canControl,canMove,
+    profiles,selectedProfile,selectedProfileId,profileName,forcePercent,speedPercent,profileValid,
+    profileBusy:busy==="profile-save"||busy==="profile-apply"||busy==="profile-delete",
+    profileDraftDirty,updateProfileDraft,selectProfile,resetProfileDraft,saveProfile,applyProfile,deleteProfile,fetchProfiles,
     setTargetMm:(value:string)=>{
       setTargetDirty(true);
       setTargetMm(value);

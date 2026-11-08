@@ -56,6 +56,25 @@ robot:
   allow_error_clear: false
 
 gripper:
+  # User-edited profiles persist outside the repository. Override the default
+  # ~/.config/cr5a_ros_bridge/gripper_profiles.yaml with
+  # CR5A_GRIPPER_PROFILES_FILE (mount that path in containers).
+  profiles_file: ""
+  node_name: /pgea_gripper
+  default_profile_id: balanced
+  profiles:
+    - id: gentle
+      name: Gentle
+      force_percent: 30
+      speed_percent: 25
+    - id: balanced
+      name: Balanced
+      force_percent: 60
+      speed_percent: 50
+    - id: firm
+      name: Firm
+      force_percent: 80
+      speed_percent: 30
   # Dedicated PGEA actions are isolated from generic ROS service/topic access.
   allow_commands: true
   action_name: /gripper_action_controller/gripper_cmd

@@ -14,6 +14,11 @@ from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .json_utils import finite_quaternion, finite_vector, json_safe, strict_json_loads
+from .gripper_profiles import (
+    DEFAULT_GRIPPER_PROFILES,
+    GripperProfileStore,
+    resolve_profiles_path,
+)
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -208,6 +213,49 @@ def create_app(backend, config):
     auth_enabled = bool(auth.get("enabled", False))
     token_name = auth.get("token_env", "CR5A_BRIDGE_TOKEN")
     token = os.getenv(token_name)
+
+    gripper_cfg = config.get("gripper", {})
+    try:
+        profile_store = GripperProfileStore(
+            resolve_profiles_path(gripper_cfg),
+            gripper_cfg.get("profiles") or DEFAULT_GRIPPER_PROFILES,
+            gripper_cfg.get("default_profile_id", "balanced"),
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid PGEA gripper profile configuration: {exc}") from exc
+    gripper_runtime = {"profile_id": None}
+
+    async def apply_gripper_profile(profile):
+        node_name = gripper_cfg.get("node_name", "/pgea_gripper")
+        service_name = _parameter_service_name(
+            backend, node_name, "set_parameters_atomically"
+        )
+        request = SetParametersAtomically.Request()
+        request.parameters = [
+            Parameter(name="force_percent", value=int(profile["force_percent"])).to_parameter_msg(),
+            Parameter(name="speed_percent", value=int(profile["speed_percent"])).to_parameter_msg(),
+        ]
+        response = await _await_ros(
+            backend.call_service(service_name, SetParametersAtomically, request),
+            float(gripper_cfg.get("profile_apply_timeout_sec", 3.0)),
+        )
+        if not response.result.successful:
+            raise HTTPException(
+                status_code=409,
+                detail=response.result.reason or "PGEA rejected the selected force/speed settings",
+            )
+        gripper_runtime["profile_id"] = profile["id"]
+
+    async def ensure_active_gripper_profile():
+        profile = profile_store.active()
+        if gripper_runtime["profile_id"] != profile["id"]:
+            await apply_gripper_profile(profile)
+        return profile
+
+    def gripper_profile_snapshot():
+        return profile_store.snapshot(
+            runtime_synced=gripper_runtime["profile_id"] == profile_store.active_profile_id
+        )
 
     if auth_enabled and not token:
         raise RuntimeError(
@@ -1030,6 +1078,65 @@ def create_app(backend, config):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def websocket_request(method: str, params: dict):
+        if method == "gripper.get_profiles":
+            try:
+                await ensure_active_gripper_profile()
+            except HTTPException as exc:
+                snapshot = gripper_profile_snapshot()
+                snapshot["runtime_error"] = exc.detail
+                return snapshot
+            return gripper_profile_snapshot()
+
+        if method == "gripper.save_profile":
+            try:
+                profile = profile_store.upsert(params.get("profile", {}))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            runtime_error = None
+            if profile["id"] == profile_store.active_profile_id:
+                gripper_runtime["profile_id"] = None
+                try:
+                    await apply_gripper_profile(profile)
+                except HTTPException as exc:
+                    runtime_error = exc.detail
+            snapshot = gripper_profile_snapshot()
+            snapshot["saved_profile"] = profile
+            snapshot["runtime_error"] = runtime_error
+            return snapshot
+
+        if method == "gripper.delete_profile":
+            profile_id = str(params.get("profile_id") or "")
+            try:
+                profile_store.delete(profile_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return gripper_profile_snapshot()
+
+        if method == "gripper.apply_profile":
+            require_gripper_commands()
+            profile_id = str(params.get("profile_id") or "")
+            profile = profile_store.get(profile_id)
+            if profile is None:
+                raise HTTPException(status_code=404, detail="Unknown gripper profile")
+            previous_profile = profile_store.active()
+            await apply_gripper_profile(profile)
+            try:
+                profile_store.set_active(profile_id)
+            except ValueError as exc:
+                try:
+                    await apply_gripper_profile(previous_profile)
+                except HTTPException:
+                    gripper_runtime["profile_id"] = None
+                raise HTTPException(status_code=500, detail=f"Profile was applied but could not be persisted: {exc}") from exc
+            backend.emit("gripper.profile", {
+                "active_profile_id": profile_id,
+                "force_percent": profile["force_percent"],
+                "speed_percent": profile["speed_percent"],
+            })
+            return gripper_profile_snapshot()
+
         if method == "gripper.get_status":
             return await read_gripper_status()
 
@@ -1063,6 +1170,7 @@ def create_app(backend, config):
                 raise HTTPException(status_code=503, detail=status.get("error") or "PGEA is not connected")
             if int((status.get("status") or {}).get("init", 0)) != 1:
                 raise HTTPException(status_code=409, detail="PGEA is not initialized; initialize it before moving")
+            await ensure_active_gripper_profile()
 
             position = finite_vector([params.get("position_m")], 1, "position_m")[0]
             if not 0.0 <= position <= 0.020:

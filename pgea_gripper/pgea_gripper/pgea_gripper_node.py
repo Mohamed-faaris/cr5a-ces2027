@@ -44,6 +44,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 from pgea_gripper_interfaces.action import GripUntilForce
@@ -154,6 +155,7 @@ class PGEAGripperNode(Node):
         # writes to the PGEA command registers.
         self._motion_state_lock = threading.Lock()
         self._active_motion: str | None = None
+        self.add_on_set_parameters_callback(self._on_profile_parameters)
         self._jog_deadline: float | None = None
         self._last_position_m = 0.0
         self._last_init_state: int | None = None
@@ -209,6 +211,39 @@ class PGEAGripperNode(Node):
             + (f" [robot_ip from {host_source}]" if host_source else "")
             + ". Waiting for first connection..."
         )
+
+    def _on_profile_parameters(self, parameters):
+        """Apply force/speed parameter changes to the values used by motion."""
+        updates = {}
+        for parameter in parameters:
+            if parameter.name not in ("force_percent", "speed_percent"):
+                continue
+            value = parameter.value
+            if isinstance(value, bool) or not isinstance(value, int):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be an integer percentage",
+                )
+            minimum = 20 if parameter.name == "force_percent" else 1
+            if not minimum <= value <= 100:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be between {minimum} and 100",
+                )
+            updates[parameter.name] = value
+
+        if updates:
+            with self._motion_state_lock:
+                if self._active_motion is not None:
+                    return SetParametersResult(
+                        successful=False,
+                        reason=f"Cannot change gripper profile while {self._active_motion} is active",
+                    )
+                if "force_percent" in updates:
+                    self._force_percent = updates["force_percent"]
+                if "speed_percent" in updates:
+                    self._speed_percent = updates["speed_percent"]
+        return SetParametersResult(successful=True)
 
     # ── connection management ─────────────────────────────────────────
     def _build_driver(self) -> PGEADriver:
