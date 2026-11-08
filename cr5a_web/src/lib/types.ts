@@ -18,7 +18,7 @@ export interface RobotCapabilities {
   motion_execution_enabled?: boolean;
 }
 export interface RobotModel {
-  urdf: string; srdf?: string; mesh_prefix: string; mesh_base_url: string;
+  urdf: string; srdf?: string;
   base_frame: string; end_effector_link: string; group_name: string;
 }
 export interface CollisionObject {

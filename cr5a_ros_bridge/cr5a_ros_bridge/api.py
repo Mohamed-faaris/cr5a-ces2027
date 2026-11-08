@@ -49,6 +49,25 @@ class SafeJSONResponse(JSONResponse):
         return super().render(safe_content)
 
 
+class PackageStaticFiles(StaticFiles):
+    """Serve package assets installed with colcon --symlink-install."""
+
+    def lookup_path(self, path):
+        for directory in self.all_directories:
+            root = os.path.abspath(directory)
+            full_path = os.path.abspath(os.path.join(root, path))
+            try:
+                if os.path.commonpath((root, full_path)) != root:
+                    continue
+                stat_result = os.stat(full_path)
+            except (FileNotFoundError, NotADirectoryError, ValueError):
+                continue
+            if not os.path.isfile(full_path):
+                continue
+            return full_path, stat_result
+        return "", None
+
+
 class StrictJSONRoute(APIRoute):
     """Reject non-standard and overflowed numbers in every JSON request body."""
 
@@ -99,8 +118,8 @@ async def _await_ros(future, timeout=5.0):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-def _parameter_client(backend, node_name, suffix, service_type):
-    return backend.parameter_client(node_name, suffix, service_type)
+def _parameter_service_name(backend, node_name, suffix):
+    return backend.parameter_service_name(node_name, suffix)
 
 
 def _parameter_value_to_python(value):
@@ -129,21 +148,26 @@ def _parameter_value_to_python(value):
 
 
 async def _read_parameters(backend, node_name, names=None, describe=True):
-    list_client = _parameter_client(backend, node_name, "list_parameters", ListParameters)
-    list_request = ListParameters.Request()
-    list_request.depth = 0
-    listed = await _await_ros(
-        backend.call_service(list_client.service_name, ListParameters, list_request)
-    )
-    parameter_names = list(names) if names else list(listed.result.names)
+    # Avoid an unnecessary ListParameters round-trip when the caller already
+    # knows the exact parameters it needs (for example robot_description).
+    if names:
+        parameter_names = list(names)
+    else:
+        list_service = _parameter_service_name(backend, node_name, "list_parameters")
+        list_request = ListParameters.Request()
+        list_request.depth = 0
+        listed = await _await_ros(
+            backend.call_service(list_service, ListParameters, list_request)
+        )
+        parameter_names = list(listed.result.names)
     if not parameter_names:
         return {"parameters": {}, "descriptors": {}}
 
-    get_client = _parameter_client(backend, node_name, "get_parameters", GetParameters)
+    get_service = _parameter_service_name(backend, node_name, "get_parameters")
     get_request = GetParameters.Request()
     get_request.names = parameter_names
     values = await _await_ros(
-        backend.call_service(get_client.service_name, GetParameters, get_request)
+        backend.call_service(get_service, GetParameters, get_request)
     )
     output = {}
     for name, value in zip(parameter_names, values.values):
@@ -151,14 +175,14 @@ async def _read_parameters(backend, node_name, names=None, describe=True):
 
     descriptors = {}
     if describe:
-        describe_client = _parameter_client(
-            backend, node_name, "describe_parameters", DescribeParameters
+        describe_service = _parameter_service_name(
+            backend, node_name, "describe_parameters"
         )
         describe_request = DescribeParameters.Request()
         describe_request.names = parameter_names
         described = await _await_ros(
             backend.call_service(
-                describe_client.service_name, DescribeParameters, describe_request
+                describe_service, DescribeParameters, describe_request
             )
         )
         descriptors = {
@@ -177,18 +201,6 @@ def create_app(backend, config):
     )
     app.router.route_class = StrictJSONRoute
 
-    # Static meshes only; robot state and commands are carried over the application WebSocket.
-    try:
-        from ament_index_python.packages import get_package_share_directory
-        mesh_root = Path(get_package_share_directory("dobot_rviz")) / "meshes"
-        app.mount(
-            "/assets/dobot_rviz/meshes",
-            StaticFiles(directory=str(mesh_root), check_dir=False),
-            name="dobot-rviz-meshes",
-        )
-    except Exception:
-        pass
-
     auth = config.get("auth", {})
     auth_enabled = bool(auth.get("enabled", False))
     token_name = auth.get("token_env", "CR5A_BRIDGE_TOKEN")
@@ -201,13 +213,24 @@ def create_app(backend, config):
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        # CR5 visual meshes are read-only geometry assets; all robot data and commands stay authenticated.
-        if auth_enabled and request.url.path != "/health" and not request.url.path.startswith("/assets/dobot_rviz/meshes/"):
+        is_public_mesh = request.url.path.startswith("/assets/dobot_rviz/meshes/")
+        if auth_enabled and request.url.path != "/health" and not is_public_mesh:
             supplied = request.headers.get("Authorization", "")
             if supplied != "Bearer " + token:
                 return JSONResponse(status_code=401, content={"detail": "Bearer token required"})
 
         return await call_next(request)
+
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        package_share = Path(get_package_share_directory("dobot_rviz"))
+        app.mount(
+            "/assets/dobot_rviz",
+            PackageStaticFiles(directory=str(package_share), check_dir=False),
+            name="dobot-rviz-assets",
+        )
+    except Exception as exc:
+        _json_logger.warning("Dobot RViz package assets are unavailable: %s", exc)
 
     @app.get("/health")
     async def health():
@@ -319,8 +342,8 @@ def create_app(backend, config):
         if not node_name or not isinstance(values, dict) or not values:
             raise HTTPException(status_code=422, detail="node and non-empty parameters object are required")
         _validate_finite_json(values, "parameters")
-        client = _parameter_client(
-            backend, node_name, "set_parameters_atomically", SetParametersAtomically
+        service_name = _parameter_service_name(
+            backend, node_name, "set_parameters_atomically"
         )
         request = SetParametersAtomically.Request()
         try:
@@ -331,7 +354,7 @@ def create_app(backend, config):
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Invalid parameter value: {exc}") from exc
         result = await _await_ros(
-            backend.call_service(client.service_name, SetParametersAtomically, request)
+            backend.call_service(service_name, SetParametersAtomically, request)
         )
         return {"successful": result.result.successful, "reason": result.result.reason}
 
@@ -365,8 +388,8 @@ def create_app(backend, config):
             if not values:
                 results[node_name] = {"successful": True, "reason": "No parameters to set"}
                 continue
-            client = _parameter_client(
-                backend, node_name, "set_parameters_atomically", SetParametersAtomically
+            service_name = _parameter_service_name(
+                backend, node_name, "set_parameters_atomically"
             )
             request = SetParametersAtomically.Request()
             try:
@@ -375,7 +398,7 @@ def create_app(backend, config):
                     for name, value in values.items()
                 ]
                 result = await _await_ros(
-                    backend.call_service(client.service_name, SetParametersAtomically, request)
+                    backend.call_service(service_name, SetParametersAtomically, request)
                 )
                 results[node_name] = {
                     "successful": result.result.successful,
@@ -941,6 +964,16 @@ def create_app(backend, config):
                 "tcp_topic", "/dobot_msgs_v4/msg/ToolVectorActual"
             ))
             mode = backend.event_snapshot("robot.mode")
+            try:
+                mode_response = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+                mode_data = {
+                    "value": str(mode_response.robot_return),
+                    "res": int(mode_response.res),
+                }
+                backend.emit("robot.mode", mode_data)
+                mode = {"data": mode_data}
+            except HTTPException:
+                pass
             errors = backend.event_snapshot("robot.errors")
             status_data = status.get("data", {}) if status else {}
             return {
@@ -984,8 +1017,6 @@ def create_app(backend, config):
             return {
                 "urdf": urdf,
                 "srdf": descriptions.get("robot_description_semantic"),
-                "mesh_prefix": "package://dobot_rviz/meshes/",
-                "mesh_base_url": "/assets/dobot_rviz/meshes/",
                 "base_frame": config.get("moveit", {}).get("base_frame", "dummy_link"),
                 "end_effector_link": config.get("moveit", {}).get("end_effector_link", "Link6"),
                 "group_name": config.get("moveit", {}).get("group_name", "cr5_group"),

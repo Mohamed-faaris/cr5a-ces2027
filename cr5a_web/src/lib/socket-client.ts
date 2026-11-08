@@ -62,15 +62,37 @@ function handleEvent(channel:string,data:any,timestamp?:string){
     default:break;
   }
 }
+const modelRetryDelays=[250,500,750,1000,1500,2000,2000,2000,2000];
+
+async function requestRobotModel(){
+  for(let attempt=0;;attempt++){
+    try{
+      return await request("robot.get_model");
+    }catch(reason){
+      const error=reason instanceof Error?reason:new Error(String(reason));
+      const retryable=/robot_description is unavailable|Service unavailable:/.test(error.message);
+      if(!retryable||attempt>=modelRetryDelays.length)throw error;
+      await new Promise<void>((resolve)=>window.setTimeout(resolve,modelRetryDelays[attempt]));
+      if(!socket||socket.readyState!==WebSocket.OPEN){
+        throw new Error("ROS bridge disconnected while waiting for robot_description");
+      }
+    }
+  }
+}
+
 async function loadInitialState(){
   const store=useRobotStore.getState();
-  store.setSceneLoading(true);store.setModelLoading(true);
+  const needsModel=store.model===null;
+  store.setSceneLoading(true);
+  if(needsModel)store.setModelLoading(true);
   const tasks=[
     request("robot.get_snapshot").then((value)=>useRobotStore.getState().mergeSnapshot(value)),
     request("moveit.get_scene").then((value)=>useRobotStore.getState().setScene(value))
       .catch((error)=>useRobotStore.getState().setSceneLoading(false,String(error))),
-    request("robot.get_model").then((value)=>useRobotStore.getState().setModel(value))
-      .catch((error)=>useRobotStore.getState().setModelLoading(false,String(error))),
+    ...(needsModel?[
+      requestRobotModel().then((value)=>useRobotStore.getState().setModel(value))
+        .catch((error)=>useRobotStore.getState().setModelLoading(false,String(error)))
+    ]:[]),
     request("robot.get_joint_limits").then((value)=>useRobotStore.getState().setJointLimits(value)).catch(()=>undefined)
   ];
   await Promise.allSettled(tasks);
