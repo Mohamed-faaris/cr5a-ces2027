@@ -126,7 +126,7 @@ class DobotSimulation(Node):
             "StopDrag": StopDrag,
             "ClearError": ClearError,
         }
-        self._services = [
+        self._dashboard_services = [
             self.create_service(
                 service_type,
                 prefix + name,
