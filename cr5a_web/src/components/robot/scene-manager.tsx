@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { Download, Eye, EyeOff, FileJson, Pencil, Plus, ShieldCheck, ShieldOff, Tag, Trash2, Upload, X } from "lucide-react";
+import { ChevronDown, Download, Ellipsis, Eye, EyeOff, FileJson, Pencil, Plus, ShieldCheck, ShieldOff, Tag, Trash2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { CollisionObject, PlanningScene } from "@/lib/types";
 import { useRobotStore } from "@/store/robot-store";
@@ -535,13 +535,20 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
       <div><div className="text-sm font-semibold">Scene objects</div><div className="mt-0.5 text-[11px] text-zinc-400">{objects.length} objects · {world.length} collision active · {attached.length} attached</div></div>
       <div className="flex flex-wrap items-center gap-1.5">
         <Button size="sm" onClick={add} disabled={!connected || busy}><Plus size={13}/> Add</Button>
-        <Button size="sm" variant="outline" onClick={toggleConstraintConverter} disabled={!connected || busy}>Convert constraints</Button>
-        <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium hover:bg-zinc-50 ${!connected || busy ? "pointer-events-none opacity-40" : ""}`}>
-          <Upload size={13}/> Import
-          <input type="file" accept=".json,application/json" className="hidden" disabled={!connected || busy} onChange={importFile}/>
-        </label>
-        <Button size="sm" variant="outline" onClick={exportFile} disabled={!world.length || busy}><Download size={13}/> Export</Button>
-        <Button size="sm" variant="ghost" onClick={clear} disabled={!connected || !objects.length || busy}><Trash2 size={13}/> Clear</Button>
+        <details className="relative">
+          <summary title="Import, export, convert or clear planning-scene objects" className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
+            More <ChevronDown size={12}/>
+          </summary>
+          <div className="absolute right-0 z-30 mt-1 flex w-48 flex-col gap-1 rounded-lg border border-zinc-200 bg-white p-2 shadow-xl">
+            <button type="button" title="Convert a constraints JSON document into MoveIt collision objects." disabled={!connected || busy} onClick={toggleConstraintConverter} className="flex items-center gap-2 rounded px-2 py-2 text-left text-xs hover:bg-zinc-100 disabled:opacity-40"><FileJson size={13}/> Convert constraints</button>
+            <label title="Import supported collision objects from a JSON file." className={`flex cursor-pointer items-center gap-2 rounded px-2 py-2 text-xs hover:bg-zinc-100 ${!connected || busy ? "pointer-events-none opacity-40" : ""}`}>
+              <Upload size={13}/> Import JSON
+              <input type="file" accept=".json,application/json" className="hidden" disabled={!connected || busy} onChange={importFile}/>
+            </label>
+            <button type="button" title="Export supported world collision objects. Attached objects are not included." disabled={!world.length || busy} onClick={exportFile} className="flex items-center gap-2 rounded px-2 py-2 text-left text-xs hover:bg-zinc-100 disabled:opacity-40"><Download size={13}/> Export JSON</button>
+            <button type="button" title="Remove all world collision objects. Attached objects remain unchanged." disabled={!connected || !objects.length || busy} onClick={clear} className="flex items-center gap-2 rounded px-2 py-2 text-left text-xs text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={13}/> Clear scene</button>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -620,26 +627,26 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
           <span title={collisionEnabled ? "Collision enabled in MoveIt" : "Collision disabled in MoveIt"}
             className={collisionEnabled ? "mr-1 h-2 w-2 shrink-0 rounded-full bg-emerald-500" : "mr-1 h-2 w-2 shrink-0 rounded-full bg-amber-500"}/>
           <Button size="icon" variant="ghost" className="h-7 w-7"
-            title={labelVisible ? "Hide object label" : "Show object label"}
-            aria-label={labelVisible ? `Hide label for ${object.id}` : `Show label for ${object.id}`}
-            onClick={() => onToggleObjectLabel(object.id)}>
-            <Tag size={13} className={labelVisible ? "text-zinc-600" : "text-zinc-300"}/>
-          </Button>
-          <Button size="icon" variant="ghost" className="h-7 w-7"
-            title={hidden ? "Show object in 3D viewer" : "Hide object in 3D viewer"}
+            title={hidden ? "Show object in the 3D viewer. This does not alter collision checking." : "Hide object in the 3D viewer. This does not alter collision checking."}
             aria-label={hidden ? `Show ${object.id} in 3D viewer` : `Hide ${object.id} in 3D viewer`}
             onClick={() => onToggleObjectVisibility(object.id)}>
             {hidden ? <EyeOff size={13}/> : <Eye size={13}/>}
           </Button>
           <Button size="icon" variant="ghost" className={collisionEnabled ? "h-7 w-7 text-emerald-700" : "h-7 w-7 text-amber-700"}
-            title={collisionEnabled ? "Disable collision checking for this object" : "Enable collision checking for this object"}
+            title={collisionEnabled ? "Disable this object's collision participation in MoveIt. It remains visible." : "Enable this object's collision participation in MoveIt."}
             aria-label={collisionEnabled ? `Disable collision for ${object.id}` : `Enable collision for ${object.id}`}
             disabled={!connected || busy || collisionBusy !== null || !toDraft(object)}
             onClick={() => onToggleCollision(object)}>
             {collisionEnabled ? <ShieldCheck size={13}/> : <ShieldOff size={13}/>}
           </Button>
-          <Button size="icon" variant="ghost" className="h-7 w-7" title="Edit object" aria-label={`Edit ${object.id}`} disabled={!connected || busy || !collisionEnabled || !toDraft(object) || (!!object.header?.frame_id && object.header.frame_id !== frameId)} onClick={() => edit(object)}><Pencil size={13}/></Button>
-          <Button size="icon" variant="ghost" className="h-7 w-7 text-red-600 hover:bg-red-50 hover:text-red-700" title="Remove object" aria-label={`Remove ${object.id}`} disabled={!connected || busy} onClick={() => void remove(object.id)}><Trash2 size={13}/></Button>
+          <details className="relative">
+            <summary title="More object actions" aria-label={`More actions for ${object.id}`} className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100"><Ellipsis size={15}/></summary>
+            <div className="absolute right-0 z-30 mt-1 flex w-40 flex-col gap-1 rounded-lg border border-zinc-200 bg-white p-1.5 shadow-xl">
+              <button type="button" title={labelVisible ? "Hide this object's name in the viewer." : "Show this object's name in the viewer."} onClick={() => onToggleObjectLabel(object.id)} className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100"><Tag size={12}/>{labelVisible ? "Hide label" : "Show label"}</button>
+              <button type="button" title="Edit geometry and pose. Only supported, active world objects in the MoveIt base frame can be edited." disabled={!connected || busy || !collisionEnabled || !toDraft(object) || (!!object.header?.frame_id && object.header.frame_id !== frameId)} onClick={() => edit(object)} className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40"><Pencil size={12}/> Edit object</button>
+              <button type="button" title="Remove this object from the MoveIt planning scene." disabled={!connected || busy} onClick={() => void remove(object.id)} className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={12}/> Remove object</button>
+            </div>
+          </details>
         </div>
         </div>;
       })}
