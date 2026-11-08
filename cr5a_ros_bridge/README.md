@@ -241,7 +241,7 @@ The application WebSocket also supports request/response RPC. Each request has a
 {"op":"request","id":"req_001","method":"robot.get_snapshot","params":{}}
 ```
 
-Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.get_error_details`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel` and `motion.cancel_execution`.
+Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.get_error_details`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel`, `motion.cancel_execution`, `robot.direct.check` and `robot.direct.execute`.
 
 Mutating requests use the same safety gates as their REST equivalents. CR5 mesh assets are served under `/assets/dobot_rviz/meshes/`; the URDF, scene, live state, planning and commands are requested through the application WebSocket.
 
@@ -299,3 +299,51 @@ The profile UI communicates through these `/ws/v1` request methods:
 - `gripper.save_profile` — create or update a profile using `{profile:{id?,name,force_percent,speed_percent}}`.
 - `gripper.apply_profile` — apply and persist `{profile_id}` as the active profile.
 - `gripper.delete_profile` — remove `{profile_id}`; deleting the active profile is rejected.
+## Collision-checked direct Dobot movement
+
+The visualizer exposes a separate **Direct movement** panel for `MovJ` and
+`MovL`; these controls are not planner profiles and do not create MoveIt plans.
+The UI first calls `robot.direct.check` (REST:
+`POST /api/v1/robot/direct-movement/check`). The explicit `Move` action calls
+`robot.direct.execute` (REST:
+`POST /api/v1/robot/direct-movement/execute`), which repeats the full check
+immediately before sending the Dobot service request.
+
+- **MovJ** input is six controller joint angles in degrees (`joint1` through
+  `joint6`). The bridge converts these to radians for MoveIt, samples the
+  joint-space segment, and checks the current state and each sample with
+  `/check_state_validity`. The Dobot `MovJ` service receives the original
+  six degree values (`mode=true`). Both the current and target joint values are checked against the position limits in `cr5_moveit/config/joint_limits.yaml`.
+- **MovL** input is `[x,y,z,rx,ry,rz]` in mm/degrees. The bridge obtains the
+  current end-effector pose with `/compute_fk`, linearly interpolates position,
+  slerps orientation, solves sequential IK with `/compute_ik`, and validates
+  every solved state with `/check_state_validity`. It then calls Dobot `MovL`
+  with `mode=false`.
+
+**MovL frame setup is intentionally locked by default.** The Dobot driver
+forwards MovL coordinates in the controller's active user/tool coordinate
+system, while the pre-check uses the MoveIt base frame and end-effector link.
+Before using MovL, verify the active controller user/tool transforms and TCP
+against `moveit.base_frame` / `moveit.end_effector_link`. Then set
+`direct_movement.controller_pose_frame_confirmed: true` and set the explicit
+`controller_user` and `controller_tool` indices in `bridge.yaml`. Those indices
+are passed to the Dobot command as `user=N` and `tool=N`. Do not enable this
+setting by guesswork.
+
+Both check and execute require fresh joint/status telemetry, `RobotMode` 5
+(enabled/idle), no active controller error IDs, an available MoveIt planning
+scene, and a valid starting state. Execution additionally requires both
+`robot.allow_commands: true` and the separate `robot.allow_direct_movement: true`;
+both gates default to false in the hardware configuration. Before sending a
+controller command, the bridge fetches the scene again, rejects any changed
+collision geometry/allowed-collision matrix, verifies the robot has not drifted
+beyond `moveit.start_state_tolerance_rad`, and validates the latest state again.
+The simulation profile keeps direct movement disabled because its fake driver
+does not implement the Dobot MovJ/MovL services.
+
+The collision check is discrete sampling of MoveIt states, not validation of
+the exact trajectory generated inside the Dobot controller. It cannot guarantee
+physical collision avoidance, certify safety, or account for obstacles that
+move after validation. Keep the workspace clear and retain the robot/controller
+safety functions; validate on simulation and then with supervised, low-speed
+hardware tests before normal operation.

@@ -17,6 +17,8 @@ export interface RobotCapabilities {
   error_clear_enabled?: boolean;
   motion_execution_enabled?: boolean;
   gripper_commands_enabled?: boolean;
+  direct_movement_enabled?: boolean;
+  movl_frame_confirmed?: boolean;
 }
 export interface RobotModel {
   urdf: string; pgea_urdf?: string|null; srdf?: string;

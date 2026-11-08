@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useState} from "react";
-import {Box,CheckCircle2,CircleAlert,Crosshair,Gauge,Move3D,Play,RefreshCw,Route} from "lucide-react";
+import {Box,CheckCircle2,CircleAlert,Crosshair,Gauge,Move3D,Play,RefreshCw,Route,ShieldCheck} from "lucide-react";
 import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {RobotViewport} from "@/components/robot/robot-viewport";
@@ -9,7 +9,7 @@ import {StatusBadge} from "@/components/status-badge";
 import {PlannerSettings} from "@/components/planner-settings";
 import {DEFAULT_PLANNER_PROFILE,plannerRequestOptions,type PlannerProfile} from "@/lib/planner-profiles";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
-import {operationStatus} from "@/lib/status";
+import {extractRobotModeCode,hasActiveError,operationStatus} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
 import {GripperPositionCard} from "@/components/gripper/gripper-panels";
@@ -142,6 +142,12 @@ export function VisualizerPage(){
     }
   };
   const [plannerProfile,setPlannerProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
+  const directJointNames=["joint1","joint2","joint3","joint4","joint5","joint6"];
+  const [directType,setDirectType]=useState<"movj"|"movl">("movj");
+  const [directJointTarget,setDirectJointTarget]=useState<number[]>([0,0,0,0,0,0]);
+  const [directJointDirty,setDirectJointDirty]=useState(false);
+  const [directPoseTarget,setDirectPoseTarget]=useState<TcpTarget>({x:0,y:0,z:0,rx:0,ry:0,rz:0});
+  const [directCheck,setDirectCheck]=useState<any>(null);
 
   const bounds=useMemo(
     ()=>parseJointBounds(model?.urdf,jointLimits?.joint_limits),
@@ -183,6 +189,18 @@ export function VisualizerPage(){
   },[jointNames.join("|"),actualJoints.join("|"),jointDirty]);
 
   useEffect(()=>{
+    if(directJointDirty)return;
+    const byName:Record<string,number>={};
+    jointNames.forEach((name,index)=>{
+      const value=actualJoints[index];
+      if(typeof value==="number"&&Number.isFinite(value))byName[name]=value*180/Math.PI;
+    });
+    if(directJointNames.every((name)=>Number.isFinite(byName[name]))) {
+      setDirectJointTarget(directJointNames.map((name)=>byName[name]));
+    }
+  },[jointNames.join("|"),actualJoints.join("|"),directJointDirty]);
+
+  useEffect(()=>{
     if(plan?.status!=="SUCCEEDED"||!plannedJointSnapshot||executionStatus==="EXECUTING")return;
     const current:Record<string,number>={};
     jointNames.forEach((name,index)=>{
@@ -205,9 +223,22 @@ export function VisualizerPage(){
     robotStatus?.is_connected===true&&robotStatus?.is_enable===true;
   const hasPlan=plan?.status==="SUCCEEDED"&&Boolean(plan.plan_id);
 
+  const modeCode=extractRobotModeCode(robotMode?.value);
+  const telemetryFresh=(timestamp?:string)=> {
+    if(!timestamp)return false;
+    const age=Date.now()-Date.parse(timestamp);
+    return Number.isFinite(age)&&age>=0&&age<=1500;
+  };
+  const timestamps=useRobotStore.getState().timestamps;
+  const directReady=bridgeState==="connected"&&robotStatus?.is_connected===true&&
+    robotStatus?.is_enable===true&&modeCode===5&&!hasActiveError(errors)&&
+    actualJointsValid&&telemetryFresh(timestamps.joints)&&telemetryFresh(timestamps.status);
+  const directExecutionEnabled=capabilities.direct_movement_enabled===true;
+  const movlFrameConfirmed=capabilities.movl_frame_confirmed===true;
+
   const resetTargets=()=>{
     setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
-    setTcpDirty(false);setJointDirty(false);
+    setTcpDirty(false);setJointDirty(false);setDirectJointDirty(false);setDirectCheck(null);
     if(tcp&&[tcp.x,tcp.y,tcp.z,tcp.rx,tcp.ry,tcp.rz].every((value)=>typeof value==="number"&&Number.isFinite(value))){
       setTcpTarget({
         x:tcp.x as number,y:tcp.y as number,z:tcp.z as number,
@@ -288,6 +319,55 @@ export function VisualizerPage(){
     }finally{setBusy(null);}
   };
 
+  const directPayload=()=>{
+    if(directType==="movj")return {type:"movj",target_joints_deg:directJointTarget};
+    return {
+      type:"movl",
+      target_pose_mm_deg:[
+        directPoseTarget.x,directPoseTarget.y,directPoseTarget.z,
+        directPoseTarget.rx,directPoseTarget.ry,directPoseTarget.rz
+      ]
+    };
+  };
+
+  const checkDirectPath=async()=>{
+    if(!directReady)return;
+    setBusy("direct-check");setDirectCheck(null);setNotice(null);
+    try{
+      const result=await request("robot.direct.check",directPayload());
+      setDirectCheck(result);
+      setNotice({
+        tone:result.collision_free?"success":"error",
+        message:result.collision_free
+          ?("MoveIt checked "+result.samples_checked+" sampled states. Review the limitations before moving.")
+          :(result.reason??"The requested path did not pass collision validation.")
+      });
+    }catch(error){
+      setDirectCheck(null);
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  };
+
+  const executeDirectMove=async()=>{
+    if(!directCheck?.collision_free||!directReady||!directExecutionEnabled)return;
+    if(directType==="movl"&&!movlFrameConfirmed)return;
+    setBusy("direct-execute");setNotice(null);
+    try{
+      const result=await request("robot.direct.execute",directPayload());
+      setDirectCheck(null);
+      const response=result.robot_response??{};
+      const succeeded=response.res===0;
+      setNotice({
+        tone:succeeded?"success":"error",
+        message:succeeded
+          ?(directType.toUpperCase()+" sent to the Dobot controller. Wait for idle telemetry before another move.")
+          :("Dobot controller returned res="+String(response.res)+": "+String(response.robot_return??"No response detail"))
+      });
+    }catch(error){
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  };
+
   const execute=async()=>{
     if(!plan?.plan_id)return;
     setBusy("execute");setExecutionStatus("EXECUTING");
@@ -343,6 +423,78 @@ export function VisualizerPage(){
 
       <aside className="space-y-4">
         <PlannerSettings onProfileChange={setPlannerProfile} disabled={busy!==null}/>
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <div className="text-sm font-semibold">Direct movement</div>
+              <div className="mt-0.5 text-xs text-zinc-500">Dobot MovJ / MovL · separate from planner profiles</div>
+            </div>
+            <ShieldCheck size={16} className="text-zinc-400"/>
+          </div>
+          <div className="space-y-3 px-4 py-4">
+            <Tabs value={directType} onValueChange={(value)=>{
+              setDirectType(value as "movj"|"movl");setDirectCheck(null);setNotice(null);
+            }}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="movj">MovJ · joints</TabsTrigger>
+                <TabsTrigger value="movl">MovL · Cartesian</TabsTrigger>
+              </TabsList>
+              <TabsContent value="movj">
+                <div className="grid grid-cols-3 gap-3">
+                  {directJointNames.map((name,index)=><NumericInput key={name}
+                    label={name.toUpperCase()} value={directJointTarget[index]??0} suffix="deg"
+                    onChange={(value)=>{
+                      setDirectJointDirty(true);setDirectCheck(null);
+                      setDirectJointTarget((current)=>current.map((item,i)=>i===index?value:item));
+                    }}/>)}
+                </div>
+                <p className="mt-2 text-[11px] leading-4 text-zinc-500">
+                  Target joint angles in degrees. MoveIt checks interpolated joint states from the current robot position to this target.
+                </p>
+              </TabsContent>
+              <TabsContent value="movl">
+                <div className="grid grid-cols-3 gap-3">
+                  {(["x","y","z"] as const).map((key)=><NumericInput key={key}
+                    label={key.toUpperCase()} value={directPoseTarget[key]} suffix="mm"
+                    onChange={(value)=>{setDirectCheck(null);setDirectPoseTarget((current)=>({...current,[key]:value}));}}/>)}
+                  {(["rx","ry","rz"] as const).map((key)=><NumericInput key={key}
+                    label={key.toUpperCase()} value={directPoseTarget[key]} suffix="deg"
+                    onChange={(value)=>{setDirectCheck(null);setDirectPoseTarget((current)=>({...current,[key]:value}));}}/>)}
+                </div>
+                <p className="mt-2 text-[11px] leading-4 text-zinc-500">
+                  Straight Cartesian interpolation in {model?.base_frame??"the MoveIt base frame"} for {model?.end_effector_link??"the end-effector link"}. Position is mm; RPY is degrees.
+                </p>
+                {!movlFrameConfirmed&&<p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] leading-4 text-amber-800">
+                  MovL is locked until Dobot controller user/tool coordinates are verified to match the MoveIt base frame and end-effector. Configure controller_pose_frame_confirmed in bridge.yaml only after checking the actual transform and TCP.
+                </p>}
+              </TabsContent>
+            </Tabs>
+            <div className="flex flex-wrap gap-2">
+              <Button className="flex-1" variant="outline" onClick={checkDirectPath}
+                disabled={!directReady||busy!==null||(directType==="movl"&&!movlFrameConfirmed)}>
+                {busy==="direct-check"?<RefreshCw size={14} className="animate-spin"/>:<ShieldCheck size={14}/>} Check path
+              </Button>
+              <Button className="flex-1" onClick={executeDirectMove}
+                disabled={!directCheck?.collision_free||!directReady||!directExecutionEnabled||busy!==null||(directType==="movl"&&!movlFrameConfirmed)}>
+                {busy==="direct-execute"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Move
+              </Button>
+            </div>
+            {!directReady&&<p className="text-[11px] text-zinc-400">Checking and moving require a connected, enabled, idle robot, fresh joint telemetry, and no active controller errors.</p>}
+            {!directExecutionEnabled&&<p className="text-[11px] text-zinc-400">Move requires both bridge robot.allow_commands and robot.allow_direct_movement safety gates. Path checking does not enable movement.</p>}
+            {directCheck&&<div className={directCheck.collision_free?"rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800":"rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800"}>
+              <div className="font-semibold">{directCheck.collision_free?"Path check passed":"Path check failed"}</div>
+              <div className="mt-1">{directCheck.reason??directCheck.message}</div>
+              <div className="mt-1 font-mono text-[10px]">{directCheck.samples_checked??0} samples checked</div>
+              {Array.isArray(directCheck.contacts)&&directCheck.contacts.length>0&&
+                <div className="mt-2 space-y-1">{directCheck.contacts.map((contact:any,index:number)=>
+                  <div key={index}>{contact.contact_body_1??contact.body_name_1??"Body"} ↔ {contact.contact_body_2??contact.body_name_2??"Body"}</div>
+                )}</div>}
+            </div>}
+            <p className="text-[10px] leading-4 text-zinc-400">
+              Sampled MoveIt pre-validation only. The Dobot controller executes its own trajectory; interpolation cannot guarantee the exact physical path or account for moving obstacles after validation.
+            </p>
+          </div>
+        </section>
         <section className="panel">
           <div className="panel-header">
             <div>
