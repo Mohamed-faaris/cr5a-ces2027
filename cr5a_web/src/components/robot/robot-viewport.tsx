@@ -9,7 +9,6 @@ type RobotObject=THREE.Object3D&{
   setJointValues:(values:Record<string,number>)=>void;
   links:Record<string,THREE.Object3D>;
   joints:Record<string,THREE.Object3D>;
-  visual:Record<string,THREE.Object3D>;
 };
 
 type StickSegment={
@@ -88,6 +87,16 @@ function RobotModelNode({
     };
   },[model.urdf,onLoaded]);
 
+  useEffect(()=>{
+    if(!robot)return;
+    robot.traverse((node)=>{
+      if((node as THREE.Object3D&{isURDFVisual?:boolean}).isURDFVisual){
+        node.visible=showMeshes;
+        node.traverse((child)=>{child.visible=showMeshes;});
+      }
+    });
+  },[robot,showMeshes]);
+
   useFrame(()=>{
     if(!robot)return;
     const values:Record<string,number>={};
@@ -97,7 +106,6 @@ function RobotModelNode({
     });
     if(Object.keys(values).length)robot.setJointValues(values);
     robot.updateMatrixWorld(true);
-    Object.values(robot.visual).forEach((visual)=>{visual.visible=showMeshes;});
     const group=stickGroup.current;
     if(!group)return;
     group.visible=showRods;
