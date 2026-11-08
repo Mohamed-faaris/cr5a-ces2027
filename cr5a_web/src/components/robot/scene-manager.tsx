@@ -89,6 +89,82 @@ function exportObject(object: CollisionObject, fallbackFrame: string): Record<st
   return out;
 }
 
+const DEFAULT_CONSTRAINTS_JSON = `{
+  "constraints": {
+    "ground_plane": {
+      "id": "ground_plane",
+      "kind": "obstacle",
+      "size_xy_m": [10.0, 10.0],
+      "thickness_m": 0.05,
+      "tag_id": 4,
+      "default_surface_z_m": -0.7429
+    },
+    "base_pedestal": {
+      "id": "base_pedestal",
+      "kind": "obstacle",
+      "size_xy_m": [0.15, 0.15],
+      "top_offset_m": -0.01,
+      "center_xy_m": [0.0, 0.0],
+      "enabled": true
+    }
+  }
+}`;
+
+function convertConstraintConfig(data: any, frameId: string): Payload[] {
+  const constraints = data?.constraints ?? data;
+  if (!constraints || typeof constraints !== "object" || Array.isArray(constraints)) {
+    throw new Error("Expected a JSON object containing a constraints object.");
+  }
+  const result: Payload[] = [];
+  const ids = new Set<string>();
+  const readNumber = (value: unknown, field: string) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${field} must be a finite number.`);
+    return value;
+  };
+  const readPair = (value: unknown, field: string) => {
+    if (!Array.isArray(value) || value.length !== 2) throw new Error(`${field} must contain [x, y].`);
+    return value.map((entry, index) => readNumber(entry, `${field}[${index}]`));
+  };
+  const add = (name: string, config: any, position: number[], dimensions: number[]) => {
+    const id = String(config.id ?? name);
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(id) || ids.has(id)) throw new Error(`Constraint "${name}" has an invalid or duplicate ID.`);
+    if (dimensions.some((value) => !Number.isFinite(value) || value <= 0)) throw new Error(`Constraint "${name}" dimensions must be positive.`);
+    ids.add(id);
+    result.push({
+      id, shape: "box", frame_id: frameId,
+      position_m: position, orientation_xyzw: [0, 0, 0, 1],
+      dimensions_m: dimensions,
+    });
+  };
+
+  const ground = constraints.ground_plane;
+  let groundSurfaceZ: number | null = null;
+  if (ground && ground.enabled !== false) {
+    if (ground.kind && ground.kind !== "obstacle") throw new Error('ground_plane.kind must be "obstacle".');
+    const [sizeX, sizeY] = readPair(ground.size_xy_m, "ground_plane.size_xy_m");
+    const thickness = readNumber(ground.thickness_m, "ground_plane.thickness_m");
+    groundSurfaceZ = readNumber(ground.default_surface_z_m, "ground_plane.default_surface_z_m");
+    const [centerX, centerY] = ground.center_xy_m === undefined ? [0, 0] : readPair(ground.center_xy_m, "ground_plane.center_xy_m");
+    add("ground_plane", ground, [centerX, centerY, groundSurfaceZ - thickness / 2], [sizeX, sizeY, thickness]);
+  }
+
+  const pedestal = constraints.base_pedestal;
+  if (pedestal && pedestal.enabled !== false) {
+    if (pedestal.kind && pedestal.kind !== "obstacle") throw new Error('base_pedestal.kind must be "obstacle".');
+    if (groundSurfaceZ === null) throw new Error("base_pedestal needs an enabled ground_plane to calculate its height.");
+    const [sizeX, sizeY] = readPair(pedestal.size_xy_m, "base_pedestal.size_xy_m");
+    const [centerX, centerY] = pedestal.center_xy_m === undefined ? [0, 0] : readPair(pedestal.center_xy_m, "base_pedestal.center_xy_m");
+    const topZ = readNumber(pedestal.top_offset_m, "base_pedestal.top_offset_m");
+    const height = topZ - groundSurfaceZ;
+    if (height <= 0) throw new Error("base_pedestal.top_offset_m must be above ground_plane.default_surface_z_m.");
+    add("base_pedestal", pedestal, [centerX, centerY, groundSurfaceZ + height / 2], [sizeX, sizeY, height]);
+  }
+
+  if (result.length === 0) throw new Error("No enabled ground_plane or base_pedestal obstacles were found.");
+  if (result.length > 100) throw new Error("Constraint conversion is limited to 100 obstacles.");
+  return result;
+}
+
 function importObjects(data: any, frameId: string): Payload[] {
   if (data?.format !== "cr5a-moveit-scene" || data?.version !== 1 || !Array.isArray(data.objects)) {
     throw new Error("Unsupported JSON. Use a MoveIt scene export (cr5a-moveit-scene, version 1).");
@@ -150,6 +226,9 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(initialDraft);
   const [busy, setBusy] = useState(false);
+  const [converterOpen, setConverterOpen] = useState(false);
+  const [constraintsText, setConstraintsText] = useState(DEFAULT_CONSTRAINTS_JSON);
+  const [convertedObjects, setConvertedObjects] = useState<Payload[] | null>(null);
   const existingIds = new Set(world.map((object) => object.id));
   const attachedIds = new Set(attached.map((item) => item.object?.id).filter((id): id is string => Boolean(id)));
 
@@ -236,6 +315,75 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
     } finally { setBusy(false); }
   };
 
+  const loadConstraintsFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    if (file.size > 1024 * 1024) {
+      onNotice({ tone: "error", message: "Constraint JSON file exceeds 1 MB." });
+      return;
+    }
+    try {
+      const text = await file.text();
+      JSON.parse(text);
+      setConstraintsText(text);
+      setConvertedObjects(null);
+      onNotice({ tone: "success", message: `Loaded ${file.name}. Convert it to preview the obstacles.` });
+    } catch (error) {
+      onNotice({ tone: "error", message: error instanceof Error ? error.message : "Could not read the JSON file." });
+    }
+  };
+
+  const convertConstraints = () => {
+    try {
+      const converted = convertConstraintConfig(JSON.parse(constraintsText), frameId);
+      setConvertedObjects(converted);
+      onNotice({ tone: "success", message: `Converted ${converted.length} obstacle(s) for MoveIt.` });
+    } catch (error) {
+      setConvertedObjects(null);
+      onNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const addConvertedConstraints = async () => {
+    if (!convertedObjects || busy || !connected) return;
+    setBusy(true);
+    onNotice(null);
+    let added = 0;
+    try {
+      for (const payload of convertedObjects) {
+        if (payload.id && attachedIds.has(payload.id) && !existingIds.has(payload.id)) {
+          throw new Error(`ID "${payload.id}" belongs to an attached object.`);
+        }
+        await request(payload.id && existingIds.has(payload.id) ? "scene.update" : "scene.add", payload);
+        added += 1;
+      }
+      await refresh();
+      onSceneChanged();
+      setConverterOpen(false);
+      setConvertedObjects(null);
+      onNotice({ tone: "success", message: `Added ${added} converted obstacle(s) to the MoveIt planning scene.` });
+    } catch (error) {
+      if (added) {
+        try { await refresh(); onSceneChanged(); } catch { /* preserve partial-add error */ }
+      }
+      onNotice({ tone: "error", message: `Added ${added} obstacle(s) before conversion import stopped: ${error instanceof Error ? error.message : String(error)}` });
+    } finally { setBusy(false); }
+  };
+
+  const downloadConvertedJson = () => {
+    if (!convertedObjects) return;
+    const doc = {
+      format: "cr5a-moveit-scene", version: 1, frame_id: frameId,
+      units: { position: "m", dimensions: "m", orientation: "quaternion_xyzw" },
+      objects: convertedObjects,
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = url; anchor.download = "moveit-scene-converted.json"; anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   const exportFile = () => {
     const objects = world.flatMap((object) => {
       if (object.header?.frame_id && object.header.frame_id !== frameId) return [];
@@ -256,6 +404,7 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
       <div><div className="text-sm font-semibold">Scene objects</div><div className="mt-0.5 text-[11px] text-zinc-400">{world.length} world · {attached.length} attached</div></div>
       <div className="flex flex-wrap items-center gap-1.5">
         <Button size="sm" onClick={add} disabled={!connected || busy}><Plus size={13}/> Add</Button>
+        <Button size="sm" variant="outline" onClick={() => { setConverterOpen((value) => !value); setConvertedObjects(null); }} disabled={!connected || busy}>Convert constraints</Button>
         <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium hover:bg-zinc-50 ${!connected || busy ? "pointer-events-none opacity-40" : ""}`}>
           <Upload size={13}/> Import
           <input type="file" accept=".json,application/json" className="hidden" disabled={!connected || busy} onChange={importFile}/>
@@ -264,6 +413,37 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
         <Button size="sm" variant="ghost" onClick={clear} disabled={!connected || !world.length || busy}><Trash2 size={13}/> Clear</Button>
       </div>
     </div>
+
+    {converterOpen && <div className="space-y-3 border-b border-zinc-100 px-4 py-4">
+      <div className="flex items-center justify-between gap-2">
+        <div><div className="text-xs font-semibold">Constraint config converter</div><div className="mt-0.5 text-[10px] text-zinc-500">Paste the JSON form of your constraints configuration.</div></div>
+        <Button type="button" size="icon" variant="ghost" className="h-7 w-7" aria-label="Close converter" onClick={() => { setConverterOpen(false); setConvertedObjects(null); }}><X size={14}/></Button>
+      </div>
+      <div className="flex justify-end">
+        <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50">
+          <Upload size={13}/> Load JSON file
+          <input type="file" accept=".json,application/json" className="hidden" onChange={loadConstraintsFile}/>
+        </label>
+      </div>
+      <textarea value={constraintsText} onChange={(event) => { setConstraintsText(event.currentTarget.value); setConvertedObjects(null); }}
+        spellCheck={false} rows={13} className="w-full resize-y rounded-md border border-zinc-200 bg-zinc-50 p-3 font-mono text-[11px] leading-5 outline-none focus:border-zinc-500"/>
+      <div className="rounded-md bg-zinc-50 p-3 text-[11px] leading-5 text-zinc-600">
+        Conversion rules: <code>ground_plane.default_surface_z_m</code> is treated as the plane top face; its box centre is half the thickness below it. <code>base_pedestal.top_offset_m</code> is treated as the pedestal top Z in the selected MoveIt frame; its bottom rests on the ground-plane top. <code>tag_id</code> is metadata and is not collision geometry.
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={convertConstraints} disabled={busy}>Convert to MoveIt JSON</Button>
+        {convertedObjects && <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-zinc-500">{convertedObjects.length} obstacle(s) · frame {frameId}</span>
+          <Button type="button" size="sm" variant="outline" onClick={downloadConvertedJson}><Download size={13}/> JSON</Button>
+          <Button type="button" size="sm" onClick={() => void addConvertedConstraints()} disabled={!connected || busy}>{busy ? "Adding…" : "Add to scene"}</Button>
+        </div>}
+      </div>
+      {convertedObjects && <pre className="max-h-56 overflow-auto rounded-md border border-zinc-200 bg-zinc-950 p-3 text-[10px] leading-4 text-zinc-100">{JSON.stringify({
+        format: "cr5a-moveit-scene", version: 1, frame_id: frameId,
+        units: { position: "m", dimensions: "m", orientation: "quaternion_xyzw" },
+        objects: convertedObjects,
+      }, null, 2)}</pre>}
+    </div>}
 
     {open && <form onSubmit={save} className="space-y-3 border-b border-zinc-100 px-4 py-4">
       <div className="flex items-center justify-between"><div className="text-xs font-semibold">{editingId ? `Edit · ${editingId}` : "Add collision object"}</div>
