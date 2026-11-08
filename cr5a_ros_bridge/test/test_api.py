@@ -4,6 +4,7 @@ These tests use a fake ROS backend: they exercise FastAPI routing, validation,
 serialization and response contracts without requiring a running ROS graph.
 """
 from concurrent.futures import Future
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters
 
 from cr5a_ros_bridge.api import create_app
+from cr5a_ros_bridge.ros_backend import BridgeNode
 
 
 class FakeBackend:
@@ -95,6 +97,60 @@ def test_pgea_mesh_assets_are_served_from_package_share(client):
 
     assert response.status_code == 200
     assert len(response.content) > 1024
+def test_set_planner_parameters_builds_moveit_service_request():
+    captured = {}
+    backend = SimpleNamespace(
+        config={"moveit": {"set_planner_params_service": "/set_planner_params"}},
+        call_service=lambda name, service_type, request: captured.update({
+            "name": name, "service_type": service_type, "request": request
+        }),
+    )
+
+    BridgeNode.set_planner_parameters(
+        backend, "ompl", "cr5_group", "RRTConnect", {"range": 0.2, "enabled": True}
+    )
+
+    request = captured["request"]
+    assert captured["name"] == "/set_planner_params"
+    assert request.pipeline_id == "ompl"
+    assert request.group == "cr5_group"
+    assert request.planner_config == "RRTConnect"
+    assert request.replace is False
+    assert request.params.keys == ["range", "enabled"]
+    assert request.params.values == ["0.2", "true"]
+
+
+def test_move_group_request_forwards_pipeline_and_planner_id():
+    backend = SimpleNamespace(config={"moveit": {"group_name": "cr5_group"}})
+
+    goal = BridgeNode.make_move_group_goal(backend, {
+        "pipeline_id": "ompl",
+        "planner_id": "RRTstar",
+        "num_planning_attempts": 3,
+        "allowed_planning_time": 4.0,
+        "target": {
+            "type": "joints",
+            "joint_names": ["joint1"],
+            "positions_rad": [0.25],
+        },
+    })
+
+    assert goal.request.pipeline_id == "ompl"
+    assert goal.request.planner_id == "RRTstar"
+    assert goal.request.num_planning_attempts == 3
+    assert goal.request.allowed_planning_time == 4.0
+
+
+def test_system_resources_reports_safe_planning_thread_recommendation(client):
+    response = client.get("/api/v1/system/resources")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["logical_cpus"] >= 1
+    assert body["memory_total_bytes"] >= 0
+    assert body["memory_available_bytes"] >= 0
+    assert 1 <= body["recommended_planning_threads"] <= body["max_planning_threads"] <= 4
+    assert isinstance(body["memory_pressure"], bool)
 
 
 def test_health_returns_bridge_identity_and_timestamp(client):
