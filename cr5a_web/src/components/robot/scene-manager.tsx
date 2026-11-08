@@ -106,6 +106,14 @@ const DEFAULT_CONSTRAINTS_JSON = `{
       "top_offset_m": -0.01,
       "center_xy_m": [0.0, 0.0],
       "enabled": true
+    },
+    "Box_0": {
+      "id": "Box_0",
+      "kind": "obstacle",
+      "size_m": [0.0405395, 0.0405395, 0.0405395],
+      "position_m": [0.0, 0.15, 0.05],
+      "orientation_quat": [0.0, 0.0, 0.0, 1.0],
+      "enabled": true
     }
   }
 }`;
@@ -125,14 +133,23 @@ function convertConstraintConfig(data: any, frameId: string): Payload[] {
     if (!Array.isArray(value) || value.length !== 2) throw new Error(`${field} must contain [x, y].`);
     return value.map((entry, index) => readNumber(entry, `${field}[${index}]`));
   };
-  const add = (name: string, config: any, position: number[], dimensions: number[]) => {
+  const readVector = (value: unknown, length: number, field: string) => {
+    if (!Array.isArray(value) || value.length !== length) {
+      throw new Error(`${field} must contain ${length} values.`);
+    }
+    return value.map((entry, index) => readNumber(entry, `${field}[${index}]`));
+  };
+  const add = (
+    name: string, config: any, position: number[], dimensions: number[],
+    orientation: number[] = [0, 0, 0, 1],
+  ) => {
     const id = String(config.id ?? name);
     if (!/^[A-Za-z0-9_.-]{1,64}$/.test(id) || ids.has(id)) throw new Error(`Constraint "${name}" has an invalid or duplicate ID.`);
     if (dimensions.some((value) => !Number.isFinite(value) || value <= 0)) throw new Error(`Constraint "${name}" dimensions must be positive.`);
     ids.add(id);
     result.push({
       id, shape: "box", frame_id: frameId,
-      position_m: position, orientation_xyzw: [0, 0, 0, 1],
+      position_m: position, orientation_xyzw: orientation,
       dimensions_m: dimensions,
     });
   };
@@ -160,7 +177,19 @@ function convertConstraintConfig(data: any, frameId: string): Payload[] {
     add("base_pedestal", pedestal, [centerX, centerY, groundSurfaceZ + height / 2], [sizeX, sizeY, height]);
   }
 
-  if (result.length === 0) throw new Error("No enabled ground_plane or base_pedestal obstacles were found.");
+  for (const [name, config] of Object.entries(constraints)) {
+    if (name === "ground_plane" || name === "base_pedestal") continue;
+    if (!config || typeof config !== "object" || (config as any).enabled === false) continue;
+    const obstacle = config as any;
+    if (obstacle.kind !== "obstacle") continue;
+    const dimensions = readVector(obstacle.size_m, 3, `${name}.size_m`);
+    const position = readVector(obstacle.position_m, 3, `${name}.position_m`);
+    const orientation = readVector(obstacle.orientation_quat, 4, `${name}.orientation_quat`);
+    if (orientation.every((value) => value === 0)) throw new Error(`${name}.orientation_quat cannot be a zero quaternion.`);
+    add(name, obstacle, position, dimensions, orientation);
+  }
+
+  if (result.length === 0) throw new Error("No enabled obstacle constraints were found.");
   if (result.length > 100) throw new Error("Constraint conversion is limited to 100 obstacles.");
   return result;
 }
