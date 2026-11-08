@@ -497,6 +497,8 @@ The repository's CR5 URDF configuration uses `mock_components/GenericSystem`. Th
 
 The simulated robot starts disabled. Use Diagnostics → Enable robot before testing MoveIt execution. Stop, pause, resume, enable/disable, drag-mode, and error-clear commands are handled by the simulator. Pause cancels an active fake trajectory; Continue clears the paused state but does not replay that trajectory, so create a new plan. Drag mode changes state only; it does not model gravity or hand-guiding.
 
+The launch also starts a fake PGEA action server at `/gripper_action_controller/gripper_cmd` with status and initialization services under `/pgea_gripper`. Open the **Gripper** page to test 0–20 mm per-finger position commands. Fake gripper motion is visual/test behavior only; it does not represent a connected physical PGEA.
+
 To test the controller-error workflow, inject a simulated fault from another terminal:
 
 ~~~bash
@@ -763,7 +765,9 @@ cd /root/cr5a_ws
 tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-hardware.yaml
 ~~~
 
-The hardware profile uses the same automatic timestamped logging. Its pane logs are saved as `hardware-driver.log`, `moveit.log`, `bridge.log`, and `monitor-nodes.log` inside that session's log directory.
+The hardware profile also starts the PGEA bridge in its own **gripper** window, using `transport:=bringup`. This routes the PGEA Modbus traffic through the physical Dobot driver's existing Dashboard connection; do not switch to `transport:=dashboard` while the arm driver is connected. Confirm the gripper is physically wired to the controller tool-RS485 gateway and powered before operating it.
+
+The hardware profile uses the same automatic timestamped logging. Its pane logs include `hardware-driver.log`, `moveit.log`, `bridge.log`, `pgea-gripper.log`, and `monitor-nodes.log` inside that session's log directory.
 
 Stop the active demo stack before starting the hardware profile. Verify the controller network and physical safety systems before launching the real robot.
 

@@ -6,8 +6,11 @@ import {deriveRobotStatus,extractRobotModeCode,formatRobotMode,hasActiveError} f
 import {formatNumber,safeDate} from "@/lib/utils";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
+import {GripperDiagnosticsCard} from "@/components/gripper/gripper-panels";
+import {useGripperController} from "@/components/gripper/use-gripper-controller";
 
 export function DiagnosticsPage(){
+  const gripper=useGripperController();
   const {request}=useRobotSocket();
   const bridgeState=useRobotStore((s)=>s.bridgeState);
   const simulation=useRobotStore((s)=>s.simulation);
@@ -302,6 +305,8 @@ export function DiagnosticsPage(){
       </div>
       <pre className="max-h-64 overflow-auto bg-zinc-950 px-5 py-4 font-mono text-[11px] leading-5 text-zinc-200">{JSON.stringify(copyPayload,null,2)}</pre>
     </section>
+
+    <GripperDiagnosticsCard controller={gripper}/>
 
     <div className="text-[11px] text-zinc-400">Stop is the normal controller Stop command, not a safety-rated emergency stop. The physical E-stop circuit remains independent.</div>
   </div>;

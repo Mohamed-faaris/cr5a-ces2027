@@ -31,6 +31,17 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Manual TCP targets are MoveIt poses for `model.end_effector_link` in `model.base_frame`; controller `ToolVectorActual` may use a different tool/user frame or TCP offset. Preserve the UI warning and `planErrorDetail()` mapping for MoveIt error codes.
 - Joint-state positions are radians. Keep them in radians when passed to the URDF model; convert only at a display/input boundary.
 
+## PGEA gripper UI
+
+- `src/components/gripper/use-gripper-controller.ts` owns the shared `gripper.get_status` polling and gripper actions. `gripper-panels.tsx` provides the diagnostics and position-control panels. Do not create a second WebSocket or generic ROS service/topic-write path.
+- Diagnostics embeds `GripperDiagnosticsCard` for connection, initialization, position, current, alarm, Initialize, and Full calibration. Visualizer embeds `GripperPositionCard` in its Controls column for the 0..20 mm/finger slider, Move, Open, Close, and Stop.
+- `/gripper` remains a direct-link full view composing both cards; it is intentionally omitted from the primary app navigation. Keep the in-card links to this route when changing the split layout.
+- The gripper's `position` feedback is 0..1000 per mille and maps to 0..20 mm **per finger**. Keep target inputs in millimetres at the UI boundary and send metres to `gripper.move`.
+- Position motion requires a connected, enabled, idle arm (RobotMode 5), a connected initialized PGEA, no active arm error, and `gripper_commands_enabled`. Initialization/calibration require fresh connected arm telemetry but do not require the arm motors to be enabled.
+- Stop cancels the active `GripperCommand` action; it is not a safety-rated protective stop. Keep physical E-stop messaging visible.
+- Do not map Newtons into PGEA force-percent registers. Send `max_effort=0` until a calibrated force conversion exists; use the gripper node's configured force percentage.
+- Full calibration moves through the full finger stroke; retain an explicit confirmation warning that the fingers and workpiece area must be clear.
+
 ## 3D viewer assumptions
 
 - Reuse `src/components/robot/robot-viewport.tsx`; it is the existing URDF, MoveIt scene, and trajectory renderer.

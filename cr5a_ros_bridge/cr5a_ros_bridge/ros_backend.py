@@ -21,6 +21,7 @@ from rcl_interfaces.srv import (
 )
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import DisplayTrajectory
+from control_msgs.action import GripperCommand
 from moveit_msgs.srv import SetPlannerParams
 
 
@@ -59,6 +60,13 @@ class BridgeNode(Node):
             self, ExecuteTrajectory,
             moveit.get("execute_trajectory_action", "/execute_trajectory")
         )
+        gripper = config.get("gripper", {})
+        self.gripper_client = ActionClient(
+            self,
+            GripperCommand,
+            gripper.get("action_name", "/gripper_action_controller/gripper_cmd"),
+        )
+        self._gripper_action_handle = None
         self.display_pub = self.create_publisher(
             DisplayTrajectory,
             moveit.get("display_trajectory_topic", "/display_planned_path"),
@@ -482,6 +490,76 @@ class BridgeNode(Node):
         goal.planning_options.planning_scene_diff.is_diff = True
         goal.planning_options.planning_scene_diff.robot_state.is_diff = True
         return goal
+
+    def send_gripper_goal(self, position_m, max_effort=0.0):
+        """Send a PGEA position goal and return a concurrent Future.
+
+        The PGEA effort register is percent, while GripperCommand.max_effort is
+        Newtons. Without a calibrated conversion, only max_effort=0 is valid.
+        """
+        result_future = concurrent.futures.Future()
+        if not self.gripper_client.wait_for_server(timeout_sec=0.5):
+            result_future.set_exception(
+                TimeoutError("PGEA gripper action server is unavailable")
+            )
+            return result_future
+
+        goal = GripperCommand.Goal()
+        goal.command.position = float(position_m)
+        goal.command.max_effort = float(max_effort)
+
+        def feedback(feedback_message):
+            try:
+                payload = message_dict(feedback_message.feedback)
+                self.emit("gripper.feedback", payload)
+            except Exception:
+                pass
+
+        sent = self.gripper_client.send_goal_async(
+            goal, feedback_callback=feedback
+        )
+
+        def accepted(done):
+            try:
+                handle = done.result()
+                if not handle.accepted:
+                    raise RuntimeError(
+                        "PGEA rejected the position goal (busy or not initialized)"
+                    )
+                self._gripper_action_handle = handle
+                result = handle.get_result_async()
+
+                def finished(result_done):
+                    try:
+                        wrapped = result_done.result()
+                        result_future.set_result(wrapped.result)
+                        self._gripper_action_handle = None
+                    except Exception as exc:
+                        self._gripper_action_handle = None
+                        result_future.set_exception(exc)
+
+                result.add_done_callback(finished)
+            except Exception as exc:
+                result_future.set_exception(exc)
+
+        sent.add_done_callback(accepted)
+        return result_future
+
+    def cancel_gripper_goal(self):
+        handle = self._gripper_action_handle
+        if handle is None:
+            raise KeyError("No active PGEA gripper action")
+        result_future = concurrent.futures.Future()
+        ros_future = handle.cancel_goal_async()
+
+        def completed(done):
+            try:
+                result_future.set_result(done.result())
+            except Exception as exc:
+                result_future.set_exception(exc)
+
+        ros_future.add_done_callback(completed)
+        return result_future
 
     def send_plan_goal(self, plan_id, goal):
         result_future = concurrent.futures.Future()

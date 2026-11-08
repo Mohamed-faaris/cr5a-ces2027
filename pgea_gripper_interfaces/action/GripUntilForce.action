@@ -1,0 +1,22 @@
+uint8 force_percent
+uint8 speed_percent
+uint16 close_position
+uint16 max_current
+uint32 timeout_ms
+bool use_current_limit
+---
+bool success
+string outcome
+uint16 position
+uint16 grip_status
+uint16 current
+uint16 alarm
+float32 elapsed
+string message
+---
+string outcome
+uint16 position
+uint16 grip_status
+uint16 current
+uint16 alarm
+float32 elapsed

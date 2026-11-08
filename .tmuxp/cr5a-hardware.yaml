@@ -32,3 +32,10 @@ windows:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh monitor-nodes bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && watch -n 5 ros2 node list"'
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-monitor bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
+  - window_name: gripper
+    layout: even-horizontal
+    panes:
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh pgea-gripper bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch pgea_gripper pgea_gripper.launch.py transport:=bringup"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-pgea-gripper bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'

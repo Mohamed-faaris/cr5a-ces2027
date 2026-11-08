@@ -275,3 +275,27 @@ missing or stale telemetry and rejects plans whose largest joint delta exceeds
 `moveit.start_state_tolerance_rad` (default `0.03` rad). The telemetry age limit is
 `moveit.max_joint_state_age_sec` (default `1.0` second). These checks apply to both
 the REST compatibility route and the WebSocket request method.
+
+
+### PGEA force and speed profiles
+
+The existing gripper controls include editable profiles for the PGEA's two percentage settings:
+
+- `force_percent`: 20–100, written to PGEA register `0x0101`.
+- `speed_percent`: 1–100, written to PGEA register `0x0104`.
+
+Built-in starting profiles are `Gentle` (30% force / 25% speed), `Balanced` (60% / 50%) and `Firm` (80% / 30%). Treat these as starting points, not validated material-specific grasp settings. Test with a light, non-fragile object and a clear finger travel area before using a new combination.
+
+User edits and the active profile are persisted by the bridge as YAML outside the repository. By default the file is `~/.config/cr5a_ros_bridge/gripper_profiles.yaml`. The path can be changed with `CR5A_GRIPPER_PROFILES_FILE` or the bridge config's `gripper.profiles_file`. When the bridge runs inside a container, mount the chosen host directory into the container; otherwise profiles can be lost when the container is recreated. The file is created with owner-only permissions.
+
+Applying a profile atomically updates the live `/pgea_gripper` ROS parameters. The gripper node validates the ranges and rejects parameter changes while a position or force-grip action is active. The bridge applies the active profile again before the next standard position move if the node restarted or the runtime settings are out of sync.
+
+These settings affect the standard `GripperCommand` position action used by Move, Open and Close. The separate `grip_until_force` action accepts force and speed on each goal and is not changed by the standard position profile. Force remains a PGEA percentage; it is not a calibrated value in Newtons.
+
+
+The profile UI communicates through these `/ws/v1` request methods:
+
+- `gripper.get_profiles` — list profiles, active profile, storage path and runtime sync status.
+- `gripper.save_profile` — create or update a profile using `{profile:{id?,name,force_percent,speed_percent}}`.
+- `gripper.apply_profile` — apply and persist `{profile_id}` as the active profile.
+- `gripper.delete_profile` — remove `{profile_id}`; deleting the active profile is rejected.

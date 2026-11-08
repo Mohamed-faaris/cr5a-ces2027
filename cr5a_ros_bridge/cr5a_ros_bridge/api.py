@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import logging
 import os
 import time
@@ -13,6 +14,11 @@ from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .json_utils import finite_quaternion, finite_vector, json_safe, strict_json_loads
+from .gripper_profiles import (
+    DEFAULT_GRIPPER_PROFILES,
+    GripperProfileStore,
+    resolve_profiles_path,
+)
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -25,6 +31,8 @@ from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene
 from geometry_msgs.msg import Pose
 from shape_msgs.msg import SolidPrimitive
 from rosidl_runtime_py.convert import message_to_ordereddict
+from pgea_gripper_interfaces.srv import GetStatus as PgeaGetStatus
+from std_srvs.srv import Trigger
 
 
 
@@ -280,6 +288,49 @@ def create_app(backend, config):
     auth_enabled = bool(auth.get("enabled", False))
     token_name = auth.get("token_env", "CR5A_BRIDGE_TOKEN")
     token = os.getenv(token_name)
+
+    gripper_cfg = config.get("gripper", {})
+    try:
+        profile_store = GripperProfileStore(
+            resolve_profiles_path(gripper_cfg),
+            gripper_cfg.get("profiles") or DEFAULT_GRIPPER_PROFILES,
+            gripper_cfg.get("default_profile_id", "balanced"),
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid PGEA gripper profile configuration: {exc}") from exc
+    gripper_runtime = {"profile_id": None}
+
+    async def apply_gripper_profile(profile):
+        node_name = gripper_cfg.get("node_name", "/pgea_gripper")
+        service_name = _parameter_service_name(
+            backend, node_name, "set_parameters_atomically"
+        )
+        request = SetParametersAtomically.Request()
+        request.parameters = [
+            Parameter(name="force_percent", value=int(profile["force_percent"])).to_parameter_msg(),
+            Parameter(name="speed_percent", value=int(profile["speed_percent"])).to_parameter_msg(),
+        ]
+        response = await _await_ros(
+            backend.call_service(service_name, SetParametersAtomically, request),
+            float(gripper_cfg.get("profile_apply_timeout_sec", 3.0)),
+        )
+        if not response.result.successful:
+            raise HTTPException(
+                status_code=409,
+                detail=response.result.reason or "PGEA rejected the selected force/speed settings",
+            )
+        gripper_runtime["profile_id"] = profile["id"]
+
+    async def ensure_active_gripper_profile():
+        profile = profile_store.active()
+        if gripper_runtime["profile_id"] != profile["id"]:
+            await apply_gripper_profile(profile)
+        return profile
+
+    def gripper_profile_snapshot():
+        return profile_store.snapshot(
+            runtime_synced=gripper_runtime["profile_id"] == profile_store.active_profile_id
+        )
 
     if auth_enabled and not token:
         raise RuntimeError(
@@ -539,6 +590,79 @@ def create_app(backend, config):
             raise HTTPException(status_code=403, detail="Error clearing is disabled by bridge safety configuration")
         result = await _await_ros(backend.robot_service("ClearError"))
         return _dict(result)
+
+    async def read_gripper_status():
+        gripper_cfg = config.get("gripper", {})
+        service_name = gripper_cfg.get("status_service", "/pgea_gripper/get_status")
+        try:
+            response = await _await_ros(
+                backend.call_service(service_name, PgeaGetStatus, PgeaGetStatus.Request()),
+                float(gripper_cfg.get("status_timeout_sec", 2.0)),
+            )
+            if not response.success:
+                return {
+                    "connected": False,
+                    "simulation": bool(config.get("robot", {}).get("simulation", False)),
+                    "status": None,
+                    "error": response.message or "PGEA status read failed",
+                    "commands_enabled": bool(gripper_cfg.get("allow_commands", False)),
+                }
+            try:
+                status = json.loads(response.status_json or "{}")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=502, detail=f"Invalid PGEA status response: {exc}") from exc
+            return {
+                "connected": True,
+                "simulation": bool(config.get("robot", {}).get("simulation", False)),
+                "status": status,
+                "error": None,
+                "message": response.message,
+                "commands_enabled": bool(gripper_cfg.get("allow_commands", False)),
+            }
+        except HTTPException as exc:
+            return {
+                "connected": False,
+                "simulation": bool(config.get("robot", {}).get("simulation", False)),
+                "status": None,
+                "error": exc.detail,
+                "commands_enabled": bool(gripper_cfg.get("allow_commands", False)),
+            }
+
+    def require_gripper_commands():
+        if not config.get("gripper", {}).get("allow_commands", False):
+            raise HTTPException(
+                status_code=403,
+                detail="PGEA commands are disabled by bridge safety configuration",
+            )
+
+    async def require_connected_arm(enabled=False):
+        status_topic = config.get("robot", {}).get(
+            "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
+        )
+        snapshot = backend.topic_snapshot(status_topic)
+        data = snapshot.get("data", {}) if snapshot else {}
+        if data.get("is_connected") is not True:
+            raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
+        try:
+            from datetime import datetime, timezone
+            observed_at = datetime.fromisoformat(
+                str(snapshot.get("timestamp", "")).replace("Z", "+00:00")
+            )
+            age = (datetime.now(timezone.utc) - observed_at).total_seconds()
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Robot status timestamp is invalid")
+        max_age = float(config.get("gripper", {}).get("max_robot_status_age_sec", 2.0))
+        if age < -1.0 or age > max_age:
+            raise HTTPException(status_code=409, detail="Robot status is stale; wait for fresh telemetry")
+        mode = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+        mode_code = int(str(mode.robot_return))
+        if int(mode.res) != 0 or mode_code not in (3, 4, 5):
+            raise HTTPException(
+                status_code=409,
+                detail="PGEA operation is blocked while the robot controller is running, dragging, paused, or faulted",
+            )
+        if enabled and mode_code != 5:
+            raise HTTPException(status_code=409, detail="Robot must be enabled and idle before moving the PGEA gripper")
 
     command_services = {
         "enable": "EnableRobot",
@@ -1070,6 +1194,130 @@ def create_app(backend, config):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def websocket_request(method: str, params: dict):
+        if method == "gripper.get_profiles":
+            try:
+                await ensure_active_gripper_profile()
+            except HTTPException as exc:
+                snapshot = gripper_profile_snapshot()
+                snapshot["runtime_error"] = exc.detail
+                return snapshot
+            return gripper_profile_snapshot()
+
+        if method == "gripper.save_profile":
+            try:
+                profile = profile_store.upsert(params.get("profile", {}))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            runtime_error = None
+            if profile["id"] == profile_store.active_profile_id:
+                gripper_runtime["profile_id"] = None
+                try:
+                    await apply_gripper_profile(profile)
+                except HTTPException as exc:
+                    runtime_error = exc.detail
+            snapshot = gripper_profile_snapshot()
+            snapshot["saved_profile"] = profile
+            snapshot["runtime_error"] = runtime_error
+            return snapshot
+
+        if method == "gripper.delete_profile":
+            profile_id = str(params.get("profile_id") or "")
+            try:
+                profile_store.delete(profile_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return gripper_profile_snapshot()
+
+        if method == "gripper.apply_profile":
+            require_gripper_commands()
+            profile_id = str(params.get("profile_id") or "")
+            profile = profile_store.get(profile_id)
+            if profile is None:
+                raise HTTPException(status_code=404, detail="Unknown gripper profile")
+            previous_profile = profile_store.active()
+            await apply_gripper_profile(profile)
+            try:
+                profile_store.set_active(profile_id)
+            except ValueError as exc:
+                try:
+                    await apply_gripper_profile(previous_profile)
+                except HTTPException:
+                    gripper_runtime["profile_id"] = None
+                raise HTTPException(status_code=500, detail=f"Profile was applied but could not be persisted: {exc}") from exc
+            backend.emit("gripper.profile", {
+                "active_profile_id": profile_id,
+                "force_percent": profile["force_percent"],
+                "speed_percent": profile["speed_percent"],
+            })
+            return gripper_profile_snapshot()
+
+        if method == "gripper.get_status":
+            return await read_gripper_status()
+
+        if method in ("gripper.initialize", "gripper.calibrate"):
+            require_gripper_commands()
+            await require_connected_arm(enabled=False)
+            service_key = "initialize_service" if method == "gripper.initialize" else "calibrate_service"
+            service_name = config.get("gripper", {}).get(
+                service_key,
+                "/pgea_gripper/initialize" if method == "gripper.initialize" else "/pgea_gripper/calibrate",
+            )
+            result = await _await_ros(
+                backend.call_service(service_name, Trigger, Trigger.Request()),
+                float(config.get("gripper", {}).get("lifecycle_timeout_sec", 70.0)),
+            )
+            data = {
+                "success": bool(result.success),
+                "message": str(result.message),
+                "operation": "initialize" if method == "gripper.initialize" else "calibrate",
+            }
+            backend.emit("gripper.status", data)
+            if not result.success:
+                raise HTTPException(status_code=409, detail=result.message or "PGEA lifecycle operation failed")
+            return data
+
+        if method == "gripper.move":
+            require_gripper_commands()
+            await require_connected_arm(enabled=True)
+            status = await read_gripper_status()
+            if not status.get("connected"):
+                raise HTTPException(status_code=503, detail=status.get("error") or "PGEA is not connected")
+            if int((status.get("status") or {}).get("init", 0)) != 1:
+                raise HTTPException(status_code=409, detail="PGEA is not initialized; initialize it before moving")
+            await ensure_active_gripper_profile()
+
+            position = finite_vector([params.get("position_m")], 1, "position_m")[0]
+            if not 0.0 <= position <= 0.020:
+                raise HTTPException(status_code=422, detail="PGEA position must be between 0 and 0.020 m per finger")
+            max_effort = finite_vector([params.get("max_effort", 0.0)], 1, "max_effort")[0]
+            if max_effort != 0.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="PGEA max_effort must remain 0 until a calibrated Newton-to-percent force mapping exists",
+                )
+            result = await _await_ros(
+                backend.send_gripper_goal(position, max_effort),
+                float(config.get("gripper", {}).get("action_timeout_sec", 25.0)),
+            )
+            data = _dict(result)
+            data["status"] = "SUCCEEDED" if bool(getattr(result, "reached_goal", False)) else "FAILED"
+            backend.emit("gripper.result", data)
+            if data["status"] != "SUCCEEDED":
+                raise HTTPException(status_code=409, detail="PGEA did not confirm that it reached the requested position")
+            return data
+
+        if method == "gripper.stop":
+            require_gripper_commands()
+            try:
+                result = await _await_ros(backend.cancel_gripper_goal(), 3.0)
+                data = _dict(result)
+                backend.emit("gripper.result", {"status": "CANCEL_REQUESTED", "response": data})
+                return data
+            except KeyError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         if method == "robot.get_snapshot":
             robot_cfg = config.get("robot", {})
             status = backend.topic_snapshot(robot_cfg.get(
@@ -1109,6 +1357,7 @@ def create_app(backend, config):
                     "robot_commands_enabled": bool(config.get("robot", {}).get("allow_commands", False)),
                     "error_clear_enabled": bool(config.get("robot", {}).get("allow_error_clear", False)),
                     "motion_execution_enabled": bool(config.get("moveit", {}).get("allow_execution", False)),
+                    "gripper_commands_enabled": bool(config.get("gripper", {}).get("allow_commands", False)),
                 },
             }
 
@@ -1130,8 +1379,19 @@ def create_app(backend, config):
                     status_code=503,
                     detail="robot_description is unavailable; start robot_state_publisher or MoveGroup",
                 )
+            pgea_urdf = None
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                pgea_path = Path(get_package_share_directory("dobot_rviz")) / "urdf" / "cr5_pgea.urdf"
+                if pgea_path.is_file():
+                    pgea_urdf = pgea_path.read_text(encoding="utf-8")
+            except Exception:
+                # PGEA geometry is an optional visual overlay; the active arm URDF
+                # remains authoritative when this package/variant is unavailable.
+                pass
             return {
                 "urdf": urdf,
+                "pgea_urdf": pgea_urdf,
                 "srdf": descriptions.get("robot_description_semantic"),
                 "base_frame": config.get("moveit", {}).get("base_frame", "dummy_link"),
                 "end_effector_link": config.get("moveit", {}).get("end_effector_link", "Link6"),

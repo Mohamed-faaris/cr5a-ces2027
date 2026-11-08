@@ -1,6 +1,6 @@
 import {Suspense,useCallback,useEffect,useRef,useState,type RefObject} from "react";
 import {Canvas,useFrame} from "@react-three/fiber";
-import {Grid,OrbitControls} from "@react-three/drei";
+import {Billboard,Grid,OrbitControls,Text} from "@react-three/drei";
 import * as THREE from "three";
 import URDFLoader from "urdf-loader";
 import type {CollisionObject,JointStateMessage,MotionPlan,RobotModel} from "@/lib/types";
@@ -19,14 +19,16 @@ type StickSegment={
 };
 
 function RobotModelNode({
-  model,jointState,onLoaded,showRods,showMeshes,previewPositions
+  model,jointState,onLoaded,showRods,showMeshes,showGripperMeshes,previewPositions,gripperPositionMm
 }:{
   model:RobotModel;
   jointState:JointStateMessage|null;
   onLoaded:(robot:RobotObject|null,error?:string)=>void;
   showRods:boolean;
   showMeshes:boolean;
+  showGripperMeshes:boolean;
   previewPositions:Record<string,number>|null;
+  gripperPositionMm:number|null;
 }) {
   const [robot,setRobot]=useState<RobotObject|null>(null);
   const segments=useRef<StickSegment[]>([]);
@@ -48,13 +50,16 @@ function RobotModelNode({
       loader.packages={
         dobot_rviz:new URL("/assets/dobot_rviz",window.location.origin).toString()
       };
-      const modelObject=loader.parse(model.urdf);
+      // Render the PGEA-specific URDF when its visual model is installed.
+      // The live arm model and planning frames remain supplied by MoveIt.
+      const modelObject=loader.parse(model.pgea_urdf??model.urdf);
       const group=new THREE.Group();
       group.name="CR5 rod skeleton";
       const rodMaterial=new THREE.MeshStandardMaterial({color:0x9299a3,metalness:0.12,roughness:0.62});
       const jointMaterial=new THREE.MeshStandardMaterial({color:0x2563eb,metalness:0.08,roughness:0.48});
       const rods:StickSegment[]=[];
-      Object.values(modelObject.joints).forEach((joint)=>{
+      Object.entries(modelObject.joints).forEach(([jointName,joint])=>{
+        if(!/^joint[1-6]$/.test(jointName))return;
         const parent=joint.parent;
         const child=joint.children.find((item)=>(item as THREE.Object3D&{isURDFLink?:boolean}).isURDFLink);
         if(!parent||!child)return;
@@ -86,17 +91,20 @@ function RobotModelNode({
       segments.current=[];
       stickGroup.current=null;
     };
-  },[model.urdf,onLoaded]);
+  },[model.urdf,model.pgea_urdf,onLoaded]);
 
   useEffect(()=>{
     if(!robot)return;
+    const gripperLinks=new Set(["connector_slabs","gripper_body","left_finger","right_finger"]);
     robot.traverse((node)=>{
-      if((node as THREE.Object3D&{isURDFVisual?:boolean}).isURDFVisual){
-        node.visible=showMeshes;
-        node.traverse((child)=>{child.visible=showMeshes;});
-      }
+      if(!(node as THREE.Object3D&{isURDFVisual?:boolean}).isURDFVisual)return;
+      const parent=node.parent as (THREE.Object3D&{isURDFLink?:boolean})|null;
+      const isGripperVisual=Boolean(parent?.isURDFLink&&gripperLinks.has(parent.name));
+      const visible=isGripperVisual?showGripperMeshes:showMeshes;
+      node.visible=visible;
+      node.traverse((child)=>{child.visible=visible;});
     });
-  },[robot,showMeshes]);
+  },[robot,showMeshes,showGripperMeshes]);
 
   useFrame(()=>{
     if(!robot)return;
@@ -108,6 +116,9 @@ function RobotModelNode({
         const value=jointState?.position?.[index];
         if(Number.isFinite(value))values[name]=value as number;
       });
+    }
+    if(gripperPositionMm!==null&&Number.isFinite(gripperPositionMm)){
+      values.left_finger_joint=Math.max(0,Math.min(20,gripperPositionMm))/1000;
     }
     if(Object.keys(values).length)robot.setJointValues(values);
     robot.updateMatrixWorld(true);
@@ -185,25 +196,74 @@ function TcpFrame({
   return null;
 }
 
-function ScenePrimitive({object}:{object:CollisionObject}) {
-  const primitive=object.primitives?.[0];
-  const pose=object.primitive_poses?.[0];
-  if(!primitive||!pose)return null;
-  const positionValues=[pose.position.x,pose.position.y,pose.position.z];
-  const quaternionValues=[
-    pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w
+function ScenePrimitive({object,showLabel,collisionEnabled}:{object:CollisionObject;showLabel:boolean;collisionEnabled:boolean}) {
+  const primitives=object.primitives??[];
+  const poses=object.primitive_poses??[];
+  if(!primitives.length)return null;
+
+  // MoveIt primitive poses are relative to CollisionObject.pose. The bridge
+  // stores the actual XYZ in the parent pose and identity local primitive poses.
+  const parentPosition=object.pose?.position;
+  const parentOrientation=object.pose?.orientation;
+  const parentPositionValues=[
+    parentPosition?.x??0,parentPosition?.y??0,parentPosition?.z??0
   ];
-  const dimensions=primitive.dimensions??[];
-  if(!positionValues.every(isFiniteNumber)||!quaternionValues.every(isFiniteNumber)||
-    !dimensions.every(isFiniteNumber)||dimensions.some((value)=>value<=0))return null;
-  const position=positionValues as [number,number,number];
-  const quaternion=quaternionValues as [number,number,number,number];
-  return <mesh position={position} quaternion={quaternion}>
-    {primitive.type===1&&dimensions.length>=3&&<boxGeometry args={[dimensions[0],dimensions[1],dimensions[2]]}/>}
-    {primitive.type===2&&dimensions.length>=1&&<sphereGeometry args={[dimensions[0],24,16]}/>}
-    {primitive.type===3&&dimensions.length>=2&&<cylinderGeometry args={[dimensions[1],dimensions[1],dimensions[0],24]}/>}
-    <meshStandardMaterial color="#737982" transparent opacity={0.36} roughness={0.8}/>
-  </mesh>;
+  const parentQuaternionValues=[
+    parentOrientation?.x??0,parentOrientation?.y??0,
+    parentOrientation?.z??0,parentOrientation?.w??1
+  ];
+  if(!parentPositionValues.every(isFiniteNumber)||
+    !parentQuaternionValues.every(isFiniteNumber)||
+    parentQuaternionValues.every((value)=>value===0))return null;
+  const parentPositionVector=new THREE.Vector3(...parentPositionValues);
+  const parentQuaternion=new THREE.Quaternion(...parentQuaternionValues).normalize();
+
+  return <>
+    {primitives.map((primitive,index)=>{
+      const pose=poses[index];
+      const localPositionValues=[
+        pose?.position.x??0,pose?.position.y??0,pose?.position.z??0
+      ];
+      const localQuaternionValues=[
+        pose?.orientation.x??0,pose?.orientation.y??0,
+        pose?.orientation.z??0,pose?.orientation.w??1
+      ];
+      const dimensions=primitive.dimensions??[];
+      if(!localPositionValues.every(isFiniteNumber)||
+        !localQuaternionValues.every(isFiniteNumber)||
+        localQuaternionValues.every((value)=>value===0)||
+        !dimensions.every(isFiniteNumber)||dimensions.some((value)=>value<=0))return null;
+      const localPosition=new THREE.Vector3(...localPositionValues);
+      const localQuaternion=new THREE.Quaternion(...localQuaternionValues).normalize();
+      const position=localPosition.applyQuaternion(parentQuaternion).add(parentPositionVector);
+      const quaternion=parentQuaternion.clone().multiply(localQuaternion);
+      const extentZ=primitive.type===1&&dimensions.length>=3?dimensions[2]/2:
+        primitive.type===2&&dimensions.length>=1?dimensions[0]:
+        primitive.type===3&&dimensions.length>=2?dimensions[0]/2:0;
+      const supported=(primitive.type===1&&dimensions.length>=3)||
+        (primitive.type===2&&dimensions.length>=1)||
+        (primitive.type===3&&dimensions.length>=2);
+      if(!supported)return null;
+      return <group key={object.id+"-"+index} position={position} quaternion={quaternion}>
+        <mesh rotation={primitive.type===3?[Math.PI/2,0,0]:[0,0,0]}>
+          {primitive.type===1&&<boxGeometry args={[dimensions[0],dimensions[1],dimensions[2]]}/>}
+          {primitive.type===2&&<sphereGeometry args={[dimensions[0],24,16]}/>}
+          {primitive.type===3&&<cylinderGeometry args={[dimensions[1],dimensions[1],dimensions[0],24]}/>}
+          <meshStandardMaterial
+            color={collisionEnabled?"#64748b":"#f59e0b"}
+            emissive={collisionEnabled?"#1d4ed8":"#b45309"}
+            emissiveIntensity={collisionEnabled?0.08:0.16}
+            transparent opacity={collisionEnabled?0.36:0.48} roughness={0.8}/>
+        </mesh>
+        {showLabel&&index===0&&<Billboard position={[0,0,extentZ+0.025]}>
+          <Text fontSize={0.035} color="#111827" outlineColor="#ffffff" outlineWidth={0.0025}
+            anchorX="center" anchorY="bottom">
+            {object.id}
+          </Text>
+        </Billboard>}
+      </group>;
+    })}
+  </>;
 }
 
 function TrajectoryPreview({
@@ -257,23 +317,31 @@ function TrajectoryPreview({
 }
 
 export function RobotViewport({
-  model,jointState,scene,plan,loading,error
+  model,jointState,scene,plan,gripperPositionMm=null,loading,error,showLabels,onToggleLabels,objectLabels,
+  disabledObjects,hiddenObjects
 }:{
   model:RobotModel|null;jointState:JointStateMessage|null;scene:any;
-  plan:MotionPlan|null;loading:boolean;error:string|null;
+  plan:MotionPlan|null;gripperPositionMm?:number|null;loading:boolean;error:string|null;
+  showLabels:boolean;onToggleLabels:()=>void;objectLabels:Record<string,boolean>;
+  disabledObjects:Record<string,CollisionObject>;hiddenObjects:Record<string,boolean>;
 }) {
   const rootRef=useRef<THREE.Group|null>(null);
   const [robot,setRobot]=useState<RobotObject|null>(null);
   const [modelError,setModelError]=useState<string|null>(null);
   const [showRods,setShowRods]=useState(true);
   const [showMeshes,setShowMeshes]=useState(false);
+  const [showGripperMeshes,setShowGripperMeshes]=useState(true);
   const [showPath,setShowPath]=useState(true);
   const [showAxes,setShowAxes]=useState(false);
   const [showTcp,setShowTcp]=useState(false);
   const [showGrid,setShowGrid]=useState(true);
   const [showSceneObjects,setShowSceneObjects]=useState(true);
   const [trajectoryPosition,setTrajectoryPosition]=useState<number|null>(null);
-  const allObjects:CollisionObject[]=scene?.world?.collision_objects??[];
+  const activeObjects:CollisionObject[]=scene?.world?.collision_objects??[];
+  const allObjects:CollisionObject[]=[
+    ...activeObjects,
+    ...Object.values(disabledObjects).filter((object)=>!activeObjects.some((item)=>item.id===object.id))
+  ];
   const trajectory=plan?.trajectory?.joint_trajectory;
   const trajectoryNames:string[]=trajectory?.joint_names??[];
   const trajectoryPoints:any[]=trajectory?.points??[];
@@ -302,7 +370,9 @@ export function RobotViewport({
     (timeSeconds(upperPoint?.time_from_start)-timeSeconds(lowerPoint?.time_from_start))*interpolation;
   const totalTime=timeSeconds(trajectoryPoints[trajectoryPoints.length-1]?.time_from_start);
   useEffect(()=>{setTrajectoryPosition(null);},[plan?.plan_id]);
-  const worldObjects=allObjects.filter((item)=>!item.header?.frame_id||item.header.frame_id===model?.base_frame);
+  const renderObjects=allObjects.filter((item)=>
+    hiddenObjects[item.id]!==true&&(!item.header?.frame_id||item.header.frame_id===model?.base_frame)
+  );
   const attachedCount=scene?.robot_state?.attached_collision_objects?.length??0;
   const onLoaded=useCallback((value:RobotObject|null,message?:string)=>{
     setRobot(value);setModelError(message??null);
@@ -311,13 +381,14 @@ export function RobotViewport({
   return <div className="robot-viewport relative">
     <div className="absolute left-4 top-4 z-10 flex flex-wrap gap-2">
       <span className="viewport-chip">MODEL / {model?.group_name??"CR5 GROUP"}</span>
-      <span className="viewport-chip">WORLD / {allObjects.length}</span>
+      <span className="viewport-chip">WORLD / {renderObjects.length} objects · {activeObjects.length} collision active</span>
       {attachedCount>0&&<span className="viewport-chip">ATTACHED / {attachedCount}</span>}
     </div>
     <div className="absolute right-3 top-3 z-10 flex flex-wrap justify-end gap-1.5">
       {([
         ["Rods",showRods,()=>setShowRods((value)=>!value),false],
         ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value),false],
+        ["Gripper",showGripperMeshes,()=>setShowGripperMeshes((value)=>!value),!model?.pgea_urdf],
         ["Path",showPath,()=>setShowPath((value)=>!value),!hasTrajectory],
         ["Axes",showAxes,()=>setShowAxes((value)=>!value),false],
         ["TCP",showTcp,()=>setShowTcp((value)=>!value),!robot||!model?.end_effector_link],
@@ -327,6 +398,10 @@ export function RobotViewport({
         className={disabled?"cursor-not-allowed rounded-md border border-zinc-100 bg-zinc-50 px-2.5 py-1.5 text-[10px] font-medium text-zinc-300":active?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
         {label}
       </button>)}
+      <button type="button" aria-pressed={showLabels} onClick={onToggleLabels}
+        className={showLabels?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
+        Labels
+      </button>
     </div>
     <div className={hasTrajectory?"absolute bottom-24 left-4 z-10 text-[10px] text-zinc-400":"absolute bottom-4 left-4 z-10 text-[10px] text-zinc-400"}>
       Drag to orbit · Scroll to zoom · Right-drag to pan
@@ -372,9 +447,13 @@ export function RobotViewport({
       <directionalLight position={[-2,2,-3]} intensity={0.65}/>
       <Suspense fallback={null}>
         <group ref={rootRef} rotation={[-Math.PI/2,0,0]}>
-          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes} previewPositions={previewPositions}/>}
-          <TcpFrame robot={robot} linkName={model?.end_effector_link??""} visible={showTcp}/>
-          {showSceneObjects&&worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
+          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded}
+            showRods={showRods} showMeshes={showMeshes} showGripperMeshes={showGripperMeshes}
+            previewPositions={previewPositions} gripperPositionMm={gripperPositionMm}/>}
+          <TcpFrame robot={robot} linkName={model?.pgea_urdf?"tcp":model?.end_effector_link??""} visible={showTcp}/>
+          {showSceneObjects&&renderObjects.filter((object)=>hiddenObjects[object.id]!==true).map((object)=><ScenePrimitive key={object.id} object={object}
+            showLabel={showLabels&&objectLabels[object.id]!==false}
+            collisionEnabled={activeObjects.some((active)=>active.id===object.id)}/>)}
           {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef}/>}
           {showAxes&&<BaseAxes/>}
         </group>

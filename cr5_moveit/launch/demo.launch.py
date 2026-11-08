@@ -27,4 +27,13 @@ def generate_launch_description():
             ],
         )
     )
+    # Match the physical PGEA action and status-service contract in fake hardware.
+    launch_description.add_action(
+        Node(
+            package="dobot_simulation",
+            executable="pgea_gripper_simulation",
+            name="pgea_gripper_simulation",
+            output="screen",
+        )
+    )
     return launch_description
