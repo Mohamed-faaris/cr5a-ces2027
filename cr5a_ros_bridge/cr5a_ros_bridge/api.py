@@ -49,6 +49,25 @@ class SafeJSONResponse(JSONResponse):
         return super().render(safe_content)
 
 
+class PackageMeshStaticFiles(StaticFiles):
+    """Serve package meshes installed with colcon's symlink-install option."""
+
+    def lookup_path(self, path):
+        for directory in self.all_directories:
+            root = os.path.abspath(directory)
+            full_path = os.path.abspath(os.path.join(root, path))
+            try:
+                if os.path.commonpath((root, full_path)) != root:
+                    continue
+                stat_result = os.stat(full_path)
+            except (FileNotFoundError, NotADirectoryError, ValueError):
+                continue
+            if not os.path.isfile(full_path):
+                continue
+            return full_path, stat_result
+        return "", None
+
+
 class StrictJSONRoute(APIRoute):
     """Reject non-standard and overflowed numbers in every JSON request body."""
 
@@ -188,7 +207,7 @@ def create_app(backend, config):
         mesh_root = Path(get_package_share_directory("dobot_rviz")) / "meshes"
         app.mount(
             "/assets/dobot_rviz/meshes",
-            StaticFiles(directory=str(mesh_root), check_dir=False),
+            PackageMeshStaticFiles(directory=str(mesh_root), check_dir=False),
             name="dobot-rviz-meshes",
         )
     except Exception:

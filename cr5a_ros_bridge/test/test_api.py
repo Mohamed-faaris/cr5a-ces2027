@@ -83,6 +83,13 @@ def client():
         yield test_client
 
 
+def test_robot_mesh_asset_is_served(client):
+    response = client.get("/assets/dobot_rviz/meshes/cr5/J1.STL")
+
+    assert response.status_code == 200
+    assert len(response.content) > 1024
+
+
 def test_health_returns_bridge_identity_and_timestamp(client):
     response = client.get("/health")
 
