@@ -48,7 +48,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Reuse `src/components/robot/robot-viewport.tsx`; it is the existing URDF, MoveIt scene, and trajectory renderer.
 - The bridge supplies `urdf`, `mesh_prefix`, and `mesh_base_url`. The viewer replaces the URDF mesh prefix with the supplied mesh base URL before loading. Do not substitute workstation-specific mesh paths.
 - The viewer displays geometry in metres and rotates its scene root by -90° around X. Preserve this coordinate conversion when changing model or scene transforms.
-- Collision objects are drawn only when `header.frame_id` is empty or equals `model.base_frame`. The viewer does not perform TF transforms; objects in other frames remain in the scene response but are not rendered.
+- Collision objects are drawn in `model.base_frame`. For other frames, the viewer resolves a direct parent/child transform from `/tf_static` and applies it before rendering; unsupported frame relationships remain in the scene response but are not drawn.
 - The current scene renderer handles BOX, SPHERE, and CYLINDER primitives only. Other primitive types are not visualized.
 - Trajectory preview temporarily changes the loaded URDF's joint values to sample end-effector positions, then restores the live joint values. Preserve that restoration when modifying the preview.
 ## Direct Dobot movement
@@ -65,3 +65,5 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Planner profiles and the selected profile ID are browser-local. OMPL planner parameter updates merge into the running MoveGroup state; compare runs only when selected profiles use identical overrides. Parallel thread count is a MoveGroup startup setting and must not be reported as a per-request setting.
 - Planner comparison supports up to eight selected profiles and 1/3/5 sequential, interleaved rounds. Display median metrics from successful runs, retain the representative median-time successful trajectory, and never execute benchmark plans automatically.
 - CHOMP accepts joint-space goal constraints only; mark it unsupported for TCP pose comparisons before sending a request. Show readable MoveIt error-code explanations, including `NO_IK_SOLUTION` and `INVALID_GOAL_CONSTRAINTS`, in comparison results.
+
+- Persist 3D viewer display preferences, object visibility/label overrides, and OrbitControls camera position/target in `cr5a-visualizer-view-preferences-v1` via `src/lib/visualizer-view-preferences.ts`. Share this browser-local schema between the Scene Visualizer and Calibration pages; validate stored values and tolerate unavailable/full localStorage. Keep collision participation separate from visual visibility.

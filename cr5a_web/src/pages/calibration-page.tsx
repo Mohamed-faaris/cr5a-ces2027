@@ -7,6 +7,7 @@ import {deriveRobotStatus,hasActiveError} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
 import {RobotViewport} from "@/components/robot/robot-viewport";
+import {loadVisualizerViewPreferences,saveVisualizerViewPreferences} from "@/lib/visualizer-view-preferences";
 
 const CAMERA_INFO_TOPIC="/cr5/wrist_camera/color/camera_info";
 type GeneratedPose={id:string;label:string;position_m:[number,number,number];joints?:Record<string,number>};
@@ -107,6 +108,8 @@ export function CalibrationPage(){
   const [showAllPoses,setShowAllPoses]=useState(true);
   const [showPoseMarkers,setShowPoseMarkers]=useState(true);
   const [poseImportError,setPoseImportError]=useState<string|null>(null);
+  const [viewPreferences,setViewPreferences]=useState(loadVisualizerViewPreferences);
+  useEffect(()=>{saveVisualizerViewPreferences(viewPreferences);},[viewPreferences]);
   const visiblePoseMarkers=showPoseMarkers?generatedPoses.filter(p=>showAllPoses||p.id===selectedPoseId).map(p=>({id:p.id,label:p.label,position:p.position_m,selected:p.id===selectedPoseId})):[];
 
   useEffect(()=>subscribeChannels(["topic:"+CAMERA_INFO_TOPIC]),[subscribeChannels]);
@@ -170,7 +173,8 @@ export function CalibrationPage(){
       <div className="grid items-start xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="min-w-0">
           <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} loading={modelLoading} error={modelError??sceneError}
-            showLabels={false} onToggleLabels={()=>{}} objectLabels={{}} disabledObjects={{}} hiddenObjects={{}} poseMarkers={visiblePoseMarkers}/>
+            viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
+            objectLabels={viewPreferences.objectLabels} disabledObjects={{}} hiddenObjects={viewPreferences.hiddenObjects} poseMarkers={visiblePoseMarkers}/>
           <div className="flex flex-wrap items-center gap-4 border-t border-zinc-100 px-3 py-2 text-[10px] text-zinc-500"><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-teal-600"/>Generated viewpoint</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-orange-500"/>Selected viewpoint</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         </div>
         <aside className="space-y-3 border-t border-zinc-100 p-3 xl:border-l xl:border-t-0">

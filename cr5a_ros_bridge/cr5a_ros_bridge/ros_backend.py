@@ -20,7 +20,10 @@ from rcl_interfaces.srv import (
     SetParameters, SetParametersAtomically,
 )
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
-from moveit_msgs.msg import DisplayTrajectory
+from moveit_msgs.msg import DisplayTrajectory, PlanningScene, PlanningSceneComponents, CollisionObject
+from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene
+from geometry_msgs.msg import Pose
+from shape_msgs.msg import SolidPrimitive
 from control_msgs.action import GripperCommand
 from moveit_msgs.srv import SetPlannerParams
 
@@ -85,6 +88,10 @@ class BridgeNode(Node):
         self._robot_mode_poll_busy = False
         self._last_robot_mode_payload = None
         self._last_graph_signature = None
+        self._default_scene_seed_busy = False
+        self._default_scene_seeded = False
+        self._move_group_nodes = None
+        self.create_timer(2.0, self._seed_default_scene)
         self.create_timer(1.0, self._poll_robot_mode)
         self.create_timer(2.0, self._poll_robot_errors)
         self.create_timer(5.0, self._poll_graph_changes)
@@ -93,6 +100,88 @@ class BridgeNode(Node):
                 entry["topic"], entry.get("type"), entry.get("qos", {})
             )
         self.emit("bridge.health", {"state": "ready", "started_at": stamp()})
+
+    def _seed_default_scene(self):
+        """Seed the shared MoveIt world at bridge startup, independent of the web UI."""
+        scene_config = self.config.get("scene", {})
+        if scene_config.get("auto_load_defaults", True) is False:
+            return
+        if self._default_scene_seeded or self._default_scene_seed_busy:
+            return
+        moveit = self.config.get("moveit", {})
+        get_name = moveit.get("get_planning_scene_service", "/get_planning_scene")
+        apply_name = moveit.get("apply_planning_scene_service", "/apply_planning_scene")
+        get_client = self._client(get_name, GetPlanningScene)
+        apply_client = self._client(apply_name, ApplyPlanningScene)
+        if not get_client.service_is_ready() or not apply_client.service_is_ready():
+            return
+
+        self._default_scene_seed_busy = True
+        request = GetPlanningScene.Request()
+        request.components.components = PlanningSceneComponents.WORLD_OBJECT_GEOMETRY
+        future = get_client.call_async(request)
+
+        def scene_loaded(done):
+            try:
+                response = done.result()
+                existing = {
+                    item.id for item in response.scene.world.collision_objects
+                }
+                frame = moveit.get("base_frame", "dummy_link")
+                defaults = (
+                    ("ground_plane", (10.0, 10.0, 0.05), (0.0, 0.0, -0.7679)),
+                    ("base_pedestal", (0.15, 0.15, 0.7329), (0.0, 0.0, -0.37645)),
+                    ("Box_0", (0.0405395, 0.0405395, 0.0405395), (0.0, 0.15, 0.05)),
+                )
+                missing = []
+                for object_id, dimensions, position in defaults:
+                    if object_id in existing:
+                        continue
+                    collision = CollisionObject()
+                    collision.header.frame_id = frame
+                    collision.id = object_id
+                    primitive = SolidPrimitive()
+                    primitive.type = SolidPrimitive.BOX
+                    primitive.dimensions = list(dimensions)
+                    pose = Pose()
+                    pose.position.x, pose.position.y, pose.position.z = position
+                    pose.orientation.w = 1.0
+                    collision.primitives = [primitive]
+                    collision.primitive_poses = [pose]
+                    collision.operation = CollisionObject.ADD
+                    missing.append(collision)
+                if not missing:
+                    self._default_scene_seeded = True
+                    self.get_logger().info("Default MoveIt scene already contains all configured objects.")
+                    return
+                apply_request = ApplyPlanningScene.Request()
+                apply_request.scene = PlanningScene()
+                apply_request.scene.is_diff = True
+                apply_request.scene.world.collision_objects = missing
+                applied = apply_client.call_async(apply_request)
+
+                def scene_applied(result):
+                    try:
+                        if result.result().success:
+                            self._default_scene_seeded = True
+                            self.get_logger().info(
+                                "Loaded default MoveIt collision objects at startup: "
+                                + ", ".join(item.id for item in missing)
+                            )
+                            self.emit("moveit.scene.seeded", {"objects": [item.id for item in missing]})
+                        else:
+                            self.get_logger().warning("MoveIt rejected default scene initialization; will retry.")
+                    except Exception as exc:
+                        self.get_logger().warning(f"Default MoveIt scene initialization failed; will retry: {exc}")
+                    finally:
+                        self._default_scene_seed_busy = False
+
+                applied.add_done_callback(scene_applied)
+            except Exception as exc:
+                self.get_logger().warning(f"Could not inspect MoveIt scene for startup objects; will retry: {exc}")
+                self._default_scene_seed_busy = False
+
+        future.add_done_callback(scene_loaded)
 
     def _warn_non_finite(self, source, paths):
         if not paths:
@@ -235,6 +324,14 @@ class BridgeNode(Node):
     def _poll_graph_changes(self):
         try:
             graph = self.graph()
+            move_group_nodes = tuple(sorted(
+                item["fully_qualified_name"] for item in graph["nodes"]
+                if item["name"] == "move_group" or item["name"].startswith("move_group_private_")
+            ))
+            if self._move_group_nodes is not None and move_group_nodes != self._move_group_nodes:
+                self._default_scene_seeded = False
+                self.get_logger().info("MoveGroup graph changed; will restore default collision objects when its scene service is ready.")
+            self._move_group_nodes = move_group_nodes
             signature = json.dumps(graph, sort_keys=True, allow_nan=False)
             if signature != self._last_graph_signature:
                 self._last_graph_signature = signature
