@@ -4,6 +4,8 @@ import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {RobotViewport} from "@/components/robot/robot-viewport";
 import {StatusBadge} from "@/components/status-badge";
+import {PlannerSettings} from "@/components/planner-settings";
+import {DEFAULT_PLANNER_PROFILE,plannerRequestOptions,type PlannerProfile} from "@/lib/planner-profiles";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
 import {operationStatus} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
@@ -77,6 +79,7 @@ export function VisualizerPage(){
   const [jointDirty,setJointDirty]=useState(false);
   const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
+  const [plannerProfile,setPlannerProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
 
   const bounds=useMemo(
     ()=>parseJointBounds(model?.urdf,jointLimits?.joint_limits),
@@ -175,7 +178,7 @@ export function VisualizerPage(){
           position_m:[tcpTarget.x/1000,tcpTarget.y/1000,tcpTarget.z/1000],
           orientation_xyzw:quaternion,position_tolerance_m:0.002,orientation_tolerance_rad:0.02
         },
-        allowed_planning_time:5,max_velocity_scaling:0.2,max_acceleration_scaling:0.2
+        ...plannerRequestOptions(plannerProfile)
       });
       setPlan(result);
       setPlannedJointSnapshot(result.status==="SUCCEEDED"?startJoints:null);
@@ -209,7 +212,7 @@ export function VisualizerPage(){
           type:"joints",joint_names:jointNames,
           positions_rad:jointNames.map((name)=>jointTargets[name]??0),tolerance_rad:0.01
         },
-        allowed_planning_time:5,max_velocity_scaling:0.2,max_acceleration_scaling:0.2
+        ...plannerRequestOptions(plannerProfile)
       });
       setPlan(result);
       setPlannedJointSnapshot(result.status==="SUCCEEDED"?startJoints:null);
@@ -270,6 +273,7 @@ export function VisualizerPage(){
       </section>
 
       <aside className="space-y-4">
+        <PlannerSettings onProfileChange={setPlannerProfile} disabled={busy!==null}/>
         <section className="panel">
           <div className="panel-header">
             <div>

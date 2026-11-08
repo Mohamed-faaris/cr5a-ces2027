@@ -18,10 +18,11 @@ ompl:
   # Planning time limit (seconds)
   planning_time: 2.0
 
-  # Maximum number of planning attempts
+  # Planner-manager worker limit (startup setting; restart MoveGroup after changes).
+  # The visualizer can generate this YAML value from a saved planner profile.
   max_planning_threads: 2
 
-  # Maximum number of solutions to return
+  # Default attempts; an individual MotionPlanRequest can override this.
   max_num_planning_attempts: 3
 
   # Simplification settings

@@ -151,6 +151,14 @@ Attach requires an explicit `link_frame_pose` containing the object's pose relat
 
 ### Motion planning
 
+The visualizer includes reusable planner profiles. Built-in profiles cover conservative and balanced OMPL/RRTConnect planning, RRTstar path-quality experiments, PRMstar roadmaps, Pilz PTP/LIN motions, CHOMP refinement, and a higher-throughput OMPL configuration. Custom profiles are stored in the current browser's local storage; import/export is available as JSON.
+
+Each plan request accepts `pipeline_id`, `planner_id`, `allowed_planning_time`, `num_planning_attempts`, `max_velocity_scaling`, and `max_acceleration_scaling`. The bridge forwards the pipeline and planner IDs through `moveit_msgs/MotionPlanRequest`. For OMPL, a profile can include a `planner_parameters` object; the bridge applies these through MoveIt's `/set_planner_params` service before submitting the request. This service must be available from the running MoveGroup process. These service updates merge into the live planner configuration and persist until overwritten or MoveGroup is restarted; switching to a profile with no overrides does not clear them.
+
+OMPL `max_planning_threads` is a planner-manager startup setting, not a per-request field. The UI reads CPU affinity, cgroup CPU/memory limits, available RAM, and swap pressure from the bridge process and suggests a bounded thread count (maximum four). The selected value can be copied as a YAML snippet for `cr5_moveit/config/ompl_planning.yaml`; restart MoveGroup after changing it. A profile selection does not silently change the currently running MoveGroup thread pool.
+
+The bridge exposes `GET /api/v1/system/resources` for the visible resource snapshot used by the UI.
+
 - `POST /api/v1/motion-plans` — sends a MoveIt `/move_action` goal with `plan_only=true`.
 - `GET /api/v1/motion-plans`
 - `GET /api/v1/motion-plans/{id}`
@@ -169,10 +177,12 @@ Plan request supports a joint target:
     "joint_names": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
     "positions_rad": [0.0, 0.4, -1.0, 0.0, 1.2, 0.0]
   },
+  "pipeline_id": "ompl",
+  "planner_id": "RRTConnect",
   "allowed_planning_time": 5.0,
+  "num_planning_attempts": 5,
   "max_velocity_scaling": 0.2,
-  "max_acceleration_scaling": 0.2,
-  "planner_id": ""
+  "max_acceleration_scaling": 0.2
 }
 ```
 
@@ -190,10 +200,12 @@ Or a pose target:
     "position_tolerance_m": 0.001,
     "orientation_tolerance_rad": 0.01
   },
+  "pipeline_id": "ompl",
+  "planner_id": "RRTConnect",
   "allowed_planning_time": 5.0,
+  "num_planning_attempts": 5,
   "max_velocity_scaling": 0.2,
-  "max_acceleration_scaling": 0.2,
-  "planner_id": ""
+  "max_acceleration_scaling": 0.2
 }
 ```
 

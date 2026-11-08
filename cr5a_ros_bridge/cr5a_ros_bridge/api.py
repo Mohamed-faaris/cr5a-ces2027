@@ -27,6 +27,81 @@ from shape_msgs.msg import SolidPrimitive
 from rosidl_runtime_py.convert import message_to_ordereddict
 
 
+
+def _read_proc_bytes(path):
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+        if value == "max":
+            return None
+        return int(value)
+    except (OSError, ValueError):
+        return None
+
+
+def system_resource_snapshot():
+    """Return resource limits visible to the bridge process (including cgroups)."""
+    cpu_count = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    cpu_quota = None
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            cpu_quota = max(1, int(float(quota) / int(period) + 0.999))
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        pass
+    if cpu_quota is not None:
+        cpu_count = min(cpu_count, cpu_quota)
+    cpu_count = max(1, cpu_count)
+
+    memory = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, raw = line.split(":", 1)
+            fields = raw.strip().split()
+            if fields:
+                memory[key] = int(fields[0]) * (1024 if len(fields) > 1 and fields[1] == "kB" else 1)
+    except (OSError, ValueError):
+        pass
+
+    total_bytes = memory.get("MemTotal", 0)
+    available_bytes = memory.get("MemAvailable", memory.get("MemFree", 0))
+    cgroup_limit = _read_proc_bytes("/sys/fs/cgroup/memory.max")
+    cgroup_current = _read_proc_bytes("/sys/fs/cgroup/memory.current")
+    if cgroup_limit is not None and cgroup_limit > 0:
+        total_bytes = min(total_bytes, cgroup_limit) if total_bytes else cgroup_limit
+        if cgroup_current is not None:
+            available_bytes = min(available_bytes, max(0, cgroup_limit - cgroup_current))
+
+    swap_total = memory.get("SwapTotal", 0)
+    swap_free = memory.get("SwapFree", 0)
+    gib = 1024 ** 3
+    total_gib = total_bytes / gib if total_bytes else 0
+    available_gib = available_bytes / gib if available_bytes else 0
+
+    # Keep parallel planning bounded: at most four workers and roughly one
+    # worker per 1.5 GiB of currently available memory.
+    max_threads = max(1, min(4, cpu_count // 2 or 1, int(total_gib // 2) or 1))
+    recommended_threads = max(
+        1, min(max_threads, cpu_count // 3 or 1, int(available_gib / 1.5) or 1)
+    )
+    swap_used_ratio = (swap_total - swap_free) / swap_total if swap_total else 0.0
+    memory_pressure = (
+        available_bytes < total_bytes * 0.25 if total_bytes else False
+    ) or swap_used_ratio >= 0.5
+
+    return {
+        "logical_cpus": cpu_count,
+        "memory_total_bytes": total_bytes,
+        "memory_available_bytes": available_bytes,
+        "swap_total_bytes": swap_total,
+        "swap_free_bytes": swap_free,
+        "max_planning_threads": max_threads,
+        "recommended_planning_threads": recommended_threads,
+        "memory_pressure": memory_pressure,
+    }
+
+
+
+
 _json_logger = logging.getLogger("cr5a_ros_bridge.api")
 _json_non_finite_warning_emitted = False
 
@@ -239,6 +314,10 @@ def create_app(backend, config):
             "ros_node": backend.get_name(),
             "timestamp": time.time(),
         }
+
+    @app.get("/api/v1/system/resources")
+    async def system_resources():
+        return system_resource_snapshot()
 
     @app.get("/api/v1/ros/graph")
     async def ros_graph():
@@ -705,6 +784,43 @@ def create_app(backend, config):
         }
         backend.emit("motion.plan", {"plan_id": plan_id, "status": "PLANNING"})
         try:
+            planner_parameters = payload.get("planner_parameters", {})
+            if not isinstance(planner_parameters, dict):
+                raise ValueError("planner_parameters must be a JSON object")
+            if len(planner_parameters) > 24:
+                raise ValueError("planner_parameters may contain at most 24 entries")
+            if planner_parameters:
+                pipeline_id = payload.get("pipeline_id", "ompl") or "ompl"
+                planner_id = payload.get("planner_id", "")
+                group_name = payload.get("group_name", config.get("moveit", {}).get("group_name", "cr5_group"))
+                if pipeline_id != "ompl":
+                    raise ValueError("planner_parameters are currently supported for the OMPL pipeline only")
+                if not planner_id:
+                    raise ValueError("planner_id is required when planner_parameters are supplied")
+                for key, value in planner_parameters.items():
+                    if (
+                        not isinstance(key, str) or not key
+                        or len(key) > 64
+                        or not all(char.isalnum() or char == "_" for char in key)
+                    ):
+                        raise ValueError(f"Invalid planner parameter name: {key!r}")
+                    if isinstance(value, bool):
+                        continue
+                    if isinstance(value, (int, float)):
+                        finite_vector([value], 1, f"planner_parameters.{key}")
+                        continue
+                    if isinstance(value, str) and len(value) <= 64:
+                        continue
+                    raise ValueError(
+                        f"planner_parameters.{key} must be a finite number, boolean, or short string"
+                    )
+                await _await_ros(
+                    backend.set_planner_parameters(
+                        pipeline_id, group_name, planner_id, planner_parameters
+                    ),
+                    3.0,
+                )
+
             goal = backend.make_move_group_goal(payload)
             result = await _await_ros(
                 backend.send_plan_goal(plan_id, goal),

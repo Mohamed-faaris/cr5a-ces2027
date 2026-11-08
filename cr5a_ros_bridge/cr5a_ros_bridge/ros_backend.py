@@ -21,6 +21,7 @@ from rcl_interfaces.srv import (
 )
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import DisplayTrajectory
+from moveit_msgs.srv import SetPlannerParams
 
 
 def stamp():
@@ -342,6 +343,24 @@ class BridgeNode(Node):
         )
         return self.call_service(prefix + name, service_type, request)
 
+    def set_planner_parameters(self, pipeline_id, group_name, planner_id, parameters):
+        """Update planner-specific OMPL parameters through MoveIt's standard service."""
+        request = SetPlannerParams.Request()
+        request.pipeline_id = pipeline_id
+        request.group = group_name
+        request.planner_config = planner_id
+        request.replace = False
+        for key, value in parameters.items():
+            request.params.keys.append(str(key))
+            if isinstance(value, bool):
+                request.params.values.append("true" if value else "false")
+            else:
+                request.params.values.append(str(value))
+        service_name = self.config.get("moveit", {}).get(
+            "set_planner_params_service", "/set_planner_params"
+        )
+        return self.call_service(service_name, SetPlannerParams, request)
+
     def make_move_group_goal(self, payload):
         from geometry_msgs.msg import PoseStamped
         from moveit_msgs.msg import (
@@ -355,13 +374,13 @@ class BridgeNode(Node):
         request = goal.request
         request.group_name = payload.get("group_name", moveit.get("group_name", "cr5_group"))
         request.num_planning_attempts = int(payload.get("num_planning_attempts", 5))
-        if request.num_planning_attempts < 1:
-            raise ValueError("num_planning_attempts must be at least 1")
+        if not 1 <= request.num_planning_attempts <= 20:
+            raise ValueError("num_planning_attempts must be between 1 and 20")
         request.allowed_planning_time = finite_float(
             payload.get("allowed_planning_time", 5.0), "allowed_planning_time"
         )
-        if request.allowed_planning_time <= 0:
-            raise ValueError("allowed_planning_time must be greater than zero")
+        if not 0 < request.allowed_planning_time <= 60:
+            raise ValueError("allowed_planning_time must be greater than 0 and at most 60 seconds")
         velocity_scaling = finite_float(
             payload.get("max_velocity_scaling", 0.2), "max_velocity_scaling"
         )
@@ -374,7 +393,14 @@ class BridgeNode(Node):
             raise ValueError("max_acceleration_scaling must be greater than 0 and at most 1")
         request.max_velocity_scaling_factor = velocity_scaling
         request.max_acceleration_scaling_factor = acceleration_scaling
-        request.planner_id = str(payload.get("planner_id", ""))
+        pipeline_id = payload.get("pipeline_id", "")
+        if not isinstance(pipeline_id, str) or len(pipeline_id) > 128:
+            raise ValueError("pipeline_id must be a string of at most 128 characters")
+        request.pipeline_id = pipeline_id
+        planner_id = payload.get("planner_id", "")
+        if not isinstance(planner_id, str) or len(planner_id) > 128:
+            raise ValueError("planner_id must be a string of at most 128 characters")
+        request.planner_id = planner_id
         constraints = Constraints()
 
         target = payload.get("target", {})
