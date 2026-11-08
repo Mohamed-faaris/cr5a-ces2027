@@ -226,6 +226,17 @@
     <parent link="Link6"/>
     <child link="flange"/>
   </joint>
+  <!-- Custom 98 x 190 x 6 mm extension plate between Link6 and connector slabs. -->
+  <link name="pgea_extension_plate">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.30"/><inertia ixx="9.03e-4" ixy="0" ixz="0" iyy="2.41e-4" iyz="0" izz="1.14e-3"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.098 0.190 0.006"/></geometry><material name="pgea_extension_aluminium"><color rgba="0.65 0.67 0.70 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.098 0.190 0.006"/></geometry></collision>
+  </link>
+  <joint name="pgea_extension_plate_fixed" type="fixed">
+    <origin xyz="0 0.095 -0.003" rpy="0 0 0"/>
+    <parent link="Link6"/><child link="pgea_extension_plate"/>
+  </joint>
+
   <!-- Connector slabs between Link6 flange and PGEA actuator body.
        Procedurally generated (disk Ø63x5 mm + plate 65x98x23 mm). All
        gripper STLs use the same mesh->link6 axis mapping - rpy=(pi/2,0,pi/2)
@@ -257,8 +268,8 @@
          PGEA + both fingers + TCP) so the fork extends along -link6_y,
          matching the wrist cable-port side. Same rpy applied to all four
          gripper-fixed joints + tcp_fixed below. -->
-    <origin rpy="0 0 -1.5707963" xyz="0 0 0"/>
-    <parent link="Link6"/>
+    <origin xyz="0 -0.095 0.003" rpy="0 0 1.5707963"/>
+    <parent link="pgea_extension_plate"/>
     <child link="connector_slabs"/>
   </joint>
   <!-- PGEA-100-40 actuator body. Stacks on the connector slabs -
@@ -287,8 +298,8 @@
   </link>
   <joint name="gripper_body_fixed" type="fixed">
     <!-- Same -90° z rotation as connector_slabs_fixed. -->
-    <origin rpy="0 0 -1.5707963" xyz="0 0 0"/>
-    <parent link="Link6"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="connector_slabs"/>
     <child link="gripper_body"/>
   </joint>
   <link name="left_finger">
@@ -317,8 +328,8 @@
     <!-- Axis "0 -1 0" is in the joint frame (= gb frame, Link6 rotated -90° z).
          -gb_y is the closing direction for the left tine (matches MJCF left_drive
          axis "0 -1 0").  limit upper=0.020 = full PGEA-100-40 half-stroke. -->
-    <origin rpy="0 0 -1.5707963" xyz="0 0 0"/>
-    <parent link="Link6"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="gripper_body"/>
     <child link="left_finger"/>
     <axis xyz="0 -1 0"/>
     <limit effort="100" lower="0" upper="0.020" velocity="0.5"/>
@@ -347,8 +358,8 @@
     <mimic joint="left_finger_joint" multiplier="1" offset="0"/>
     <!-- Mirror of left_finger_joint - +gb_y is the closing direction for the
          right tine (matches MJCF right_drive axis "0 1 0"). -->
-    <origin rpy="0 0 -1.5707963" xyz="0 0 0"/>
-    <parent link="Link6"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="gripper_body"/>
     <child link="right_finger"/>
     <axis xyz="0 1 0"/>
     <limit effort="100" lower="0" upper="0.020" velocity="0.5"/>
@@ -361,10 +372,16 @@
          (0, -0.117, 0.180). Earlier value (0, -0.0675, 0.180) was the bare
          midpoint of the fork length — that lands the TCP in the proximal
          shaft where the inner gap is only 42 mm (a can won't fit). -->
-    <origin rpy="0 0 -1.5707963" xyz="0 -0.117 0.180"/>
-    <parent link="Link6"/>
+    <origin xyz="0.117 0 0.180" rpy="0 0 0"/>
+    <parent link="gripper_body"/>
     <child link="tcp"/>
   </joint>
+  <link name="finger_tcp"/>
+  <joint name="finger_tcp_fixed" type="fixed">
+    <origin xyz="0 0 0.180" rpy="0 0 1.5707963"/>
+    <parent link="gripper_body"/><child link="finger_tcp"/>
+  </joint>
+  <gazebo reference="pgea_extension_plate"><gravity>false</gravity></gazebo>
   <gazebo reference="connector_slabs">
     <gravity>false</gravity>
   </gazebo>
