@@ -241,7 +241,7 @@ The application WebSocket also supports request/response RPC. Each request has a
 {"op":"request","id":"req_001","method":"robot.get_snapshot","params":{}}
 ```
 
-Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.get_error_details`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel`, `motion.cancel_execution`, `robot.direct.check` and `robot.direct.execute`.
+Available methods: `robot.get_snapshot`, `robot.get_model`, `robot.get_joint_limits`, `robot.get_errors`, `robot.get_error_details`, `robot.command`, `robot.clear_errors`, `moveit.get_scene`, `scene.add`, `scene.update`, `scene.remove`, `scene.clear`, `motion.plan`, `motion.get_plan`, `motion.execute`, `motion.cancel`, `motion.cancel_execution`, `robot.direct.check`, `robot.direct.execute`, `robot.direct.status` and `robot.direct.recover`.
 
 Mutating requests use the same safety gates as their REST equivalents. CR5 mesh assets are served under `/assets/dobot_rviz/meshes/`; the URDF, scene, live state, planning and commands are requested through the application WebSocket.
 
@@ -307,7 +307,13 @@ The UI first calls `robot.direct.check` (REST:
 `POST /api/v1/robot/direct-movement/check`). The explicit `Move` action calls
 `robot.direct.execute` (REST:
 `POST /api/v1/robot/direct-movement/execute`), which repeats the full check
-immediately before sending the Dobot service request.
+immediately before sending the Dobot service request. robot.direct.status
+(REST GET /api/v1/robot/direct-movement/status) reports its execution latch;
+robot.direct.recover (REST POST /api/v1/robot/direct-movement/recover) is the
+explicit operator recovery operation after visually confirming the robot stopped. `robot.direct.status`
+(REST `GET /api/v1/robot/direct-movement/status`) reports its execution latch;
+`robot.direct.recover` (REST `POST /api/v1/robot/direct-movement/recover`) is the
+explicit operator recovery operation after visually confirming the robot stopped.
 
 - **MovJ** input is six controller joint angles in degrees (`joint1` through
   `joint6`). The bridge converts these to radians for MoveIt, samples the
@@ -316,9 +322,10 @@ immediately before sending the Dobot service request.
   six degree values (`mode=true`). Both the current and target joint values are checked against the position limits in `cr5_moveit/config/joint_limits.yaml`.
 - **MovL** input is `[x,y,z,rx,ry,rz]` in mm/degrees. The bridge obtains the
   current end-effector pose with `/compute_fk`, linearly interpolates position,
-  slerps orientation, solves sequential IK with `/compute_ik`, and validates
-  every solved state with `/check_state_validity`. It then calls Dobot `MovL`
-  with `mode=false`.
+  slerps orientation, solves sequential IK with `/compute_ik`, rejects a
+  consecutive joint-solution jump larger than `max_joint_step_deg` (default
+  12 degrees), and validates every solved state with `/check_state_validity`.
+  It then calls Dobot `MovL` with `mode=false`.
 
 **MovL frame setup is intentionally locked by default.** The Dobot driver
 forwards MovL coordinates in the controller's active user/tool coordinate
@@ -340,6 +347,16 @@ collision geometry/allowed-collision matrix, verifies the robot has not drifted
 beyond `moveit.start_state_tolerance_rad`, and validates the latest state again.
 The simulation profile keeps direct movement disabled because its fake driver
 does not implement the Dobot MovJ/MovL services.
+
+A bridge-level lock serializes direct execution. The lock remains latched until
+RobotMode reports active motion followed by stable idle joint telemetry. If
+the start, completion, or command result is ambiguous, new direct moves remain
+blocked. On bridge startup, direct movement is also locked when its two command
+gates are enabled, until an operator verifies the robot is stopped. After
+visually verifying the robot is stopped, an operator can call
+`robot.direct.recover` with `confirmed_idle: true`; the bridge also requires
+fresh idle telemetry, no errors, and a valid current MoveIt state. The current
+latch can be inspected with `robot.direct.status`.
 
 The collision check is discrete sampling of MoveIt states, not validation of
 the exact trajectory generated inside the Dobot controller. It cannot guarantee

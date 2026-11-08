@@ -9,7 +9,7 @@ import re
 import time
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 import yaml
@@ -718,6 +718,150 @@ def create_app(backend, config):
         )
         return result.scene
 
+    direct_motion_lock = asyncio.Lock()
+    direct_movement_enabled = bool(
+        config.get("robot", {}).get("allow_commands", False)
+        and config.get("robot", {}).get("allow_direct_movement", False)
+    )
+    direct_motion_state = {
+        "phase": "recovery_required" if direct_movement_enabled else "idle",
+        "last_command": None,
+        "detail": (
+            "Bridge restarted while direct movement is enabled. Visually verify the robot is stopped, "
+            "then confirm idle before issuing a direct move."
+            if direct_movement_enabled else None
+        ),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def _set_direct_motion_state(phase, detail=None, command=None):
+        direct_motion_state.update({
+            "phase": phase,
+            "detail": detail,
+            "last_command": command if command is not None else direct_motion_state.get("last_command"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        backend.emit("robot.direct.status", dict(direct_motion_state))
+
+    def _parse_dobot_mode_value(value):
+        text = str(value or "").strip()
+        match = re.fullmatch(r"\{\s*(-?\d+)\s*\}", text)
+        if match:
+            return int(match.group(1))
+        if re.fullmatch(r"-?\d+", text):
+            return int(text)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Controller returned an invalid RobotMode value: {text!r}",
+        )
+
+    async def _read_dobot_mode():
+        response = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+        if int(getattr(response, "res", -1)) != 0:
+            raise HTTPException(status_code=409, detail="Controller RobotMode query failed")
+        return _parse_dobot_mode_value(response.robot_return)
+
+    async def _wait_for_direct_motion_completion(start_joint_names, start_positions, accepted_mode):
+        direct_cfg = config.get("direct_movement", {})
+        start_timeout = float(direct_cfg.get("start_timeout_sec", 3.0))
+        motion_timeout = float(direct_cfg.get("motion_timeout_sec", 180.0))
+        poll_interval = float(direct_cfg.get("poll_interval_sec", 0.15))
+        stable_delta = math.radians(float(direct_cfg.get("stable_joint_delta_deg", 0.15)))
+        min_motion_delta = math.radians(float(direct_cfg.get("min_motion_delta_deg", 0.1)))
+        idle_confirmations = int(direct_cfg.get("idle_confirmations", 3))
+        if (
+            not (0.1 <= start_timeout <= motion_timeout <= 900)
+            or not (0.05 <= poll_interval <= 1.0)
+            or not (0 < stable_delta <= math.radians(2))
+            or not (0 < min_motion_delta <= stable_delta)
+            or not (2 <= idle_confirmations <= 10)
+        ):
+            raise HTTPException(status_code=503, detail="Invalid direct_movement completion-monitor configuration")
+
+        started_at = time.monotonic()
+        saw_motion = accepted_mode in (6, 7, 8, 11)
+        previous_positions = list(start_positions)
+        idle_count = 0
+        _set_direct_motion_state(
+            "awaiting_motion",
+            "Dobot accepted the command; waiting for motion to start and then return to idle.",
+        )
+
+        while True:
+            mode = await _read_dobot_mode()
+            if mode in (6, 7, 8, 11):
+                saw_motion = True
+                idle_count = 0
+                _set_direct_motion_state("moving", f"Controller mode {mode}; motion is active.")
+            elif mode == 5:
+                snapshot = backend.topic_snapshot("/joint_states")
+                _direct_freshness(snapshot, "Joint state")
+                data = snapshot.get("data") or {}
+                names = list(data.get("name") or [])
+                positions = list(data.get("position") or [])
+                if len(names) != len(positions) or len(set(names)) != len(names):
+                    raise HTTPException(status_code=409, detail="Joint telemetry became invalid while waiting for completion")
+                by_name = dict(zip(names, positions))
+                if any(name not in by_name for name in start_joint_names):
+                    raise HTTPException(status_code=409, detail="Joint telemetry lost a required joint while moving")
+                current_positions = [float(by_name[name]) for name in start_joint_names]
+                if any(not math.isfinite(value) for value in current_positions):
+                    raise HTTPException(status_code=409, detail="Joint telemetry contains non-finite positions")
+                if max(abs(a - b) for a, b in zip(current_positions, start_positions)) >= min_motion_delta:
+                    saw_motion = True
+
+                if saw_motion:
+                    max_delta = max(
+                        abs(a - b) for a, b in zip(current_positions, previous_positions)
+                    )
+                    idle_count = idle_count + 1 if max_delta <= stable_delta else 0
+                    if idle_count >= idle_confirmations:
+                        scene = await get_scene()
+                        final_state, _, _, _ = await _direct_current_state(scene)
+                        valid, contacts = await _direct_state_validity(final_state)
+                        if not valid:
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "message": "Motion ended in a state MoveIt considers invalid",
+                                    "contacts": contacts,
+                                },
+                            )
+                        return {
+                            "completed": True,
+                            "final_mode": mode,
+                            "stable_samples": idle_count,
+                            "message": "Dobot returned to enabled/idle and joint telemetry stabilized.",
+                        }
+                elif time.monotonic() - started_at >= start_timeout:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Dobot accepted the command but no running mode or joint movement was observed. "
+                            "The outcome is uncertain; direct movement is locked pending manual idle confirmation."
+                        ),
+                    )
+                previous_positions = current_positions
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Controller entered mode {mode} while direct movement was in progress. "
+                        "Motion completion is uncertain; direct movement is locked."
+                    ),
+                )
+
+            elapsed = time.monotonic() - started_at
+            if elapsed >= motion_timeout:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Direct movement did not return to idle within {motion_timeout:.0f} seconds. "
+                        "Motion completion is uncertain; direct movement is locked."
+                    ),
+                )
+            await asyncio.sleep(poll_interval)
+
     def _direct_joint_names():
         names = config.get("moveit", {}).get("joint_names", list(JOINT_NAMES))
         if (
@@ -813,8 +957,8 @@ def create_app(backend, config):
         if int(getattr(mode, "res", 0)) != 0:
             raise HTTPException(status_code=409, detail="Robot mode could not be verified")
         try:
-            mode_value = int(str(mode.robot_return).strip())
-        except (TypeError, ValueError) as exc:
+            mode_value = _parse_dobot_mode_value(mode.robot_return)
+        except HTTPException as exc:
             raise HTTPException(status_code=409, detail="Robot mode could not be verified") from exc
         if mode_value != 5:
             raise HTTPException(
@@ -1034,6 +1178,14 @@ def create_app(backend, config):
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+            try:
+                max_ik_joint_step = math.radians(float(direct_cfg.get("max_joint_step_deg", 12.0)))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(status_code=503, detail="Invalid max_joint_step_deg configuration") from exc
+            if not math.isfinite(max_ik_joint_step) or not (0 < max_ik_joint_step <= math.pi):
+                raise HTTPException(status_code=503, detail="max_joint_step_deg must be greater than zero and at most 180")
+
+            previous_ik_positions = dict(zip(joint_names, current_positions))
             seed_state = current_state
             for index, (position, orientation) in enumerate(samples, start=1):
                 ik_request = GetPositionIK.Request()
@@ -1084,6 +1236,36 @@ def create_app(backend, config):
                         "samples_checked": checked, "failed_sample": index,
                         "reason": str(exc), "contacts": [],
                     }
+                candidate_by_name = dict(zip(
+                    candidate.joint_state.name, candidate.joint_state.position
+                ))
+                missing_step_names = [name for name in joint_names if name not in candidate_by_name]
+                if missing_step_names:
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": "MovL IK solution is missing joints: " + ", ".join(missing_step_names),
+                        "contacts": [],
+                    }
+                max_step = max(
+                    abs(float(candidate_by_name[name]) - previous_ik_positions[name])
+                    for name in joint_names
+                )
+                if max_step > max_ik_joint_step:
+                    worst_joint = max(
+                        joint_names,
+                        key=lambda name: abs(float(candidate_by_name[name]) - previous_ik_positions[name]),
+                    )
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": (
+                            f"MovL IK branch jump: {worst_joint} changed by "
+                            f"{math.degrees(max_step):.2f} degrees between Cartesian samples "
+                            f"(limit {math.degrees(max_ik_joint_step):.2f} degrees)"
+                        ),
+                        "contacts": [],
+                    }
                 valid, contacts = await _direct_state_validity(candidate)
                 checked += 1
                 if not valid:
@@ -1093,6 +1275,9 @@ def create_app(backend, config):
                         "reason": "MoveIt reports a collision or invalid IK state",
                         "contacts": contacts,
                     }
+                previous_ik_positions = {
+                    name: float(candidate_by_name[name]) for name in joint_names
+                }
                 seed_state = candidate
 
         return {
@@ -1108,7 +1293,7 @@ def create_app(backend, config):
             ),
         }
 
-    async def execute_direct_movement_impl(payload):
+    async def _execute_direct_movement_body(payload):
         robot_cfg = config.get("robot", {})
         if not robot_cfg.get("allow_commands", False) or not robot_cfg.get("allow_direct_movement", False):
             raise HTTPException(
@@ -1203,11 +1388,33 @@ def create_app(backend, config):
                 if movement_type == "movl" else []
             ),
         }
+        _set_direct_motion_state(
+            "dispatching",
+            "Collision check passed; sending the direct command to the Dobot controller.",
+            movement_type,
+        )
         response = await _await_ros(
             backend.robot_service(service_name, request_payload),
             float(config.get("ros", {}).get("action_timeout_sec", 45.0)),
         )
         result = _dict(response)
+        if int(result.get("res", -1)) != 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Dobot rejected or could not confirm the direct movement command; direct movement is locked for manual recovery.",
+                    "controller_response": result,
+                },
+            )
+        try:
+            accepted_mode = _parse_dobot_mode_value(result.get("robot_return"))
+        except HTTPException:
+            accepted_mode = None
+        completion = await _wait_for_direct_motion_completion(
+            list(checked.get("joint_names") or []),
+            list(checked.get("_start_joint_positions_rad") or []),
+            accepted_mode,
+        )
         public_check = _public_direct_check(checked)
         backend.emit("robot.state", {
             "command": "direct-" + movement_type,
@@ -1218,10 +1425,98 @@ def create_app(backend, config):
             "type": movement_type,
             "collision_check": public_check,
             "robot_response": result,
+            "completion": completion,
         }
+
+    async def execute_direct_movement_impl(payload):
+        if direct_motion_state.get("phase") != "idle":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "A prior direct movement is still active or its completion is uncertain.",
+                    "direct_motion": dict(direct_motion_state),
+                },
+            )
+        if direct_motion_lock.locked():
+            raise HTTPException(status_code=409, detail="Another direct movement request is already being processed")
+        async with direct_motion_lock:
+            if direct_motion_state.get("phase") != "idle":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "A prior direct movement is still active or its completion is uncertain.",
+                        "direct_motion": dict(direct_motion_state),
+                    },
+                )
+            command = str(payload.get("type", "")).lower()
+            _set_direct_motion_state("checking", "Validating the requested path.", command)
+            try:
+                result = await _execute_direct_movement_body(payload)
+            except BaseException as exc:
+                phase = direct_motion_state.get("phase")
+                if phase in ("dispatching", "awaiting_motion", "moving"):
+                    detail = str(getattr(exc, "detail", exc))
+                    _set_direct_motion_state(
+                        "recovery_required",
+                        "The command may have reached the controller, but completion was not confirmed. "
+                        + (detail if isinstance(detail, str) else json.dumps(detail, default=str)),
+                        command,
+                    )
+                else:
+                    _set_direct_motion_state("idle", str(getattr(exc, "detail", exc)), command)
+                raise
+            _set_direct_motion_state(
+                "idle",
+                "Controller returned to idle and stable joint telemetry confirmed completion.",
+                command,
+            )
+            return result
+
+    async def direct_motion_status_impl():
+        return dict(direct_motion_state)
+
+    async def recover_direct_movement_impl(payload):
+        if payload.get("confirmed_idle") is not True:
+            raise HTTPException(
+                status_code=422,
+                detail="Explicit confirmed_idle=true is required after visually verifying the robot is stopped.",
+            )
+        if direct_motion_state.get("phase") != "recovery_required":
+            return {"recovered": False, "direct_motion": dict(direct_motion_state)}
+        if direct_motion_lock.locked():
+            raise HTTPException(status_code=409, detail="Direct movement monitoring is still active")
+        async with direct_motion_lock:
+            if direct_motion_state.get("phase") != "recovery_required":
+                return {"recovered": False, "direct_motion": dict(direct_motion_state)}
+            try:
+                scene = await get_scene()
+                current_state, _, _, _ = await _direct_current_state(scene)
+                valid, contacts = await _direct_state_validity(current_state)
+                if not valid:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "Current robot state is invalid or in collision", "contacts": contacts},
+                    )
+            except HTTPException:
+                raise
+            _set_direct_motion_state(
+                "idle",
+                "Operator confirmed the robot was stopped; fresh controller idle state and MoveIt validity were verified.",
+            )
+            return {"recovered": True, "direct_motion": dict(direct_motion_state)}
+
+    @app.get("/api/v1/robot/direct-movement/status")
+    async def direct_motion_status():
+        return await direct_motion_status_impl()
+
+    @app.post("/api/v1/robot/direct-movement/recover")
+    async def recover_direct_movement(payload: dict):
+        return await recover_direct_movement_impl(payload)
 
     @app.post("/api/v1/robot/direct-movement/check")
     async def check_direct_movement(payload: dict):
+        if direct_motion_state.get("phase") != "idle" or direct_motion_lock.locked():
+            raise HTTPException(status_code=409, detail="Direct path checks are blocked while a move is active or requires recovery")
         return _public_direct_check(await check_direct_movement_impl(payload))
 
     @app.post("/api/v1/robot/direct-movement/execute")
@@ -1617,7 +1912,7 @@ def create_app(backend, config):
             if max_state_age <= 0:
                 raise ValueError("max_joint_state_age_sec must be greater than zero")
             snapshot_time = current_snapshot.get("timestamp")
-            from datetime import datetime
+            from datetime import datetime, timezone
             observed_at = datetime.fromisoformat(
                 str(snapshot_time).replace("Z", "+00:00")
             ).timestamp()
@@ -1952,10 +2247,18 @@ def create_app(backend, config):
             return _dict(result)
 
         if method == "robot.direct.check":
+            if direct_motion_state.get("phase") != "idle" or direct_motion_lock.locked():
+                raise HTTPException(status_code=409, detail="Direct path checks are blocked while a move is active or requires recovery")
             return _public_direct_check(await check_direct_movement_impl(params))
 
         if method == "robot.direct.execute":
             return await execute_direct_movement_impl(params)
+
+        if method == "robot.direct.status":
+            return await direct_motion_status_impl()
+
+        if method == "robot.direct.recover":
+            return await recover_direct_movement_impl(params)
 
         if method == "robot.command":
             if not config.get("robot", {}).get("allow_commands", False):

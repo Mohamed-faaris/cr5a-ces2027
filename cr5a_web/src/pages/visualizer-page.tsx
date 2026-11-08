@@ -16,6 +16,7 @@ import {GripperPositionCard} from "@/components/gripper/gripper-panels";
 import {useGripperController} from "@/components/gripper/use-gripper-controller";
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
+type DirectMotionStatus={phase:string;detail?:string|null;last_command?:string|null};
 
 function planErrorDetail(code?:number|null):string|null{
   if(code===undefined||code===null)return null;
@@ -148,6 +149,7 @@ export function VisualizerPage(){
   const [directJointDirty,setDirectJointDirty]=useState(false);
   const [directPoseTarget,setDirectPoseTarget]=useState<TcpTarget>({x:0,y:0,z:0,rx:0,ry:0,rz:0});
   const [directCheck,setDirectCheck]=useState<any>(null);
+  const [directMotionStatus,setDirectMotionStatus]=useState<DirectMotionStatus|null>(null);
 
   const bounds=useMemo(
     ()=>parseJointBounds(model?.urdf,jointLimits?.joint_limits),
@@ -160,6 +162,15 @@ export function VisualizerPage(){
   );
   const worldObjects=scene?.world?.collision_objects??[];
   const attachedObjects=scene?.robot_state?.attached_collision_objects??[];
+
+  useEffect(()=>{
+    if(bridgeState!=="connected")return;
+    let active=true;
+    void request("robot.direct.status").then((value)=>{
+      if(active)setDirectMotionStatus(value);
+    }).catch(()=>undefined);
+    return ()=>{active=false;};
+  },[bridgeState,request]);
 
   useEffect(()=>{
     if(tcpDirty)return;
@@ -227,7 +238,7 @@ export function VisualizerPage(){
   const telemetryFresh=(timestamp?:string)=> {
     if(!timestamp)return false;
     const age=Date.now()-Date.parse(timestamp);
-    return Number.isFinite(age)&&age>=0&&age<=1500;
+    return Number.isFinite(age)&&age>=-1000&&age<=1500;
   };
   const timestamps=useRobotStore.getState().timestamps;
   const directReady=bridgeState==="connected"&&robotStatus?.is_connected===true&&
@@ -235,6 +246,7 @@ export function VisualizerPage(){
     actualJointsValid&&telemetryFresh(timestamps.joints)&&telemetryFresh(timestamps.status);
   const directExecutionEnabled=capabilities.direct_movement_enabled===true;
   const movlFrameConfirmed=capabilities.movl_frame_confirmed===true;
+  const directMotionBlocked=directMotionStatus!==null&&directMotionStatus.phase!=="idle";
 
   const resetTargets=()=>{
     setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
@@ -348,22 +360,53 @@ export function VisualizerPage(){
     }finally{setBusy(null);}
   };
 
+  const refreshDirectMotionStatus=async()=>{
+    try{
+      const status=await request("robot.direct.status");
+      setDirectMotionStatus(status);
+      return status;
+    }catch{
+      return null;
+    }
+  };
+
+  const recoverDirectMovement=async()=>{
+    if(!directReady||directMotionStatus?.phase!=="recovery_required")return;
+    setBusy("direct-recover");setNotice(null);
+    try{
+      const result=await request("robot.direct.recover",{confirmed_idle:true});
+      setDirectMotionStatus(result.direct_motion??{phase:result.recovered?"idle":"recovery_required"});
+      setNotice({
+        tone:result.recovered?"success":"error",
+        message:result.recovered
+          ?"Direct movement lock cleared after controller idle and MoveIt state were verified."
+          :"Direct movement remains locked. Verify the robot and controller state."
+      });
+    }catch(error){
+      await refreshDirectMotionStatus();
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    }finally{setBusy(null);}
+  };
+
   const executeDirectMove=async()=>{
-    if(!directCheck?.collision_free||!directReady||!directExecutionEnabled)return;
+    if(!directCheck?.collision_free||!directReady||!directExecutionEnabled||directMotionBlocked)return;
     if(directType==="movl"&&!movlFrameConfirmed)return;
     setBusy("direct-execute");setNotice(null);
     try{
       const result=await request("robot.direct.execute",directPayload());
       setDirectCheck(null);
+      await refreshDirectMotionStatus();
       const response=result.robot_response??{};
       const succeeded=response.res===0;
       setNotice({
         tone:succeeded?"success":"error",
         message:succeeded
-          ?(directType.toUpperCase()+" sent to the Dobot controller. Wait for idle telemetry before another move.")
+          ?(directType.toUpperCase()+" completed. The bridge confirmed controller idle and stable joint telemetry.")
           :("Dobot controller returned res="+String(response.res)+": "+String(response.robot_return??"No response detail"))
       });
     }catch(error){
+      await refreshDirectMotionStatus();
+      setDirectCheck(null);
       setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
     }finally{setBusy(null);}
   };
@@ -471,16 +514,27 @@ export function VisualizerPage(){
             </Tabs>
             <div className="flex flex-wrap gap-2">
               <Button className="flex-1" variant="outline" onClick={checkDirectPath}
-                disabled={!directReady||busy!==null||(directType==="movl"&&!movlFrameConfirmed)}>
+                disabled={!directReady||directMotionBlocked||busy!==null||(directType==="movl"&&!movlFrameConfirmed)}>
                 {busy==="direct-check"?<RefreshCw size={14} className="animate-spin"/>:<ShieldCheck size={14}/>} Check path
               </Button>
               <Button className="flex-1" onClick={executeDirectMove}
-                disabled={!directCheck?.collision_free||!directReady||!directExecutionEnabled||busy!==null||(directType==="movl"&&!movlFrameConfirmed)}>
+                disabled={!directCheck?.collision_free||!directReady||!directExecutionEnabled||directMotionBlocked||busy!==null||(directType==="movl"&&!movlFrameConfirmed)}>
                 {busy==="direct-execute"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Move
               </Button>
             </div>
             {!directReady&&<p className="text-[11px] text-zinc-400">Checking and moving require a connected, enabled, idle robot, fresh joint telemetry, and no active controller errors.</p>}
             {!directExecutionEnabled&&<p className="text-[11px] text-zinc-400">Move requires both bridge robot.allow_commands and robot.allow_direct_movement safety gates. Path checking does not enable movement.</p>}
+            {directMotionStatus&&directMotionStatus.phase!=="idle"&&<div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+              <div className="font-semibold">Direct movement: {directMotionStatus.phase.replace(/_/g," ")}</div>
+              <div className="mt-1">{directMotionStatus.detail??"A previous direct movement has not been confirmed complete."}</div>
+              {directMotionStatus.phase==="recovery_required"&&<>
+                <p className="mt-2 leading-4">Visually verify the robot is fully stopped and the workspace is safe before unlocking. The bridge will independently verify controller idle, telemetry, errors and MoveIt validity.</p>
+                <Button className="mt-3 w-full" variant="outline" onClick={recoverDirectMovement}
+                  disabled={!directReady||busy!==null}>
+                  {busy==="direct-recover"?<RefreshCw size={14} className="animate-spin"/>:<ShieldCheck size={14}/>} Confirm robot is idle & unlock
+                </Button>
+              </>}
+            </div>}
             {directCheck&&<div className={directCheck.collision_free?"rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800":"rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800"}>
               <div className="font-semibold">{directCheck.collision_free?"Path check passed":"Path check failed"}</div>
               <div className="mt-1">{directCheck.reason??directCheck.message}</div>
