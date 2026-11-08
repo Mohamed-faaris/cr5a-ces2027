@@ -205,10 +205,13 @@ export function RobotViewport({
   const [modelError,setModelError]=useState<string|null>(null);
   const [showRods,setShowRods]=useState(true);
   const [showMeshes,setShowMeshes]=useState(false);
+  const [showPath,setShowPath]=useState(true);
   const [showAxes,setShowAxes]=useState(false);
   const [showGrid,setShowGrid]=useState(true);
   const [showSceneObjects,setShowSceneObjects]=useState(true);
   const allObjects:CollisionObject[]=scene?.world?.collision_objects??[];
+  const hasTrajectory=(plan?.status==="SUCCEEDED"||plan?.status==="EXECUTING")&&
+    (plan?.trajectory?.joint_trajectory?.points?.length??0)>1;
   const worldObjects=allObjects.filter((item)=>!item.header?.frame_id||item.header.frame_id===model?.base_frame);
   const attachedCount=scene?.robot_state?.attached_collision_objects?.length??0;
   const onLoaded=useCallback((value:RobotObject|null,message?:string)=>{
@@ -223,13 +226,14 @@ export function RobotViewport({
     </div>
     <div className="absolute right-3 top-3 z-10 flex flex-wrap justify-end gap-1.5">
       {([
-        ["Rods",showRods,()=>setShowRods((value)=>!value)],
-        ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value)],
-        ["Axes",showAxes,()=>setShowAxes((value)=>!value)],
-        ["Grid",showGrid,()=>setShowGrid((value)=>!value)],
-        ["Objects",showSceneObjects,()=>setShowSceneObjects((value)=>!value)],
-      ] as const).map(([label,active,onClick])=><button key={label} type="button" aria-pressed={active} onClick={onClick}
-        className={active?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
+        ["Rods",showRods,()=>setShowRods((value)=>!value),false],
+        ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value),false],
+        ["Path",showPath,()=>setShowPath((value)=>!value),!hasTrajectory],
+        ["Axes",showAxes,()=>setShowAxes((value)=>!value),false],
+        ["Grid",showGrid,()=>setShowGrid((value)=>!value),false],
+        ["Objects",showSceneObjects,()=>setShowSceneObjects((value)=>!value),false],
+      ] as const).map(([label,active,onClick,disabled])=><button key={label} type="button" aria-pressed={active} onClick={onClick} disabled={disabled}
+        className={disabled?"cursor-not-allowed rounded-md border border-zinc-100 bg-zinc-50 px-2.5 py-1.5 text-[10px] font-medium text-zinc-300":active?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
         {label}
       </button>)}
     </div>
@@ -253,7 +257,7 @@ export function RobotViewport({
         <group ref={rootRef} rotation={[-Math.PI/2,0,0]}>
           {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes}/>}
           {showSceneObjects&&worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
-          {robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} jointState={jointState} rootRef={rootRef}/>}
+          {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} jointState={jointState} rootRef={rootRef}/>}
           {showAxes&&<axesHelper args={[0.18]}/>}
         </group>
       </Suspense>
