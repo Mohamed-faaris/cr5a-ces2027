@@ -8,7 +8,7 @@ import type {CollisionObject,JointStateMessage,MotionPlan,RobotModel} from "@/li
 type RobotObject=THREE.Object3D&{
   setJointValues:(values:Record<string,number>)=>void;
   links:Record<string,THREE.Object3D>;
-  joints:Record<string,THREE.Object3D>;
+  joints:Record<string,THREE.Object3D&{jointValue:number[];angle:number}>;
 };
 
 type StickSegment={
@@ -19,13 +19,14 @@ type StickSegment={
 };
 
 function RobotModelNode({
-  model,jointState,onLoaded,showRods,showMeshes
+  model,jointState,onLoaded,showRods,showMeshes,previewPositions
 }:{
   model:RobotModel;
   jointState:JointStateMessage|null;
   onLoaded:(robot:RobotObject|null,error?:string)=>void;
   showRods:boolean;
   showMeshes:boolean;
+  previewPositions:Record<string,number>|null;
 }) {
   const [robot,setRobot]=useState<RobotObject|null>(null);
   const segments=useRef<StickSegment[]>([]);
@@ -100,10 +101,14 @@ function RobotModelNode({
   useFrame(()=>{
     if(!robot)return;
     const values:Record<string,number>={};
-    (jointState?.name??[]).forEach((name,index)=>{
-      const value=jointState?.position?.[index];
-      if(Number.isFinite(value))values[name]=value as number;
-    });
+    if(previewPositions){
+      Object.assign(values,previewPositions);
+    }else{
+      (jointState?.name??[]).forEach((name,index)=>{
+        const value=jointState?.position?.[index];
+        if(Number.isFinite(value))values[name]=value as number;
+      });
+    }
     if(Object.keys(values).length)robot.setJointValues(values);
     robot.updateMatrixWorld(true);
     const group=stickGroup.current;
@@ -152,10 +157,10 @@ function ScenePrimitive({object}:{object:CollisionObject}) {
 }
 
 function TrajectoryPreview({
-  robot,model,plan,jointState,rootRef
+  robot,model,plan,rootRef
 }:{
   robot:RobotObject|null;model:RobotModel;plan:MotionPlan|null;
-  jointState:JointStateMessage|null;rootRef:RefObject<THREE.Group|null>;
+  rootRef:RefObject<THREE.Group|null>;
 }) {
   const [line,setLine]=useState<THREE.Line|null>(null);
   useEffect(()=>{
@@ -166,9 +171,8 @@ function TrajectoryPreview({
     const names:string[]=trajectory.joint_names??[];
     const points=trajectory.points??[];
     const actual:Record<string,number>={};
-    (jointState?.name??[]).forEach((name,index)=>{
-      const value=jointState?.position?.[index];
-      if(isFiniteNumber(value))actual[name]=value;
+    Object.entries(robot.joints).forEach(([name,joint])=>{
+      if(joint.jointValue?.length===1&&isFiniteNumber(joint.angle))actual[name]=joint.angle;
     });
     if(!names.length||names.some((name)=>!isFiniteNumber(actual[name]))||
       !points.length||!points.every((point:any)=>Array.isArray(point.positions)&&
@@ -180,7 +184,7 @@ function TrajectoryPreview({
     const path:THREE.Vector3[]=[];
     try{
       points.forEach((point:any)=>{
-        const values:Record<string,number>={};
+        const values:Record<string,number>={...actual};
         names.forEach((name,index)=>{values[name]=point.positions[index];});
         robot.setJointValues(values);robot.updateMatrixWorld(true);
         const link=robot.links[model.end_effector_link];
@@ -198,7 +202,7 @@ function TrajectoryPreview({
     const next=new THREE.Line(geometry,material);
     setLine(next);
     return ()=>{geometry.dispose();material.dispose();};
-  },[robot,model.end_effector_link,plan,jointState,rootRef]);
+  },[robot,model.end_effector_link,plan,rootRef]);
   return line?<primitive object={line}/>:null;
 }
 
@@ -217,9 +221,36 @@ export function RobotViewport({
   const [showAxes,setShowAxes]=useState(false);
   const [showGrid,setShowGrid]=useState(true);
   const [showSceneObjects,setShowSceneObjects]=useState(true);
+  const [trajectoryPosition,setTrajectoryPosition]=useState<number|null>(null);
   const allObjects:CollisionObject[]=scene?.world?.collision_objects??[];
+  const trajectory=plan?.trajectory?.joint_trajectory;
+  const trajectoryNames:string[]=trajectory?.joint_names??[];
+  const trajectoryPoints:any[]=trajectory?.points??[];
   const hasTrajectory=(plan?.status==="SUCCEEDED"||plan?.status==="EXECUTING")&&
-    (plan?.trajectory?.joint_trajectory?.points?.length??0)>1;
+    trajectoryNames.length>0&&trajectoryPoints.length>1&&
+    trajectoryPoints.every((point)=>Array.isArray(point.positions)&&
+      point.positions.length===trajectoryNames.length&&point.positions.every(isFiniteNumber));
+  const selectedPosition=trajectoryPosition===null?null:Math.max(0,Math.min(trajectoryPoints.length-1,trajectoryPosition));
+  const lowerIndex=selectedPosition===null?0:Math.floor(selectedPosition);
+  const upperIndex=Math.min(lowerIndex+1,trajectoryPoints.length-1);
+  const interpolation=selectedPosition===null?0:selectedPosition-lowerIndex;
+  const lowerPoint=trajectoryPoints[lowerIndex];
+  const upperPoint=trajectoryPoints[upperIndex];
+  const previewPositions:Record<string,number>|null=selectedPosition===null||!hasTrajectory?null:
+    Object.fromEntries(trajectoryNames.map((name,index)=>[
+      name,
+      lowerPoint.positions[index]+(upperPoint.positions[index]-lowerPoint.positions[index])*interpolation
+    ]));
+  const timeSeconds=(duration:any)=>{
+    const sec=Number(duration?.sec??0);
+    const nanosec=Number(duration?.nanosec??0);
+    return Number.isFinite(sec)&&Number.isFinite(nanosec)?sec+nanosec/1e9:0;
+  };
+  const selectedTime=selectedPosition===null?0:
+    timeSeconds(lowerPoint?.time_from_start)+
+    (timeSeconds(upperPoint?.time_from_start)-timeSeconds(lowerPoint?.time_from_start))*interpolation;
+  const totalTime=timeSeconds(trajectoryPoints[trajectoryPoints.length-1]?.time_from_start);
+  useEffect(()=>{setTrajectoryPosition(null);},[plan?.plan_id]);
   const worldObjects=allObjects.filter((item)=>!item.header?.frame_id||item.header.frame_id===model?.base_frame);
   const attachedCount=scene?.robot_state?.attached_collision_objects?.length??0;
   const onLoaded=useCallback((value:RobotObject|null,message?:string)=>{
@@ -245,7 +276,9 @@ export function RobotViewport({
         {label}
       </button>)}
     </div>
-    <div className="absolute bottom-4 left-4 z-10 text-[10px] text-zinc-400">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
+    <div className={hasTrajectory?"absolute bottom-24 left-4 z-10 text-[10px] text-zinc-400":"absolute bottom-4 left-4 z-10 text-[10px] text-zinc-400"}>
+      Drag to orbit · Scroll to zoom · Right-drag to pan
+    </div>
     {loading&&<div className="absolute inset-0 z-20 flex items-center justify-center bg-white/85 text-sm text-zinc-500">Loading robot description…</div>}
     {!loading&&!model&&<div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 px-6 text-center">
       <div className="text-sm font-medium text-zinc-800">Robot model unavailable</div>
@@ -256,6 +289,30 @@ export function RobotViewport({
       <div className="absolute bottom-10 right-4 z-10 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
         Objects outside {model?.base_frame??"base frame"} are listed but not drawn without TF transforms.
       </div>}
+    {hasTrajectory&&<div className="absolute bottom-3 left-3 right-3 z-20 rounded-lg border border-zinc-200 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-[11px] font-semibold text-zinc-800">Trajectory preview</span>
+          <span className="font-mono text-[10px] tabular-nums text-zinc-500">
+            {selectedPosition===null?"LIVE POSE":"POINT "+(Math.round(selectedPosition)+1)+" / "+trajectoryPoints.length}
+          </span>
+          <span className="font-mono text-[10px] tabular-nums text-zinc-400">
+            {selectedPosition===null?"":selectedTime.toFixed(2)+" / "+totalTime.toFixed(2)+" s"}
+          </span>
+        </div>
+        <button type="button" onClick={()=>setTrajectoryPosition(null)} disabled={selectedPosition===null}
+          className="shrink-0 rounded border border-zinc-200 px-2 py-1 text-[10px] font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-default disabled:opacity-40">
+          Live pose
+        </button>
+      </div>
+      <input type="range" min={0} max={trajectoryPoints.length-1} step={0.01}
+        value={selectedPosition??0} aria-label="Scrub planned robot trajectory"
+        onChange={(event)=>setTrajectoryPosition(Number(event.target.value))}
+        className="range-control w-full"/>
+      <div className="mt-0.5 flex justify-between text-[9px] text-zinc-400">
+        <span>Start · 0.00 s</span><span>{trajectoryPoints.length} points</span><span>End · {totalTime.toFixed(2)} s</span>
+      </div>
+    </div>}
     <Canvas shadows camera={{position:[1.25,1.05,1.35],fov:42,near:0.01,far:100}} dpr={[1,1.75]} gl={{antialias:true,alpha:false}}>
       <color attach="background" args={["#fafafa"]}/>
       <ambientLight intensity={1.1}/>
@@ -263,15 +320,17 @@ export function RobotViewport({
       <directionalLight position={[-2,2,-3]} intensity={0.65}/>
       <Suspense fallback={null}>
         <group ref={rootRef} rotation={[-Math.PI/2,0,0]}>
-          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes}/>}
+          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes} previewPositions={previewPositions}/>}
           {showSceneObjects&&worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
-          {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} jointState={jointState} rootRef={rootRef}/>}
+          {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef}/>}
           {showAxes&&<axesHelper args={[0.18]}/>}
         </group>
       </Suspense>
       {showGrid&&<Grid position={[0,-0.002,0]} args={[3,3]} cellSize={0.1} cellThickness={0.5} sectionSize={0.5} sectionThickness={0.9} fadeDistance={4} fadeStrength={1.3} infiniteGrid/>}
       <OrbitControls makeDefault target={[0,0.25,0]} minDistance={0.45} maxDistance={4}/>
     </Canvas>
-    <div className="absolute bottom-4 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500">{model?.base_frame??"dummy_link"} · metres</div>
+    <div className={hasTrajectory?"absolute bottom-24 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500":"absolute bottom-4 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500"}>
+      {model?.base_frame??"dummy_link"} · metres
+    </div>
   </div>;
 }
