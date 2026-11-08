@@ -8,6 +8,7 @@ let requestSequence=0;
 let socketGeneration=0;
 let sceneRefreshTimer:number|undefined;
 const pending=new Map<string,PendingRequest>();
+const channelReferences=new Map<string,number>();
 let stopRequested=false;
 let retryCount=0;
 
@@ -19,6 +20,35 @@ function wsUrl(){
   const parsed=new URL(url,window.location.href);
   parsed.searchParams.set("token",token);
   return parsed.toString();
+}
+
+function sendSubscription(operation:"subscribe"|"unsubscribe",channels:string[]){
+  if(!socket||socket.readyState!==WebSocket.OPEN||channels.length===0)return;
+  socket.send(JSON.stringify({op:operation,channels}));
+}
+
+export function subscribeChannels(channels:string[]){
+  const newlyAdded:string[]=[];
+  for(const channel of channels){
+    const count=channelReferences.get(channel)??0;
+    channelReferences.set(channel,count+1);
+    if(count===0)newlyAdded.push(channel);
+  }
+  sendSubscription("subscribe",newlyAdded);
+  let released=false;
+  return ()=>{
+    if(released)return;
+    released=true;
+    const removed:string[]=[];
+    for(const channel of channels){
+      const count=channelReferences.get(channel)??0;
+      if(count<=1){
+        channelReferences.delete(channel);
+        if(count===1)removed.push(channel);
+      }else channelReferences.set(channel,count-1);
+    }
+    sendSubscription("unsubscribe",removed);
+  };
 }
 export function request(method:string,params:Record<string,unknown>={}):Promise<any>{
   if(!socket||socket.readyState!==WebSocket.OPEN)return Promise.reject(new Error("ROS bridge WebSocket is not connected"));
@@ -39,8 +69,12 @@ function rejectPending(message:string){
   pending.forEach((item)=>{window.clearTimeout(item.timeout);item.reject(new Error(message));});
   pending.clear();
 }
-function handleEvent(channel:string,data:any,timestamp?:string){
+function handleEvent(channel:string,data:any,timestamp?:string,sequence?:number){
   const store=useRobotStore.getState();
+  if(channel.startsWith("topic:")){
+    store.setTopicMessage(channel.slice(6),data,timestamp,sequence);
+    return;
+  }
   switch(channel){
     case "robot.status":store.setRobotStatus(data,timestamp);break;
     case "robot.mode":store.setRobotMode(data);break;
@@ -126,10 +160,12 @@ export function startSocket(){
       if(generation!==socketGeneration||socket!==currentSocket)return;
       retryCount=0;
       useRobotStore.getState().setBridgeState("connected");
-      currentSocket.send(JSON.stringify({op:"subscribe",channels:[
+      const defaultChannels=[
         "robot.status","robot.mode","robot.joints","robot.tcp","robot.errors",
         "robot.state","moveit.scene","motion.plan","motion.execution","bridge.health"
-      ]}));
+      ];
+      const channels=[...new Set([...defaultChannels,...channelReferences.keys()])];
+      currentSocket.send(JSON.stringify({op:"subscribe",channels}));
       void loadInitialState();
       pingTimer=window.setInterval(()=>{
         if(socket===currentSocket&&currentSocket.readyState===WebSocket.OPEN){
@@ -149,7 +185,9 @@ export function startSocket(){
         if(message.ok)item.resolve(message.data);
         else item.reject(new Error(message.error?.message||"WebSocket request failed"));
       }else if(message.op==="event"){
-        handleEvent(message.channel,message.data,message.timestamp);
+        handleEvent(message.channel,message.data,message.timestamp,message.sequence);
+      }else if(message.op==="subscription_error"&&typeof message.channel==="string"&&message.channel.startsWith("topic:")){
+        useRobotStore.getState().setTopicSubscriptionError(message.channel.slice(6),String(message.detail??"Subscription failed"));
       }
     };
     currentSocket.onerror=()=>{

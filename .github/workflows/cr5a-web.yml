@@ -1,0 +1,49 @@
+name: CR5A web checks
+
+on:
+  pull_request:
+    paths:
+      - "cr5a_web/**"
+      - ".github/workflows/cr5a-web.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "cr5a_web/**"
+      - ".github/workflows/cr5a-web.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cr5a-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: TypeScript and Vite build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cr5a_web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: cr5a_web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript and Vite build
+        run: pnpm build

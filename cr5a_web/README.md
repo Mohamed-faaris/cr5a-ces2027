@@ -1,9 +1,10 @@
 # CR5A Web Console
 
-Two-page React + TypeScript operations console for the Dobot CR5A.
+React + TypeScript operations console for the Dobot CR5A.
 
 - /diagnostics: RobotMode, status, normal Stop/Pause/Resume commands, error clearing and copyable telemetry.
 - /visualizer: browser CR5 URDF viewer, MoveIt collision objects, TCP target inputs, joint sliders, plan preview and separately gated execution.
+- /calibration: D415 eye-in-hand setup, calibration-target geometry, readiness checks and session preferences. The automated calibration engine is not yet implemented.
 - Dynamic robot state, model descriptions, MoveIt scene snapshots, planning and commands use the application WebSocket at /ws/v1.
 - HTTP is used only for static STL mesh assets. Vite proxies these files to the bridge during development.
 

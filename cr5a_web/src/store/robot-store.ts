@@ -4,6 +4,12 @@ import type {
   RobotModeMessage, RobotModel, RobotStatusMessage, TcpMessage
 } from "@/lib/types";
 
+export interface TopicMessageState {
+  data:any;
+  timestamp?:string;
+  sequence?:number;
+}
+
 interface RobotStore {
   bridgeState: BridgeState; connectionError: string | null; simulation: boolean;
   robotStatus: RobotStatusMessage | null; robotMode: RobotModeMessage | null;
@@ -22,6 +28,10 @@ interface RobotStore {
   setModel:(value:RobotModel|null)=>void; setModelLoading:(value:boolean,error?:string|null)=>void;
   setJointLimits:(value:Record<string,any>)=>void; setPlan:(value:MotionPlan|null)=>void;
   setExecutionStatus:(value:string|null)=>void;
+  topicMessages:Record<string,TopicMessageState>;
+  topicSubscriptionErrors:Record<string,string>;
+  setTopicMessage:(topic:string,data:any,timestamp?:string,sequence?:number)=>void;
+  setTopicSubscriptionError:(topic:string,error:string|null)=>void;
   setNotice:(value:RobotStore["notice"])=>void;
   setCommand:(value:string,response?:Record<string,unknown>)=>void;
 }
@@ -30,7 +40,7 @@ export const useRobotStore = create<RobotStore>((set)=>({
   bridgeState:"connecting",connectionError:null,simulation:false,robotStatus:null,robotMode:null,errors:null,
   joints:null,tcp:null,timestamps:{},capabilities:{},lastCommand:null,lastJointChangeAt:undefined,
   scene:null,sceneLoading:false,sceneError:null,model:null,modelLoading:false,modelError:null,
-  jointLimits:null,plan:null,executionStatus:null,notice:null,
+  jointLimits:null,plan:null,executionStatus:null,topicMessages:{},topicSubscriptionErrors:{},notice:null,
   setBridgeState:(value,error=null)=>set({bridgeState:value,connectionError:error}),
   setRobotStatus:(value,timestamp)=>set((state)=>({robotStatus:value,timestamps:{...state.timestamps,status:timestamp??state.timestamps.status}})),
   setRobotMode:(value)=>set({robotMode:value}),
@@ -60,6 +70,21 @@ export const useRobotStore = create<RobotStore>((set)=>({
   setJointLimits:(value)=>set({jointLimits:value}),
   setPlan:(value)=>set({plan:value}),
   setExecutionStatus:(value)=>set({executionStatus:value}),
+  setTopicMessage:(topic,data,timestamp,sequence)=>set((state)=>{
+    const current=state.topicMessages[topic];
+    if(current&&sequence!==undefined&&current.sequence!==undefined&&sequence<current.sequence)return state;
+    const subscriptionErrors={...state.topicSubscriptionErrors};
+    delete subscriptionErrors[topic];
+    return {
+      topicMessages:{...state.topicMessages,[topic]:{data,timestamp,sequence}},
+      topicSubscriptionErrors:subscriptionErrors
+    };
+  }),
+  setTopicSubscriptionError:(topic,error)=>set((state)=>{
+    const subscriptionErrors={...state.topicSubscriptionErrors};
+    if(error)subscriptionErrors[topic]=error;else delete subscriptionErrors[topic];
+    return {topicSubscriptionErrors:subscriptionErrors};
+  }),
   setNotice:(value)=>set({notice:value}),
   setCommand:(value,response)=>{
     if(response?.res===undefined || response.res===0) set({lastCommand:value});
