@@ -10,6 +10,7 @@ import {PlannerSettings,type PlannerBenchmarkResult} from "@/components/planner-
 import {DEFAULT_PLANNER_PROFILE,PLANNER_PATH_COLORS,plannerRequestOptions,type PlannerProfile} from "@/lib/planner-profiles";
 import {describeMoveItError} from "@/lib/moveit-errors";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
+import {loadVisualizerViewPreferences,saveVisualizerViewPreferences} from "@/lib/visualizer-view-preferences";
 import {extractRobotModeCode,hasActiveError,operationStatus} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
@@ -118,9 +119,9 @@ export function VisualizerPage(){
   const [jointDirty,setJointDirty]=useState(()=>initialJointDegrees!==null);
   const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
-  const [showObjectLabels,setShowObjectLabels]=useState(false);
-  const [objectLabels,setObjectLabels]=useState<Record<string,boolean>>({});
-  const [hiddenObjects,setHiddenObjects]=useState<Record<string,boolean>>({});
+  const [viewPreferences,setViewPreferences]=useState(loadVisualizerViewPreferences);
+  const objectLabels=viewPreferences.objectLabels;
+  const hiddenObjects=viewPreferences.hiddenObjects;
   const [disabledObjects,setDisabledObjects]=useState<Record<string,CollisionObject>>(()=>{
     try {
       const stored=localStorage.getItem("cr5a-visualizer-disabled-objects-v1");
@@ -129,8 +130,8 @@ export function VisualizerPage(){
     } catch { return {}; }
   });
   const [collisionBusy,setCollisionBusy]=useState<string|null>(null);
-  const toggleObjectLabel=(id:string)=>setObjectLabels((current)=>({...current,[id]:!(current[id]??true)}));
-  const toggleObjectVisibility=(id:string)=>setHiddenObjects((current)=>({...current,[id]:!(current[id]??false)}));
+  const toggleObjectLabel=(id:string)=>setViewPreferences((current)=>({...current,objectLabels:{...current.objectLabels,[id]:!(current.objectLabels[id]??true)}}));
+  const toggleObjectVisibility=(id:string)=>setViewPreferences((current)=>({...current,hiddenObjects:{...current.hiddenObjects,[id]:!(current.hiddenObjects[id]??false)}}));
   const removeDisabledObject=(id:string)=>setDisabledObjects((current)=>{
     const next={...current};delete next[id];return next;
   });
@@ -138,6 +139,9 @@ export function VisualizerPage(){
   useEffect(()=>{
     localStorage.setItem("cr5a-visualizer-disabled-objects-v1",JSON.stringify(disabledObjects));
   },[disabledObjects]);
+  useEffect(()=>{
+    saveVisualizerViewPreferences(viewPreferences);
+  },[viewPreferences]);
 
   const toggleObjectCollision=async(object:CollisionObject)=>{
     if(!model||collisionBusy)return;
@@ -678,7 +682,7 @@ export function VisualizerPage(){
         </div>
         <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} comparisonPaths={comparisonPaths} targetTcp={tcpTarget}
           gripperPositionMm={gripper.positionMm} loading={modelLoading} error={modelError??sceneError}
-          showLabels={showObjectLabels} onToggleLabels={()=>setShowObjectLabels(value=>!value)}
+          viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
           objectLabels={objectLabels} disabledObjects={disabledObjects} hiddenObjects={hiddenObjects}/>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-3 py-2.5 text-[10px] text-zinc-500">
           <div className="flex flex-wrap items-center gap-2">
@@ -855,7 +859,7 @@ export function VisualizerPage(){
               </div>
             </section>}
           </TabsContent>
-          <TabsContent value="scene" className="mt-3">
+          <TabsContent value="scene" className="mt-3" forceMount>
             <SceneManager scene={scene} frameId={model?.base_frame??"dummy_link"} modelReady={model!==null}
               connected={bridgeState==="connected"&&busy===null} request={request} onNotice={setNotice}
               objectLabels={objectLabels} onToggleObjectLabel={toggleObjectLabel} hiddenObjects={hiddenObjects}

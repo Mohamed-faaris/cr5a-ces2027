@@ -1,4 +1,4 @@
-import {Suspense,useCallback,useEffect,useRef,useState,type RefObject} from "react";
+import {Suspense,useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type SetStateAction} from "react";
 import {Canvas,useFrame} from "@react-three/fiber";
 import {Billboard,Grid,OrbitControls,Text} from "@react-three/drei";
 import {ChevronDown,Eye,Grid3X3} from "lucide-react";
@@ -6,6 +6,9 @@ import * as THREE from "three";
 import URDFLoader from "urdf-loader";
 import type {CollisionObject,JointStateMessage,MotionPlan,RobotModel} from "@/lib/types";
 import {rpyDegreesToQuaternion} from "@/lib/utils";
+import type {VisualizerViewPreferences} from "@/lib/visualizer-view-preferences";
+import {useRobotSocket} from "@/lib/socket";
+import {useRobotStore} from "@/store/robot-store";
 
 type RobotObject=THREE.Object3D&{
   setJointValues:(values:Record<string,number>)=>void;
@@ -198,7 +201,36 @@ function TcpFrame({
   return null;
 }
 
-function ScenePrimitive({object,showLabel,collisionEnabled}:{object:CollisionObject;showLabel:boolean;collisionEnabled:boolean}) {
+type FrameTransform={translation:THREE.Vector3;rotation:THREE.Quaternion};
+
+function resolveFrameTransform(topicData:any,sourceFrame:string,targetFrame:string):FrameTransform|null {
+  if(!topicData||!sourceFrame||!targetFrame||sourceFrame===targetFrame)return null;
+  const transforms=Array.isArray(topicData)?topicData:(topicData.transforms??[]);
+  const normalize=(frame:string)=>frame.replace(/^\/+/,"");
+  const source=normalize(sourceFrame),target=normalize(targetFrame);
+  for(const item of transforms){
+    const parent=normalize(String(item?.header?.frame_id??""));
+    const child=normalize(String(item?.child_frame_id??""));
+    const t=item?.transform?.translation,q=item?.transform?.rotation;
+    if(!t||!q||![t.x,t.y,t.z,q.x,q.y,q.z,q.w].every(isFiniteNumber))continue;
+    const translation=new THREE.Vector3(t.x,t.y,t.z);
+    const rotation=new THREE.Quaternion(q.x,q.y,q.z,q.w);
+    if(rotation.lengthSq()<1e-12)continue;
+    rotation.normalize();
+    // TF stores parent<-child. Scene coordinates are converted source->target.
+    if(parent===target&&child===source)return {translation,rotation};
+    if(parent===source&&child===target){
+      const inverse=rotation.clone().invert();
+      return {translation:translation.negate().applyQuaternion(inverse),rotation:inverse};
+    }
+  }
+  return null;
+}
+
+function ScenePrimitive({object,showLabel,collisionEnabled,frameTransform}:{
+  object:CollisionObject;showLabel:boolean;collisionEnabled:boolean;frameTransform?:FrameTransform|null;
+}) {
+
   const primitives=object.primitives??[];
   const poses=object.primitive_poses??[];
   if(!primitives.length)return null;
@@ -219,6 +251,10 @@ function ScenePrimitive({object,showLabel,collisionEnabled}:{object:CollisionObj
     parentQuaternionValues.every((value)=>value===0))return null;
   const parentPositionVector=new THREE.Vector3(...parentPositionValues);
   const parentQuaternion=new THREE.Quaternion(...parentQuaternionValues).normalize();
+  if(frameTransform){
+    parentPositionVector.applyQuaternion(frameTransform.rotation).add(frameTransform.translation);
+    parentQuaternion.premultiply(frameTransform.rotation);
+  }
 
   return <>
     {primitives.map((primitive,index)=>{
@@ -319,29 +355,31 @@ function TrajectoryPreview({
 }
 
 export function RobotViewport({
-  model,jointState,scene,plan,comparisonPaths=[],targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,showLabels,onToggleLabels,objectLabels,
-  disabledObjects,hiddenObjects
+  model,jointState,scene,plan,comparisonPaths=[],targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,viewPreferences,onViewPreferencesChange,
+  objectLabels,disabledObjects,hiddenObjects
 }:{
   model:RobotModel|null;jointState:JointStateMessage|null;scene:any;
   plan:MotionPlan|null;comparisonPaths?:Array<{key:string;label:string;color:string;plan:MotionPlan}>;
   poseMarkers?:Array<{id:string;label:string;position:[number,number,number];color?:string;selected?:boolean}>;
   targetTcp?:{x:number;y:number;z:number;rx:number;ry:number;rz:number}|null;
   gripperPositionMm?:number|null;loading:boolean;error:string|null;
-  showLabels:boolean;onToggleLabels:()=>void;objectLabels:Record<string,boolean>;
+  viewPreferences:VisualizerViewPreferences;
+  onViewPreferencesChange:Dispatch<SetStateAction<VisualizerViewPreferences>>;
+  objectLabels:Record<string,boolean>;
   disabledObjects:Record<string,CollisionObject>;hiddenObjects:Record<string,boolean>;
 }) {
   const rootRef=useRef<THREE.Group|null>(null);
   const [robot,setRobot]=useState<RobotObject|null>(null);
+  const {subscribeChannels}=useRobotSocket();
+  const tfStatic=useRobotStore((state)=>state.topicMessages["/tf_static"]?.data);
+  useEffect(()=>subscribeChannels(["topic:/tf_static"]),[subscribeChannels]);
   const [modelError,setModelError]=useState<string|null>(null);
-  const [showRods,setShowRods]=useState(false);
-  const [showMeshes,setShowMeshes]=useState(true);
-  const [showGripperMeshes,setShowGripperMeshes]=useState(true);
-  const [showPath,setShowPath]=useState(true);
-  const [showAxes,setShowAxes]=useState(false);
-  const [showTcp,setShowTcp]=useState(false);
-  const [showTargetTcp,setShowTargetTcp]=useState(false);
-  const [showGrid,setShowGrid]=useState(true);
-  const [showSceneObjects,setShowSceneObjects]=useState(true);
+  const showRods=viewPreferences.robotStyle==="skeleton";
+  const showMeshes=viewPreferences.robotStyle==="mesh";
+  const {showGripperMeshes,showTrajectoryPaths:showPath,showBaseAxes:showAxes,showActualTcp:showTcp,
+    showTargetTcp,showGrid,showSceneObjects,showObjectLabels:showLabels}=viewPreferences;
+  const updateView=(patch:Partial<VisualizerViewPreferences>)=>
+    onViewPreferencesChange(current=>({...current,...patch}));
   const [trajectoryPosition,setTrajectoryPosition]=useState<number|null>(null);
   const activeObjects:CollisionObject[]=scene?.world?.collision_objects??[];
   const allObjects:CollisionObject[]=[
@@ -376,8 +414,12 @@ export function RobotViewport({
     (timeSeconds(upperPoint?.time_from_start)-timeSeconds(lowerPoint?.time_from_start))*interpolation;
   const totalTime=timeSeconds(trajectoryPoints[trajectoryPoints.length-1]?.time_from_start);
   useEffect(()=>{setTrajectoryPosition(null);},[plan?.plan_id]);
+  const frameTransformFor=(frameId?:string)=>{
+    if(!frameId||frameId===model?.base_frame)return null;
+    return resolveFrameTransform(tfStatic,frameId,model?.base_frame??"");
+  };
   const renderObjects=allObjects.filter((item)=>
-    hiddenObjects[item.id]!==true&&(!item.header?.frame_id||item.header.frame_id===model?.base_frame)
+    hiddenObjects[item.id]!==true&&(!item.header?.frame_id||item.header.frame_id===model?.base_frame||Boolean(frameTransformFor(item.header.frame_id)))
   );
   const attachedCount=scene?.robot_state?.attached_collision_objects?.length??0;
   const onLoaded=useCallback((value:RobotObject|null,message?:string)=>{
@@ -397,13 +439,13 @@ export function RobotViewport({
         </summary>
         <div className="absolute right-0 mt-1 w-52 space-y-1 rounded-lg border border-zinc-200 bg-white p-2 shadow-xl">
           <div className="px-2 pb-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-400">Robot</div>
-          <button type="button" title="Show the full URDF visual meshes for the arm." onClick={()=>{setShowMeshes(true);setShowRods(false);}} className={"w-full rounded px-2 py-1.5 text-left text-xs "+(showMeshes?"bg-zinc-900 text-white":"hover:bg-zinc-100")}>Visual mesh</button>
-          <button type="button" title="Show a simplified joint-to-joint skeleton instead of the detailed meshes." onClick={()=>{setShowMeshes(false);setShowRods(true);}} className={"w-full rounded px-2 py-1.5 text-left text-xs "+(showRods?"bg-zinc-900 text-white":"hover:bg-zinc-100")}>Joint skeleton</button>
-          <button type="button" title="Toggle the PGEA gripper visual model. This does not connect or disconnect the gripper." aria-pressed={showGripperMeshes} onClick={()=>setShowGripperMeshes(value=>!value)} disabled={!model?.pgea_urdf} className={"w-full rounded px-2 py-1.5 text-left text-xs disabled:opacity-40 "+(showGripperMeshes?"bg-zinc-100":"hover:bg-zinc-100")}>Gripper model {showGripperMeshes?"· On":"· Off"}</button>
+          <button type="button" title="Show the full URDF visual meshes for the arm." onClick={()=>updateView({robotStyle:"mesh"})} className={"w-full rounded px-2 py-1.5 text-left text-xs "+(showMeshes?"bg-zinc-900 text-white":"hover:bg-zinc-100")}>Visual mesh</button>
+          <button type="button" title="Show a simplified joint-to-joint skeleton instead of the detailed meshes." onClick={()=>updateView({robotStyle:"skeleton"})} className={"w-full rounded px-2 py-1.5 text-left text-xs "+(showRods?"bg-zinc-900 text-white":"hover:bg-zinc-100")}>Joint skeleton</button>
+          <button type="button" title="Toggle the PGEA gripper visual model. This does not connect or disconnect the gripper." aria-pressed={showGripperMeshes} onClick={()=>updateView({showGripperMeshes:!showGripperMeshes})} disabled={!model?.pgea_urdf} className={"w-full rounded px-2 py-1.5 text-left text-xs disabled:opacity-40 "+(showGripperMeshes?"bg-zinc-100":"hover:bg-zinc-100")}>Gripper model {showGripperMeshes?"· On":"· Off"}</button>
           <div className="my-1 border-t border-zinc-100"/>
-          <button type="button" title="Hide or show scene collision geometry only. It does not change MoveIt's collision checking." aria-pressed={showSceneObjects} onClick={()=>setShowSceneObjects(value=>!value)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Scene objects <span>{showSceneObjects?"On":"Off"}</span></button>
-          <button type="button" title="Show or hide object name labels. This is a visual-only setting." aria-pressed={showLabels} onClick={onToggleLabels} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Object labels <span>{showLabels?"On":"Off"}</span></button>
-          <button type="button" title="Show or hide the planned end-effector trajectory. Compared profiles retain their own colors." aria-pressed={showPath} onClick={()=>setShowPath(value=>!value)} disabled={!hasTrajectory&&!comparisonPaths.length} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Trajectory paths <span>{showPath?"On":"Off"}</span></button>
+          <button type="button" title="Hide or show scene collision geometry only. It does not change MoveIt's collision checking." aria-pressed={showSceneObjects} onClick={()=>updateView({showSceneObjects:!showSceneObjects})} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Scene objects <span>{showSceneObjects?"On":"Off"}</span></button>
+          <button type="button" title="Show or hide object name labels. This is a visual-only setting." aria-pressed={showLabels} onClick={()=>updateView({showObjectLabels:!showLabels})} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Object labels <span>{showLabels?"On":"Off"}</span></button>
+          <button type="button" title="Show or hide the planned end-effector trajectory. Compared profiles retain their own colors." aria-pressed={showPath} onClick={()=>updateView({showTrajectoryPaths:!showPath})} disabled={!hasTrajectory&&!comparisonPaths.length} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Trajectory paths <span>{showPath?"On":"Off"}</span></button>
         </div>
       </details>
       <details className="group relative">
@@ -411,10 +453,10 @@ export function RobotViewport({
           <Grid3X3 size={13}/> View <ChevronDown size={12}/>
         </summary>
         <div className="absolute right-0 mt-1 w-48 space-y-1 rounded-lg border border-zinc-200 bg-white p-2 shadow-xl">
-          <button type="button" title="Show base_link axes at the robot base. X/Y/Z axes are visual references." aria-pressed={showAxes} onClick={()=>setShowAxes(value=>!value)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Base axes <span>{showAxes?"On":"Off"}</span></button>
-          <button type="button" title="Show the actual TCP frame attached to the current robot model pose." aria-pressed={showTcp} onClick={()=>setShowTcp(value=>!value)} disabled={!robot||!model?.end_effector_link} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Actual TCP frame <span>{showTcp?"On":"Off"}</span></button>
-          <button type="button" title="Preview the entered TCP target as an orange marker and oriented axes in the MoveIt base frame. Controller-reported actual values may use a different tool/user frame or TCP offset. This does not move the robot." aria-pressed={showTargetTcp} onClick={()=>setShowTargetTcp(value=>!value)} disabled={!targetTcp||![targetTcp.x,targetTcp.y,targetTcp.z,targetTcp.rx,targetTcp.ry,targetTcp.rz].every(isFiniteNumber)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Target TCP <span>{showTargetTcp?"On":"Off"}</span></button>
-          <button type="button" title="Show or hide the world ground grid. This does not represent a collision object." aria-pressed={showGrid} onClick={()=>setShowGrid(value=>!value)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Ground grid <span>{showGrid?"On":"Off"}</span></button>
+          <button type="button" title="Show base_link axes at the robot base. X/Y/Z axes are visual references." aria-pressed={showAxes} onClick={()=>updateView({showBaseAxes:!showAxes})} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Base axes <span>{showAxes?"On":"Off"}</span></button>
+          <button type="button" title="Show the actual TCP frame attached to the current robot model pose." aria-pressed={showTcp} onClick={()=>updateView({showActualTcp:!showTcp})} disabled={!robot||!model?.end_effector_link} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Actual TCP frame <span>{showTcp?"On":"Off"}</span></button>
+          <button type="button" title="Preview the entered TCP target as an orange marker and oriented axes in the MoveIt base frame. Controller-reported actual values may use a different tool/user frame or TCP offset. This does not move the robot." aria-pressed={showTargetTcp} onClick={()=>updateView({showTargetTcp:!showTargetTcp})} disabled={!targetTcp||![targetTcp.x,targetTcp.y,targetTcp.z,targetTcp.rx,targetTcp.ry,targetTcp.rz].every(isFiniteNumber)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Target TCP <span>{showTargetTcp?"On":"Off"}</span></button>
+          <button type="button" title="Show or hide the world ground grid. This does not represent a collision object." aria-pressed={showGrid} onClick={()=>updateView({showGrid:!showGrid})} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Ground grid <span>{showGrid?"On":"Off"}</span></button>
           <div className="border-t border-zinc-100 px-2 pt-2 text-[10px] leading-4 text-zinc-400">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
         </div>
       </details>
@@ -425,7 +467,7 @@ export function RobotViewport({
       <div className="max-w-sm text-xs text-zinc-500">{error??"Start robot_state_publisher and confirm robot_description is available."}</div>
     </div>}
     {modelError&&<div className="absolute bottom-10 right-4 z-20 max-w-xs rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">Robot model parse failed: {modelError}</div>}
-    {allObjects.some((item)=>item.header?.frame_id&&item.header.frame_id!==model?.base_frame)&&
+    {allObjects.some((item)=>item.header?.frame_id&&item.header.frame_id!==model?.base_frame&&!frameTransformFor(item.header.frame_id))&&
       <div className="absolute bottom-10 right-4 z-10 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
         Objects outside {model?.base_frame??"base frame"} are listed but not drawn without TF transforms.
       </div>}
@@ -453,7 +495,7 @@ export function RobotViewport({
         <span>Start · 0.00 s</span><span>{trajectoryPoints.length} points</span><span>End · {totalTime.toFixed(2)} s</span>
       </div>
     </div>}
-    <Canvas shadows camera={{position:[1.25,1.05,1.35],fov:42,near:0.01,far:100}} dpr={[1,1.75]} gl={{antialias:true,alpha:false}}>
+    <Canvas shadows camera={{position:viewPreferences.cameraPosition,fov:42,near:0.01,far:100}} dpr={[1,1.75]} gl={{antialias:true,alpha:false}}>
       <color attach="background" args={["#fafafa"]}/>
       <ambientLight intensity={1.1}/>
       <directionalLight position={[2,4,2]} intensity={2.1} castShadow/>
@@ -482,6 +524,7 @@ export function RobotViewport({
             </group>;
           })()}
           {showSceneObjects&&renderObjects.filter((object)=>hiddenObjects[object.id]!==true).map((object)=><ScenePrimitive key={object.id} object={object}
+            frameTransform={frameTransformFor(object.header?.frame_id)}
             showLabel={showLabels&&objectLabels[object.id]!==false}
             collisionEnabled={activeObjects.some((active)=>active.id===object.id)}/>)}
           {poseMarkers.filter((item)=>item.position.every(isFiniteNumber)).map((item,index)=><group key={item.id} position={item.position}>
@@ -496,7 +539,14 @@ export function RobotViewport({
         </group>
       </Suspense>
       {showGrid&&<Grid position={[0,-0.002,0]} args={[3,3]} cellSize={0.1} cellThickness={0.5} sectionSize={0.5} sectionThickness={0.9} fadeDistance={4} fadeStrength={1.3} infiniteGrid/>}
-      <OrbitControls makeDefault target={[0,0.25,0]} minDistance={0.45} maxDistance={4}/>
+      <OrbitControls makeDefault target={viewPreferences.cameraTarget} minDistance={0.45} maxDistance={4}
+        onEnd={(event:any)=>{
+          const controls=event.target;
+          if(!controls?.object?.position||!controls?.target)return;
+          const cameraPosition=controls.object.position.toArray() as [number,number,number];
+          const cameraTarget=controls.target.toArray() as [number,number,number];
+          onViewPreferencesChange(current=>({...current,cameraPosition,cameraTarget}));
+        }}/>
     </Canvas>
     <div className={hasTrajectory?"absolute bottom-24 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500":"absolute bottom-4 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500"}>
       {model?.base_frame??"dummy_link"} · metres

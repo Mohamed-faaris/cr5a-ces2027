@@ -18,6 +18,8 @@ type Payload = {
 };
 type Request = (method: string, params?: Record<string, unknown>) => Promise<any>;
 
+const SCENE_SESSION_STORAGE_KEY = "cr5a-visualizer-scene-session-v1";
+
 const initialDraft = (): Draft => ({
   id: "", shape: "box", x: 300, y: 0, z: 100, rx: 0, ry: 0, rz: 0,
   sizeX: 100, sizeY: 100, sizeZ: 100, radius: 50, height: 100,
@@ -222,7 +224,7 @@ function convertConstraintConfig(data: any, frameId: string): Payload[] {
   return result;
 }
 
-function importObjects(data: any, frameId: string): Payload[] {
+function importObjects(data: any, frameId: string, allowExternalFrames = false): Payload[] {
   if (data?.format !== "cr5a-moveit-scene" || data?.version !== 1 || !Array.isArray(data.objects)) {
     throw new Error("Unsupported JSON. Use a MoveIt scene export (cr5a-moveit-scene, version 1).");
   }
@@ -235,7 +237,9 @@ function importObjects(data: any, frameId: string): Payload[] {
     if (id && (!/^[A-Za-z0-9_.-]{1,64}$/.test(id) || ids.has(id))) throw new Error(`Object ${index + 1}: invalid or duplicate ID.`);
     if (id) ids.add(id);
     const frame = String(item.frame_id ?? data.frame_id ?? frameId);
-    if (frame !== frameId) throw new Error(`Object ${id ?? index + 1}: frame "${frame}" does not match "${frameId}".`);
+    if (!frame || (!allowExternalFrames && frame !== frameId)) {
+      throw new Error(`Object ${id ?? index + 1}: frame "${frame}" does not match "${frameId}".`);
+    }
     const numbers = (value: unknown, length: number, name: string) => {
       if (!Array.isArray(value) || value.length !== length || !value.every((v) => typeof v === "number" && Number.isFinite(v))) {
         throw new Error(`Object ${id ?? index + 1}: ${name} must contain ${length} finite numbers.`);
@@ -245,7 +249,7 @@ function importObjects(data: any, frameId: string): Payload[] {
     const position = numbers(item.position_m, 3, "position_m");
     const orientation = numbers(item.orientation_xyzw ?? [0, 0, 0, 1], 4, "orientation_xyzw");
     if (orientation.every((v) => v === 0)) throw new Error(`Object ${id ?? index + 1}: invalid quaternion.`);
-    const payload: Payload = { ...(id ? { id } : {}), shape, frame_id: frameId, position_m: position, orientation_xyzw: orientation };
+    const payload: Payload = { ...(id ? { id } : {}), shape, frame_id: frame, position_m: position, orientation_xyzw: orientation };
     if (shape === "box") {
       payload.dimensions_m = numbers(item.dimensions_m, 3, "dimensions_m");
       if (payload.dimensions_m.some((v) => v <= 0)) throw new Error("Box dimensions must be positive.");
@@ -298,6 +302,9 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
   const [constraintsText, setConstraintsText] = useState(DEFAULT_CONSTRAINTS_JSON);
   const [convertedObjects, setConvertedObjects] = useState<Payload[] | null>(null);
   const defaultLoadStarted = useRef(false);
+  const sceneSessionHydrated = useRef(false);
+  const initiallyDisabledIds = useRef(new Set(Object.keys(disabledObjects)));
+  const disabledCleanupInFlight = useRef(new Set<string>());
   const existingIds = new Set(objects.map((object) => object.id));
   const attachedIds = new Set(attached.map((item) => item.object?.id).filter((id): id is string => Boolean(id)));
 
@@ -307,41 +314,90 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
     return current as PlanningScene;
   };
 
+  // The bridge may seed its built-in objects before this page restores the
+  // browser's disabled-object list. Reconcile those persisted disables once they appear.
+  useEffect(() => {
+    if (!connected || !initiallyDisabledIds.current.size) return;
+    const toRemove = world.flatMap((object) => {
+      const id = object.id;
+      return id && initiallyDisabledIds.current.has(id) && !disabledCleanupInFlight.current.has(id)
+        ? [{ object, id }]
+        : [];
+    });
+    if (!toRemove.length) return;
+    void (async () => {
+      for (const { object, id } of toRemove) {
+        disabledCleanupInFlight.current.add(id);
+        try {
+          await request("scene.remove", { id });
+        } catch (error) {
+          onNotice({ tone: "error", message: `Could not restore disabled collision state for ${id}: ${error instanceof Error ? error.message : String(error)}` });
+        } finally {
+          disabledCleanupInFlight.current.delete(id);
+        }
+      }
+      await refresh();
+      onSceneChanged();
+    })();
+  }, [connected, world, request, onNotice, onSceneChanged]);
+
   useEffect(() => {
     if (!connected || !modelReady || !sceneReady || defaultLoadStarted.current) return;
     defaultLoadStarted.current = true;
-    const seedDefaultScene = async () => {
+    const initializeScene = async () => {
       try {
         const latest = await request("moveit.get_scene") as PlanningScene;
-        const currentWorld = latest?.world?.collision_objects ?? [];
-        const currentAttached = latest?.robot_state?.attached_collision_objects ?? [];
-        const currentIds = new Set(currentWorld.map((object) => object.id));
-        const currentAttachedIds = new Set(currentAttached.map((item) => item.object?.id).filter((id): id is string => Boolean(id)));
-        const defaults = convertConstraintConfig(JSON.parse(DEFAULT_CONSTRAINTS_JSON), frameId).map((object) => {
-          if (!object.id) throw new Error("Default scene object is missing its ID.");
-          return { ...object, id: object.id };
-        });
+        const currentIds = new Set<string>((latest?.world?.collision_objects ?? []).flatMap((object) => object.id ? [object.id] : []));
+        const currentAttachedIds = new Set<string>((latest?.robot_state?.attached_collision_objects ?? [])
+          .flatMap((item) => item.object?.id ? [item.object.id] : []));
         const disabledIds = new Set(Object.keys(disabledObjects));
-        const missing = defaults.filter((object) => !currentIds.has(object.id) && !disabledIds.has(object.id));
-        const collisions = missing.filter((object) => currentAttachedIds.has(object.id));
-        if (collisions.length) {
-          throw new Error(`Default scene IDs already attached to the robot: ${collisions.map((item) => item.id).join(", ")}`);
+
+        // Restore the last browser-managed scene; default collision geometry is seeded by the ROS bridge.
+        let restoredCount = 0;
+        try {
+          const saved = localStorage.getItem(SCENE_SESSION_STORAGE_KEY);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            const savedObjects = importObjects(parsed, frameId, true);
+            for (const object of savedObjects) {
+              const id = object.id;
+              if (!id || currentIds.has(id) || currentAttachedIds.has(id) || disabledIds.has(id)) continue;
+              await request("scene.add", object);
+              currentIds.add(id);
+              restoredCount += 1;
+            }
+          }
+        } catch (error) {
+          onNotice({ tone: "error", message: `Saved scene could not be restored: ${error instanceof Error ? error.message : String(error)}` });
         }
-        for (const object of missing) {
-          await request("scene.add", object);
-        }
-        if (missing.length) {
-          await refresh();
-          onSceneChanged();
-          onNotice({ tone: "success", message: `Loaded ${missing.length} default obstacle(s) into the MoveIt planning scene.` });
+
+        sceneSessionHydrated.current = true;
+        await refresh();
+        onSceneChanged();
+        if (restoredCount) {
+          onNotice({ tone: "success", message: `Restored ${restoredCount} saved scene object(s) into MoveIt.` });
         }
       } catch (error) {
         defaultLoadStarted.current = false;
-        onNotice({ tone: "error", message: `Could not load default MoveIt scene: ${error instanceof Error ? error.message : String(error)}` });
+        onNotice({ tone: "error", message: `Could not initialize MoveIt scene: ${error instanceof Error ? error.message : String(error)}` });
       }
     };
-    void seedDefaultScene();
+    void initializeScene();
   }, [connected, modelReady, sceneReady, frameId, request, onNotice, onSceneChanged, disabledObjects]);
+
+  useEffect(() => {
+    if (!sceneSessionHydrated.current || !scene) return;
+    const savedObjects = (scene.world?.collision_objects ?? [])
+      .map((object) => exportObject(object, frameId))
+      .filter((object): object is Record<string, unknown> => object !== null);
+    try {
+      localStorage.setItem(SCENE_SESSION_STORAGE_KEY, JSON.stringify({
+        format: "cr5a-moveit-scene", version: 1, frame_id: frameId, objects: savedObjects,
+      }));
+    } catch (error) {
+      onNotice({ tone: "error", message: `Could not persist scene session: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }, [scene, frameId, onNotice]);
   const add = () => { setEditingId(null); setDraft(initialDraft()); setOpen(true); };
   const edit = (object: CollisionObject) => {
     if ((object.header?.frame_id ?? frameId) !== frameId) {
