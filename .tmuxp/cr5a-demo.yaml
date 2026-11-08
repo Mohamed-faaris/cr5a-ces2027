@@ -4,6 +4,8 @@
 #   tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-demo.yaml
 #
 # Every operational window has a separate logged, interactive Humble shell pane.
+# The D415 camera window uses the real USB camera in both demo and hardware modes;
+# only the robot driver/MoveIt hardware implementation changes between profiles.
 # Window 5 is retained as a full-size workspace shell.
 #
 # MoveIt's demo launch uses fake ros2_control hardware and starts the Dobot
@@ -33,6 +35,13 @@ windows:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-gripper bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
 
+  - window_name: camera
+    layout: even-horizontal
+    panes:
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh d415-camera bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch realsense2_camera rs_launch.py camera_namespace:=cr5 camera_name:=wrist_camera enable_color:=true enable_depth:=true enable_sync:=true align_depth.enable:=true"'
+      - shell_command:
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-d415-camera bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
   - window_name: bridge
     layout: even-horizontal
     panes:

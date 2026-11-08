@@ -49,6 +49,7 @@ docker run -d \
   --name cr5a-moveit \
   --network host \
   --ipc host \
+  --device=/dev/bus/usb:/dev/bus/usb \
   -e DISPLAY="$DISPLAY" \
   -e QT_X11_NO_MITSHM=1 \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
@@ -149,6 +150,7 @@ Expected environment:
 - ROS_DISTRO should be humble.
 - The container OS should be Ubuntu 22.04.
 - ros2 pkg prefix should return a path for moveit_ros_move_group.
+- `ros2 pkg prefix realsense2_camera` should return the installed RealSense wrapper path. Confirm the D415 is visible with `rs-enumerate-devices`.
 
 The image already provides the MoveIt 2 underlay. Do not clone and rebuild the entire MoveIt 2 source tree for this repository.
 
@@ -173,6 +175,8 @@ apt-get install -y \
   ros-humble-ros2-controllers \
   ros-humble-xacro \
   ros-humble-joint-state-publisher-gui \
+  ros-humble-librealsense2-tools \
+  ros-humble-realsense2-camera \
   tmux
 ~~~
 
@@ -632,6 +636,7 @@ The demo profile opens each part of the development stack in its own tmux window
 |---|---|
 | `moveit-demo` | MoveIt fake-hardware demo, RViz, and Dobot simulation adapter |
 | `gripper` | Monitor the simulated PGEA action server and run ROS 2 gripper commands from an interactive shell |
+| `camera` | Physical Intel RealSense D415 color/depth streams and an interactive camera shell |
 | `bridge` | CR5A REST/WebSocket bridge (simulation profile) and rosbridge |
 | `frontend` | React/Vite web console |
 | `monitor` | ROS node and topic monitors |
@@ -688,7 +693,7 @@ Both tmuxp profiles automatically capture each pane's terminal output. Every new
 /root/cr5a_ws/logs/tmux/YYYYMMDD-HHMMSS/
 ~~~
 
-The demo profile creates separate files for MoveIt, bridge, frontend, both monitor panes, and the interactive shell. The hardware profile creates separate files for the driver, MoveIt, bridge, and node monitor.
+The demo profile creates separate files for MoveIt, the D415 camera, bridge, frontend, both monitor panes, and interactive shells. The hardware profile creates separate files for the driver, D415 camera, MoveIt, bridge, PGEA gripper, and node monitor.
 
 List saved sessions:
 
@@ -770,7 +775,7 @@ tmuxp load src/cr5a-ces2027/.tmuxp/cr5a-hardware.yaml
 
 The hardware profile also starts the PGEA bridge in its own **gripper** window, using `transport:=bringup`. This routes the PGEA Modbus traffic through the physical Dobot driver's existing Dashboard connection; do not switch to `transport:=dashboard` while the arm driver is connected. Confirm the gripper is physically wired to the controller tool-RS485 gateway and powered before operating it.
 
-The hardware profile uses the same automatic timestamped logging. Its pane logs include `hardware-driver.log`, `moveit.log`, `bridge.log`, `pgea-gripper.log`, and `monitor-nodes.log` inside that session's log directory.
+The hardware profile uses the same automatic timestamped logging. Its pane logs include `hardware-driver.log`, `d415-camera.log`, `moveit.log`, `bridge.log`, `pgea-gripper.log`, and `monitor-nodes.log` inside that session's log directory.
 
 Stop the active demo stack before starting the hardware profile. Verify the controller network and physical safety systems before launching the real robot.
 
@@ -830,6 +835,8 @@ Open http://127.0.0.1:5173 in a browser. For the fake-hardware workflow, start t
 | rosdep cannot resolve another key | Check the package manifest that declares it; do not install a guessed package name. Run `rosdep update` and retry after verifying the source checkout. |
 | RViz cannot open a display | Check DISPLAY, the X11 socket mount, and the host xhost permission. |
 | Driver cannot connect | Confirm controller IP, host network connectivity, Ethernet route, and IP_address. |
+| D415 camera pane exits with `package 'realsense2_camera' not found` | Install `ros-humble-realsense2-camera` and `ros-humble-librealsense2-tools`, rebuild is not required for apt packages, then open a new Humble shell. |
+| D415 is not detected | Check USB 3 connection and run `rs-enumerate-devices`; for the Docker workflow, recreate the container with `/dev/bus/usb` passed through. |
 | MoveIt has no current joint state | Check that the correct driver or fake-hardware demo is running and publishing joint states. |
 | RobotStatus or TCP unavailable in demo | Confirm `dobot_simulation` is running, `/joint_states` is fresh, and TF contains `dummy_link` to `Link6`. |
 | Bridge cannot find MoveIt actions | Start MoveIt first and check ros2 action list. |
