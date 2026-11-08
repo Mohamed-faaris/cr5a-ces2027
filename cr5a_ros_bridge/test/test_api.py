@@ -102,7 +102,10 @@ def test_pgea_mesh_assets_are_served_from_package_share(client):
 
     assert response.status_code == 200
     assert len(response.content) > 1024
-\n\ndef test_pgea_visual_urdf_is_clean_and_contains_gripper_geometry():
+
+
+
+def test_pgea_visual_urdf_is_clean_and_contains_gripper_geometry():
     from ament_index_python.packages import get_package_share_directory
 
     path = Path(get_package_share_directory("dobot_rviz")) / "urdf" / "cr5_pgea_visual.urdf"
