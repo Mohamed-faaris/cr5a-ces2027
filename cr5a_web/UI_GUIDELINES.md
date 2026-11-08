@@ -18,6 +18,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Initial `robot.get_model` loading retries transient `robot_description`-unavailable responses while `robot_state_publisher` and MoveGroup initialize; preserve this bounded retry when changing initial state loading.
 - Use `useRobotSocket().request()` for bridge requests and `useRobotStore` for shared live state. Do not create page-specific WebSockets or a second source of truth for telemetry.
 - The socket client updates the store from `robot.*`, `motion.*`, and `moveit.scene` events. A request acknowledgement is not a substitute for the resulting telemetry/event.
+- Dynamic topic subscriptions must go through `useRobotSocket().subscribeChannels()`; it reference-counts page subscriptions and restores them after reconnect. Topic snapshots are stored in `useRobotStore.topicMessages`. Do not open a page-specific WebSocket or subscribe directly from a page.
 - Endpoint, environment overrides, and the distinction from raw rosbridge are documented in the root `AGENTS.md`.
 
 ## Motion UI
