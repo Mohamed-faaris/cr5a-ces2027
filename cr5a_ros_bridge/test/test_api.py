@@ -43,6 +43,9 @@ class FakeBackend:
     def event_snapshot(self, name):
         return None
 
+    def emit(self, channel, data):
+        return None
+
     def parameter_service_name(self, node_name, suffix):
         return f"{node_name}/{suffix}"
 
@@ -528,3 +531,609 @@ def test_gripper_profiles_cannot_delete_the_active_profile(tmp_path):
 
     assert response["ok"] is False
     assert response["error"]["code"] == 409
+
+def test_direct_movement_execution_keeps_robot_command_safety_gate(client):
+    response = client.post(
+        "/api/v1/robot/direct-movement/execute",
+        json={"type": "movj", "target_joints_deg": [0, 0, 0, 0, 0, 0]},
+    )
+
+    assert response.status_code == 403
+    assert "allow_commands" in response.json()["detail"]
+
+
+def test_direct_movement_check_rejects_unknown_move_type_before_ros_calls(client):
+    response = client.post(
+        "/api/v1/robot/direct-movement/check",
+        json={"type": "movc", "target": []},
+    )
+
+    assert response.status_code == 422
+    assert "movj" in response.json()["detail"]
+
+
+class DirectMovementBackend(FakeBackend):
+    def __init__(self):
+        from datetime import datetime, timezone
+        self._topic_cache = {
+            "/dobot_msgs_v4/msg/RobotStatus": {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "data": {"is_connected": True, "is_enable": True},
+            },
+            "/joint_states": {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "data": {
+                    "name": [f"joint{i}" for i in range(1, 7)],
+                    "position": [0.0] * 6,
+                },
+            },
+        }
+        self.validity_states = []
+        self.ik_poses = []
+        self.robot_calls = []
+        self.events = []
+        self.valid = True
+        self.execution_modes = []
+        self.movement_dispatched = False
+        self.ik_joint_solutions = []
+        self.scene_fetch_count = 0
+        self.change_scene_after_first = False
+        self.joint_reads = 0
+        self.drift_after_first_joint_read = False
+
+    def topic_snapshot(self, topic):
+        snapshot = super().topic_snapshot(topic)
+        if topic == "/joint_states":
+            self.joint_reads += 1
+            if self.drift_after_first_joint_read and self.joint_reads > 1 and snapshot:
+                import copy
+                snapshot = copy.deepcopy(snapshot)
+                snapshot["data"]["position"][0] = 0.1
+        return snapshot
+
+    def _client(self, service_name, service_type):
+        return object()
+
+    def robot_service(self, name, payload=None):
+        self.robot_calls.append((name, payload or {}))
+        future = Future()
+        if name == "RobotMode":
+            mode = self.execution_modes.pop(0) if self.movement_dispatched and self.execution_modes else "{5}"
+            future.set_result(SimpleNamespace(robot_return=mode, res=0))
+        elif name == "GetErrorID":
+            future.set_result(SimpleNamespace(robot_return="[]", res=0))
+        elif name == "MovJ":
+            from dobot_msgs_v4.srv import MovJ
+            response = MovJ.Response()
+            response.robot_return = "{5}"
+            response.res = 0
+            self.movement_dispatched = True
+            future.set_result(response)
+        elif name == "MovL":
+            from dobot_msgs_v4.srv import MovL
+            response = MovL.Response()
+            response.robot_return = "{5}"
+            response.res = 0
+            self.movement_dispatched = True
+            future.set_result(response)
+        else:
+            future.set_exception(RuntimeError(f"Unexpected Dobot service: {name}"))
+        return future
+
+    def emit(self, channel, data):
+        self.events.append((channel, data))
+
+    def call_service(self, service_name, service_type, request):
+        from moveit_msgs.srv import GetPlanningScene, GetStateValidity, GetPositionFK, GetPositionIK
+        from moveit_msgs.msg import PlanningScene
+        from geometry_msgs.msg import PoseStamped
+        future = Future()
+        if service_type is GetPlanningScene:
+            from moveit_msgs.msg import CollisionObject
+            self.scene_fetch_count += 1
+            response = GetPlanningScene.Response()
+            response.scene = PlanningScene()
+            if self.change_scene_after_first and self.scene_fetch_count > 1:
+                obstacle = CollisionObject()
+                obstacle.id = "added-during-check"
+                response.scene.world.collision_objects.append(obstacle)
+            future.set_result(response)
+        elif service_type is GetStateValidity:
+            self.validity_states.append(list(request.robot_state.joint_state.position))
+            response = GetStateValidity.Response()
+            response.valid = self.valid
+            future.set_result(response)
+        elif service_type is GetPositionFK:
+            response = GetPositionFK.Response()
+            response.error_code.val = 1
+            pose = PoseStamped()
+            pose.pose.position.z = 0.4
+            pose.pose.orientation.w = 1.0
+            response.pose_stamped = [pose]
+            future.set_result(response)
+        elif service_type is GetPositionIK:
+            request_pose = request.ik_request.pose_stamped
+            self.ik_poses.append((
+                request_pose.header.frame_id,
+                request_pose.pose.position.x,
+                request_pose.pose.position.y,
+                request_pose.pose.position.z,
+            ))
+            response = GetPositionIK.Response()
+            response.error_code.val = 1
+            response.solution = request.ik_request.robot_state
+            if self.ik_joint_solutions:
+                response.solution.joint_state.name = [f"joint{i}" for i in range(1, 7)]
+                response.solution.joint_state.position = [float(value) for value in self.ik_joint_solutions.pop(0)]
+            future.set_result(response)
+        else:
+            future.set_exception(RuntimeError(f"Unexpected MoveIt service: {service_name}"))
+        return future
+
+
+def test_direct_movj_collision_check_samples_start_and_target_states():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": False,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {"joint_step_deg": 2.0, "max_samples": 200},
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/check",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["collision_free"] is True
+    assert response.json()["samples_checked"] == 2
+    assert len(backend.validity_states) == 3  # current state plus two path samples
+    assert backend.validity_states[0] == [0.0] * 6
+    assert backend.validity_states[-1][0] == pytest.approx(4 * 3.141592653589793 / 180)
+
+
+
+def test_direct_movj_execution_rechecks_path_then_calls_dobot_service():
+    backend = DirectMovementBackend()
+    backend.execution_modes = ["{7}", "{5}", "{5}", "{5}"]
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0, "action_timeout_sec": 45.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {"joint_step_deg": 2.0, "max_samples": 200},
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post(
+            "/api/v1/robot/direct-movement/recover",
+            json={"confirmed_idle": True},
+        )
+        assert recovery.status_code == 200
+        assert recovery.json()["recovered"] is True
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["robot_response"]["res"] == 0
+    movement_calls = [(name, payload) for name, payload in backend.robot_calls if name == "MovJ"]
+    assert len(movement_calls) == 1
+    payload = movement_calls[0][1]
+    assert payload["mode"] is True
+    assert [payload[key] for key in ("a", "b", "c", "d", "e", "f")] == [4, 0, 0, 0, 0, 0]
+
+
+def test_direct_movj_execution_never_calls_controller_when_start_state_is_invalid():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post(
+            "/api/v1/robot/direct-movement/recover",
+            json={"confirmed_idle": True},
+        )
+        assert recovery.status_code == 200
+        backend.valid = False
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+
+    assert response.status_code == 409
+    assert not any(name == "MovJ" for name, _ in backend.robot_calls)
+
+
+
+def test_direct_movl_collision_check_interpolates_pose_and_solves_sequential_ik():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": False,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "base_frame": "dummy_link",
+            "end_effector_link": "Link6",
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {
+            "controller_pose_frame_confirmed": True,
+            "controller_user": 0,
+            "controller_tool": 0,
+            "cartesian_step_mm": 10.0,
+            "angular_step_deg": 10.0,
+            "max_samples": 20,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/check",
+            json={"type": "movl", "target_pose_mm_deg": [20, 0, 400, 0, 0, 0]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["collision_free"] is True
+    assert response.json()["samples_checked"] == 2
+    assert backend.ik_poses == [
+        ("dummy_link", pytest.approx(0.01), pytest.approx(0), pytest.approx(0.4)),
+        ("dummy_link", pytest.approx(0.02), pytest.approx(0), pytest.approx(0.4)),
+    ]
+    assert len(backend.validity_states) == 3
+
+
+
+def test_movl_check_requires_explicit_controller_user_and_tool_indices():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": False,
+        },
+        "moveit": {
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "base_frame": "dummy_link",
+            "end_effector_link": "Link6",
+        },
+        "direct_movement": {"controller_pose_frame_confirmed": True},
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/check",
+            json={"type": "movl", "target_pose_mm_deg": [20, 0, 400, 0, 0, 0]},
+        )
+
+    assert response.status_code == 409
+    assert "controller_user/controller_tool" in response.json()["detail"]
+    assert not backend.ik_poses
+
+
+def test_direct_movl_execution_uses_verified_user_tool_indices():
+    backend = DirectMovementBackend()
+    backend.execution_modes = ["{7}", "{5}", "{5}", "{5}"]
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0, "action_timeout_sec": 45.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "base_frame": "dummy_link",
+            "end_effector_link": "Link6",
+        },
+        "direct_movement": {
+            "controller_pose_frame_confirmed": True,
+            "controller_user": 2,
+            "controller_tool": 3,
+            "cartesian_step_mm": 10.0,
+            "angular_step_deg": 10.0,
+            "max_samples": 20,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post(
+            "/api/v1/robot/direct-movement/recover",
+            json={"confirmed_idle": True},
+        )
+        assert recovery.status_code == 200
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movl", "target_pose_mm_deg": [20, 0, 400, 0, 0, 0]},
+        )
+
+    assert response.status_code == 200
+    movement_calls = [(name, payload) for name, payload in backend.robot_calls if name == "MovL"]
+    assert len(movement_calls) == 1
+    payload = movement_calls[0][1]
+    assert payload["mode"] is False
+    assert [payload[key] for key in ("a", "b", "c", "d", "e", "f")] == [20, 0, 400, 0, 0, 0]
+    assert payload["param_value"] == ["user=2", "tool=3"]
+
+
+
+def test_direct_movj_rejects_target_outside_configured_joint_limits():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "robot": {"status_topic": "/dobot_msgs_v4/msg/RobotStatus"},
+        "moveit": {
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {"joint_step_deg": 2.0, "max_samples": 200},
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/check",
+            json={"type": "movj", "target_joints_deg": [0, 0, 180, 0, 0, 0]},
+        )
+
+    assert response.status_code == 422
+    assert "joint3" in response.json()["detail"]
+    assert backend.validity_states == [[0.0] * 6]
+
+
+def test_direct_movj_execution_rejects_collision_scene_change_before_service_call():
+    backend = DirectMovementBackend()
+    backend.change_scene_after_first = True
+    config = {
+        "auth": {"enabled": False},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post("/api/v1/robot/direct-movement/recover", json={"confirmed_idle": True})
+        assert recovery.status_code == 200
+        backend.scene_fetch_count = 0
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+
+    assert response.status_code == 409
+    assert "scene changed" in response.json()["detail"]
+    assert not any(name == "MovJ" for name, _ in backend.robot_calls)
+
+
+def test_direct_movj_execution_rejects_robot_drift_during_collision_check():
+    backend = DirectMovementBackend()
+    backend.drift_after_first_joint_read = True
+    config = {
+        "auth": {"enabled": False},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+            "start_state_tolerance_rad": 0.03,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post("/api/v1/robot/direct-movement/recover", json={"confirmed_idle": True})
+        assert recovery.status_code == 200
+        backend.joint_reads = 0
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+
+    assert response.status_code == 409
+    assert "moved during path validation" in response.json()["detail"]
+    assert not any(name == "MovJ" for name, _ in backend.robot_calls)
+
+
+
+def test_direct_movl_collision_check_rejects_ik_branch_jump():
+    import math
+    backend = DirectMovementBackend()
+    backend.ik_joint_solutions = [[math.radians(25), 0, 0, 0, 0, 0]]
+    config = {
+        "auth": {"enabled": False},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": False,
+        },
+        "moveit": {
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "base_frame": "dummy_link",
+            "end_effector_link": "Link6",
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {
+            "controller_pose_frame_confirmed": True,
+            "controller_user": 0,
+            "controller_tool": 0,
+            "cartesian_step_mm": 10.0,
+            "angular_step_deg": 10.0,
+            "max_joint_step_deg": 12.0,
+            "max_samples": 20,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/check",
+            json={"type": "movl", "target_pose_mm_deg": [10, 0, 400, 0, 0, 0]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["collision_free"] is False
+    assert "IK branch jump" in response.json()["reason"]
+    assert "25.00 degrees" in response.json()["reason"]
+
+
+def test_direct_movj_waits_for_controller_running_then_stable_idle():
+    backend = DirectMovementBackend()
+    backend.execution_modes = ["{7}", "{5}", "{5}", "{5}"]
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0, "action_timeout_sec": 45.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {
+            "joint_step_deg": 2.0,
+            "max_samples": 200,
+            "poll_interval_sec": 0.05,
+            "idle_confirmations": 3,
+            "start_timeout_sec": 0.2,
+            "motion_timeout_sec": 1.0,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post("/api/v1/robot/direct-movement/recover", json={"confirmed_idle": True})
+        assert recovery.status_code == 200
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+        status = test_client.get("/api/v1/robot/direct-movement/status")
+
+    assert response.status_code == 200
+    assert response.json()["completion"]["completed"] is True
+    assert response.json()["completion"]["final_mode"] == 5
+    assert status.json()["phase"] == "idle"
+
+
+def test_uncertain_direct_motion_latches_until_operator_confirms_idle():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"service_timeout_sec": 3.0, "action_timeout_sec": 45.0},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+        "moveit": {
+            "group_name": "cr5_group",
+            "joint_names": [f"joint{i}" for i in range(1, 7)],
+            "get_planning_scene_service": "/get_planning_scene",
+        },
+        "direct_movement": {
+            "joint_step_deg": 2.0,
+            "max_samples": 200,
+            "poll_interval_sec": 0.05,
+            "start_timeout_sec": 0.15,
+            "motion_timeout_sec": 0.4,
+            "idle_confirmations": 3,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        recovery = test_client.post(
+            "/api/v1/robot/direct-movement/recover",
+            json={"confirmed_idle": True},
+        )
+        assert recovery.status_code == 200
+        first = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+        state = test_client.get("/api/v1/robot/direct-movement/status")
+        second = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [6, 0, 0, 0, 0, 0]},
+        )
+        recover = test_client.post(
+            "/api/v1/robot/direct-movement/recover",
+            json={"confirmed_idle": True},
+        )
+        final_state = test_client.get("/api/v1/robot/direct-movement/status")
+
+    assert first.status_code == 409
+    assert "no running mode" in first.json()["detail"]
+    assert state.json()["phase"] == "recovery_required"
+    assert second.status_code == 409
+    assert "completion is uncertain" in second.json()["detail"]["message"]
+    assert recover.status_code == 200
+    assert recover.json()["recovered"] is True
+    assert final_state.json()["phase"] == "idle"
+
+
+def test_direct_motion_recovery_requires_explicit_operator_confirmation():
+    backend = DirectMovementBackend()
+    config = {"auth": {"enabled": False}}
+    with TestClient(create_app(backend, config)) as test_client:
+        response = test_client.post(
+            "/api/v1/robot/direct-movement/recover",
+            json={"confirmed_idle": False},
+        )
+    assert response.status_code == 422
+
+
+
+def test_direct_movement_enabled_at_startup_requires_idle_recovery():
+    backend = DirectMovementBackend()
+    config = {
+        "auth": {"enabled": False},
+        "robot": {
+            "status_topic": "/dobot_msgs_v4/msg/RobotStatus",
+            "allow_commands": True,
+            "allow_direct_movement": True,
+        },
+    }
+    with TestClient(create_app(backend, config)) as test_client:
+        status = test_client.get("/api/v1/robot/direct-movement/status")
+        blocked = test_client.post(
+            "/api/v1/robot/direct-movement/execute",
+            json={"type": "movj", "target_joints_deg": [4, 0, 0, 0, 0, 0]},
+        )
+
+    assert status.status_code == 200
+    assert status.json()["phase"] == "recovery_required"
+    assert blocked.status_code == 409
+    assert not any(name == "MovJ" for name, _ in backend.robot_calls)

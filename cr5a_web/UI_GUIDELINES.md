@@ -51,3 +51,12 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Collision objects are drawn only when `header.frame_id` is empty or equals `model.base_frame`. The viewer does not perform TF transforms; objects in other frames remain in the scene response but are not rendered.
 - The current scene renderer handles BOX, SPHERE, and CYLINDER primitives only. Other primitive types are not visualized.
 - Trajectory preview temporarily changes the loaded URDF's joint values to sample end-effector positions, then restores the live joint values. Preserve that restoration when modifying the preview.
+## Direct Dobot movement
+
+- The visualizer Direct movement panel uses the shared `useRobotSocket().request()` path (`robot.direct.check` / `robot.direct.execute`); do not create another WebSocket. Keep this panel separate from planner profiles and from `motion.plan` / `motion.execute`.
+- Move is only offered after a successful check, but the bridge repeats the check during execution. Require connected + enabled + RobotMode 5, fresh joint/status timestamps, no active controller errors, and the `direct_movement_enabled` capability.
+- MovJ UI fields are controller degrees. The bridge converts to radians only for MoveIt collision checking. MovL fields are mm/degrees in MoveIt `base_frame` for `end_effector_link`; the bridge blocks MovL until the Dobot user/tool indices and frame alignment are explicitly configured.
+- The bridge validates MovJ/IK joint values against `cr5_moveit/config/joint_limits.yaml`, re-fetches the scene before command, and rejects scene changes or robot start-state drift beyond `moveit.start_state_tolerance_rad`.
+- The bridge serializes direct moves until controller idle and stable telemetry are confirmed; uncertain command outcomes and bridge restarts remain locked until explicit operator recovery after visually confirming the robot is stopped.
+- MovL IK samples are checked for large joint-branch jumps using the configured maximum joint-step bound.
+- A successful sampled validity check is not proof of collision-free execution: the Dobot controller interpolates its own path and moving obstacles can invalidate the check. Preserve this warning.

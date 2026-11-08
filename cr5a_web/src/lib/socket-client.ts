@@ -56,7 +56,7 @@ export function request(method:string,params:Record<string,unknown>={}):Promise<
   return new Promise((resolve,reject)=>{
     const timeout=window.setTimeout(()=>{
       pending.delete(id);reject(new Error("Request timed out: "+method));
-    },method==="motion.plan"?60000:20000);
+    },method==="robot.direct.execute"?240000:(method==="motion.plan"||method==="robot.direct.check"?60000:20000));
     pending.set(id,{resolve,reject,timeout});
     try{socket?.send(JSON.stringify({op:"request",id,method,params}));}
     catch(error){

@@ -1,11 +1,15 @@
 import asyncio
 import copy
+import hashlib
 import json
 import logging
+import math
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 import uuid
 
 import yaml
@@ -19,6 +23,7 @@ from .gripper_profiles import (
     GripperProfileStore,
     resolve_profiles_path,
 )
+from .direct_motion import (JOINT_NAMES, joint_path_samples, movj_target, movl_path_samples, movl_target)
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -27,8 +32,11 @@ from moveit_msgs.msg import (
     PlanningScene, PlanningSceneComponents, CollisionObject,
     AttachedCollisionObject,
 )
-from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene
-from geometry_msgs.msg import Pose
+from moveit_msgs.srv import (
+    GetPlanningScene, ApplyPlanningScene, GetPositionFK, GetPositionIK, GetStateValidity,
+)
+from moveit_msgs.msg import RobotState
+from geometry_msgs.msg import Pose, PoseStamped
 from shape_msgs.msg import SolidPrimitive
 from rosidl_runtime_py.convert import message_to_ordereddict
 from pgea_gripper_interfaces.srv import GetStatus as PgeaGetStatus
@@ -710,6 +718,811 @@ def create_app(backend, config):
         )
         return result.scene
 
+    direct_motion_lock = asyncio.Lock()
+    direct_movement_enabled = bool(
+        config.get("robot", {}).get("allow_commands", False)
+        and config.get("robot", {}).get("allow_direct_movement", False)
+    )
+    direct_motion_state = {
+        "phase": "recovery_required" if direct_movement_enabled else "idle",
+        "last_command": None,
+        "detail": (
+            "Bridge restarted while direct movement is enabled. Visually verify the robot is stopped, "
+            "then confirm idle before issuing a direct move."
+            if direct_movement_enabled else None
+        ),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def _set_direct_motion_state(phase, detail=None, command=None):
+        direct_motion_state.update({
+            "phase": phase,
+            "detail": detail,
+            "last_command": command if command is not None else direct_motion_state.get("last_command"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        backend.emit("robot.direct.status", dict(direct_motion_state))
+
+    def _parse_dobot_mode_value(value):
+        text = str(value or "").strip()
+        match = re.fullmatch(r"\{\s*(-?\d+)\s*\}", text)
+        if match:
+            return int(match.group(1))
+        if re.fullmatch(r"-?\d+", text):
+            return int(text)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Controller returned an invalid RobotMode value: {text!r}",
+        )
+
+    async def _read_dobot_mode():
+        response = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+        if int(getattr(response, "res", -1)) != 0:
+            raise HTTPException(status_code=409, detail="Controller RobotMode query failed")
+        return _parse_dobot_mode_value(response.robot_return)
+
+    async def _wait_for_direct_motion_completion(start_joint_names, start_positions, accepted_mode):
+        direct_cfg = config.get("direct_movement", {})
+        start_timeout = float(direct_cfg.get("start_timeout_sec", 3.0))
+        motion_timeout = float(direct_cfg.get("motion_timeout_sec", 180.0))
+        poll_interval = float(direct_cfg.get("poll_interval_sec", 0.15))
+        stable_delta = math.radians(float(direct_cfg.get("stable_joint_delta_deg", 0.15)))
+        min_motion_delta = math.radians(float(direct_cfg.get("min_motion_delta_deg", 0.1)))
+        idle_confirmations = int(direct_cfg.get("idle_confirmations", 3))
+        if (
+            not (0.1 <= start_timeout <= motion_timeout <= 900)
+            or not (0.05 <= poll_interval <= 1.0)
+            or not (0 < stable_delta <= math.radians(2))
+            or not (0 < min_motion_delta <= stable_delta)
+            or not (2 <= idle_confirmations <= 10)
+        ):
+            raise HTTPException(status_code=503, detail="Invalid direct_movement completion-monitor configuration")
+
+        started_at = time.monotonic()
+        saw_motion = accepted_mode in (6, 7, 8, 11)
+        previous_positions = list(start_positions)
+        idle_count = 0
+        _set_direct_motion_state(
+            "awaiting_motion",
+            "Dobot accepted the command; waiting for motion to start and then return to idle.",
+        )
+
+        while True:
+            mode = await _read_dobot_mode()
+            if mode in (6, 7, 8, 11):
+                saw_motion = True
+                idle_count = 0
+                _set_direct_motion_state("moving", f"Controller mode {mode}; motion is active.")
+            elif mode == 5:
+                snapshot = backend.topic_snapshot("/joint_states")
+                _direct_freshness(snapshot, "Joint state")
+                data = snapshot.get("data") or {}
+                names = list(data.get("name") or [])
+                positions = list(data.get("position") or [])
+                if len(names) != len(positions) or len(set(names)) != len(names):
+                    raise HTTPException(status_code=409, detail="Joint telemetry became invalid while waiting for completion")
+                by_name = dict(zip(names, positions))
+                if any(name not in by_name for name in start_joint_names):
+                    raise HTTPException(status_code=409, detail="Joint telemetry lost a required joint while moving")
+                current_positions = [float(by_name[name]) for name in start_joint_names]
+                if any(not math.isfinite(value) for value in current_positions):
+                    raise HTTPException(status_code=409, detail="Joint telemetry contains non-finite positions")
+                if max(abs(a - b) for a, b in zip(current_positions, start_positions)) >= min_motion_delta:
+                    saw_motion = True
+
+                if saw_motion:
+                    max_delta = max(
+                        abs(a - b) for a, b in zip(current_positions, previous_positions)
+                    )
+                    idle_count = idle_count + 1 if max_delta <= stable_delta else 0
+                    if idle_count >= idle_confirmations:
+                        scene = await get_scene()
+                        final_state, _, _, _ = await _direct_current_state(scene)
+                        valid, contacts = await _direct_state_validity(final_state)
+                        if not valid:
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "message": "Motion ended in a state MoveIt considers invalid",
+                                    "contacts": contacts,
+                                },
+                            )
+                        return {
+                            "completed": True,
+                            "final_mode": mode,
+                            "stable_samples": idle_count,
+                            "message": "Dobot returned to enabled/idle and joint telemetry stabilized.",
+                        }
+                elif time.monotonic() - started_at >= start_timeout:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Dobot accepted the command but no running mode or joint movement was observed. "
+                            "The outcome is uncertain; direct movement is locked pending manual idle confirmation."
+                        ),
+                    )
+                previous_positions = current_positions
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Controller entered mode {mode} while direct movement was in progress. "
+                        "Motion completion is uncertain; direct movement is locked."
+                    ),
+                )
+
+            elapsed = time.monotonic() - started_at
+            if elapsed >= motion_timeout:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Direct movement did not return to idle within {motion_timeout:.0f} seconds. "
+                        "Motion completion is uncertain; direct movement is locked."
+                    ),
+                )
+            await asyncio.sleep(poll_interval)
+
+    def _direct_joint_names():
+        names = config.get("moveit", {}).get("joint_names", list(JOINT_NAMES))
+        if (
+            not isinstance(names, list)
+            or len(names) != 6
+            or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != 6
+        ):
+            raise HTTPException(status_code=503, detail="Direct movement requires six unique MoveIt joint names")
+        return names
+
+    def _direct_joint_position_limits(joint_names):
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            limits_path = Path(get_package_share_directory("cr5_moveit")) / "config" / "joint_limits.yaml"
+            with limits_path.open("r", encoding="utf-8") as stream:
+                configured = yaml.safe_load(stream) or {}
+            entries = configured.get("joint_limits", {})
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Direct movement cannot load CR5A MoveIt joint limits: {exc}",
+            ) from exc
+
+        result = {}
+        for name in joint_names:
+            entry = entries.get(name) or {}
+            if entry.get("has_position_limits") is not True:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Direct movement requires configured position limits for {name}",
+                )
+            try:
+                lower = float(entry["min_position"])
+                upper = float(entry["max_position"])
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Invalid configured position limits for {name}",
+                ) from exc
+            if not (math.isfinite(lower) and math.isfinite(upper) and lower < upper):
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Invalid configured position limits for {name}",
+                )
+            result[name] = (lower, upper)
+        return result
+
+    def _validate_direct_joint_positions(names, positions, limits, label):
+        if len(names) != len(positions):
+            raise ValueError(f"{label} does not contain a complete joint position vector")
+        by_name = dict(zip(names, positions))
+        for name, (lower, upper) in limits.items():
+            value = by_name.get(name)
+            if value is None or not math.isfinite(float(value)):
+                raise ValueError(f"{label} is missing a finite position for {name}")
+            if value < lower or value > upper:
+                raise ValueError(
+                    f"{label} puts {name} at {math.degrees(value):.2f} degrees, "
+                    f"outside the configured range [{math.degrees(lower):.2f}, "
+                    f"{math.degrees(upper):.2f}] degrees"
+                )
+
+    def _direct_freshness(snapshot, label):
+        if not snapshot or not snapshot.get("timestamp"):
+            raise HTTPException(status_code=409, detail=f"{label} telemetry is unavailable")
+        try:
+            observed = datetime.fromisoformat(
+                str(snapshot["timestamp"]).replace("Z", "+00:00")
+            ).timestamp()
+            age = time.time() - observed
+            max_age = float(config.get("moveit", {}).get("max_joint_state_age_sec", 1.0))
+            if not (0 <= age <= max_age):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{label} telemetry is stale or future-dated; wait for fresh telemetry",
+                )
+        except (ValueError, TypeError, OverflowError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=f"{label} telemetry timestamp is invalid") from exc
+
+    async def _direct_current_state(scene):
+        robot_cfg = config.get("robot", {})
+        status = backend.topic_snapshot(robot_cfg.get(
+            "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
+        ))
+        if not status or status.get("data", {}).get("is_connected") is not True:
+            raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
+        if status.get("data", {}).get("is_enable") is not True:
+            raise HTTPException(status_code=409, detail="Robot is not enabled")
+        _direct_freshness(status, "Robot status")
+
+        mode = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+        if int(getattr(mode, "res", 0)) != 0:
+            raise HTTPException(status_code=409, detail="Robot mode could not be verified")
+        try:
+            mode_value = _parse_dobot_mode_value(mode.robot_return)
+        except HTTPException as exc:
+            raise HTTPException(status_code=409, detail="Robot mode could not be verified") from exc
+        if mode_value != 5:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Direct movement requires enabled/idle mode 5; current mode is {mode_value}",
+            )
+
+        try:
+            errors = await _await_ros(backend.robot_service("GetErrorID"), 1.5)
+            raw_errors = str(getattr(errors, "robot_return", "")).strip()
+            if not raw_errors:
+                raise HTTPException(status_code=409, detail="Controller error state could not be verified")
+            if int(getattr(errors, "res", 0)) != 0:
+                raise HTTPException(status_code=409, detail="Controller error state could not be verified")
+            try:
+                error_payload = json.loads(raw_errors) if raw_errors else []
+            except (TypeError, ValueError):
+                error_payload = raw_errors
+            def contains_active_error(value):
+                if isinstance(value, bool) or value is None:
+                    return False
+                if isinstance(value, (int, float)):
+                    return value != 0
+                if isinstance(value, (list, tuple)):
+                    return any(contains_active_error(item) for item in value)
+                if isinstance(value, dict):
+                    return any(contains_active_error(item) for item in value.values())
+                if isinstance(value, str):
+                    text = value.strip()
+                    if not text or text == "[]" or text.lower() in ("none", "no error"):
+                        return False
+                    try:
+                        return contains_active_error(json.loads(text))
+                    except (TypeError, ValueError):
+                        numbers = re.findall(r"-?\d+(?:\.\d+)?", text)
+                        return any(float(item) != 0 for item in numbers) if numbers else True
+                return False
+            if contains_active_error(error_payload):
+                raise HTTPException(status_code=409, detail="Controller reports active error IDs; clear and verify errors before moving")
+        except HTTPException:
+            raise
+
+        snapshot = backend.topic_snapshot("/joint_states")
+        _direct_freshness(snapshot, "Joint state")
+        names = list((snapshot.get("data") or {}).get("name") or [])
+        positions = list((snapshot.get("data") or {}).get("position") or [])
+        if len(names) != len(positions) or len(set(names)) != len(names):
+            raise HTTPException(status_code=409, detail="Joint telemetry has missing or duplicate positions")
+        try:
+            from .json_utils import finite_vector as _finite_vector
+            by_name = {
+                name: _finite_vector([position], 1, f"joint {name}")[0]
+                for name, position in zip(names, positions)
+                if isinstance(name, str) and name
+            }
+            joint_names = _direct_joint_names()
+            missing = [name for name in joint_names if name not in by_name]
+            if missing:
+                raise ValueError("Missing joints: " + ", ".join(missing))
+            values = [by_name[name] for name in joint_names]
+            joint_limits = _direct_joint_position_limits(joint_names)
+            _validate_direct_joint_positions(
+                joint_names, values, joint_limits, "Current joint state"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=f"Cannot use current joint telemetry: {exc}") from exc
+
+        state = RobotState()
+        state.joint_state.name = joint_names
+        state.joint_state.position = values
+        state.is_diff = False
+        # Preserve attached payloads in every validity check.
+        state.attached_collision_objects = copy.deepcopy(
+            list(getattr(getattr(scene, "robot_state", None), "attached_collision_objects", []) or [])
+        )
+        return state, joint_names, values, joint_limits
+
+    async def _direct_state_validity(state):
+        moveit = config.get("moveit", {})
+        service_name = moveit.get("check_state_validity_service", "/check_state_validity")
+        request = GetStateValidity.Request()
+        request.robot_state = state
+        request.group_name = moveit.get("group_name", "cr5_group")
+        response = await _await_ros(
+            backend.call_service(service_name, GetStateValidity, request),
+            float(config.get("direct_movement", {}).get("service_timeout_sec", 3.0)),
+        )
+        contacts = [_dict(item) for item in list(response.contacts)[:5]]
+        return bool(response.valid), contacts
+
+    def _movl_controller_frame():
+        direct_cfg = config.get("direct_movement", {})
+        user_index = direct_cfg.get("controller_user")
+        tool_index = direct_cfg.get("controller_tool")
+        confirmed = direct_cfg.get("controller_pose_frame_confirmed", False)
+        if (
+            not confirmed
+            or isinstance(user_index, bool) or not isinstance(user_index, int) or user_index < 0
+            or isinstance(tool_index, bool) or not isinstance(tool_index, int) or tool_index < 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "MovL requires verified controller user/tool frame alignment and explicit "
+                    "non-negative controller_user/controller_tool indices in bridge.yaml"
+                ),
+            )
+        return user_index, tool_index
+
+    def _public_direct_check(result):
+        return {
+            key: value for key, value in result.items()
+            if not key.startswith("_")
+        }
+
+    def _direct_scene_fingerprint(scene):
+        signature = {
+            "world": _dict(scene.world),
+            "attached": [
+                _dict(item) for item in scene.robot_state.attached_collision_objects
+            ],
+            "allowed_collision_matrix": _dict(scene.allowed_collision_matrix),
+        }
+        encoded = json.dumps(signature, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    async def check_direct_movement_impl(payload):
+        movement_type = str(payload.get("type", "")).lower()
+        try:
+            if movement_type == "movj":
+                target = movj_target(payload.get("target_joints_deg"))
+            elif movement_type == "movl":
+                target = movl_target(payload.get("target_pose_mm_deg"))
+            else:
+                raise ValueError("type must be 'movj' or 'movl'")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # A planning-scene fetch is mandatory: fail closed if MoveIt cannot
+        # provide its current world and attached-object state.
+        current_scene = await get_scene()
+        scene_fingerprint = _direct_scene_fingerprint(current_scene)
+        current_state, joint_names, current_positions, joint_limits = await _direct_current_state(current_scene)
+        is_valid, contacts = await _direct_state_validity(current_state)
+        if not is_valid:
+            return {
+                "type": movement_type, "collision_free": False, "samples_checked": 0,
+                "reason": "Current robot state is already invalid or in collision",
+                "contacts": contacts,
+            }
+
+        moveit = config.get("moveit", {})
+        group_name = moveit.get("group_name", "cr5_group")
+        base_frame = moveit.get("base_frame", "dummy_link")
+        end_effector = moveit.get("end_effector_link", "Link6")
+        direct_cfg = config.get("direct_movement", {})
+        max_samples = int(direct_cfg.get("max_samples", 200))
+        service_timeout = float(direct_cfg.get("service_timeout_sec", 3.0))
+        checked = 0
+
+        if movement_type == "movj":
+            target_radians = [math.radians(value) for value in target]
+            try:
+                _validate_direct_joint_positions(
+                    joint_names, target_radians, joint_limits, "MovJ target"
+                )
+                samples = joint_path_samples(
+                    current_positions,
+                    target,
+                    math.radians(float(direct_cfg.get("joint_step_deg", 2.0))),
+                    max_samples,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            for index, positions in enumerate(samples, start=1):
+                candidate = copy.deepcopy(current_state)
+                candidate.joint_state.position = positions
+                valid, contacts = await _direct_state_validity(candidate)
+                checked += 1
+                if not valid:
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": "MoveIt reports a collision or invalid joint state",
+                        "contacts": contacts,
+                    }
+        else:
+            _movl_controller_frame()
+            # The Dobot driver accepts raw controller user/tool coordinates;
+            # the configured indices must have been checked against MoveIt's
+            # base frame and end-effector/TCP before this path is checked.
+            fk_name = moveit.get("compute_fk_service", "/compute_fk")
+            fk_request = GetPositionFK.Request()
+            fk_request.header.frame_id = base_frame
+            fk_request.fk_link_names = [end_effector]
+            fk_request.robot_state = current_state
+            fk_response = await _await_ros(
+                backend.call_service(fk_name, GetPositionFK, fk_request), service_timeout
+            )
+            if getattr(fk_response.error_code, "val", None) != 1 or not fk_response.pose_stamped:
+                raise HTTPException(status_code=409, detail="MoveIt could not determine the current end-effector pose")
+            start_pose = fk_response.pose_stamped[0].pose
+            start_position = [
+                start_pose.position.x, start_pose.position.y, start_pose.position.z
+            ]
+            start_orientation = [
+                start_pose.orientation.x, start_pose.orientation.y,
+                start_pose.orientation.z, start_pose.orientation.w,
+            ]
+            try:
+                samples = movl_path_samples(
+                    start_position, start_orientation, target,
+                    float(direct_cfg.get("cartesian_step_mm", 10.0)) / 1000.0,
+                    math.radians(float(direct_cfg.get("angular_step_deg", 2.0))),
+                    max_samples,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+            try:
+                max_ik_joint_step = math.radians(float(direct_cfg.get("max_joint_step_deg", 12.0)))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(status_code=503, detail="Invalid max_joint_step_deg configuration") from exc
+            if not math.isfinite(max_ik_joint_step) or not (0 < max_ik_joint_step <= math.pi):
+                raise HTTPException(status_code=503, detail="max_joint_step_deg must be greater than zero and at most 180")
+
+            previous_ik_positions = dict(zip(joint_names, current_positions))
+            seed_state = current_state
+            for index, (position, orientation) in enumerate(samples, start=1):
+                ik_request = GetPositionIK.Request()
+                ik = ik_request.ik_request
+                ik.group_name = group_name
+                ik.robot_state = seed_state
+                ik.avoid_collisions = True
+                ik.ik_link_name = end_effector
+                ik.pose_stamped = PoseStamped()
+                ik.pose_stamped.header.frame_id = base_frame
+                ik.pose_stamped.pose.position.x, ik.pose_stamped.pose.position.y, ik.pose_stamped.pose.position.z = position
+                (
+                    ik.pose_stamped.pose.orientation.x,
+                    ik.pose_stamped.pose.orientation.y,
+                    ik.pose_stamped.pose.orientation.z,
+                    ik.pose_stamped.pose.orientation.w,
+                ) = orientation
+                timeout_sec = float(direct_cfg.get("ik_timeout_sec", 0.1))
+                ik.timeout.sec = int(timeout_sec)
+                ik.timeout.nanosec = int((timeout_sec - int(timeout_sec)) * 1_000_000_000)
+                ik_response = await _await_ros(
+                    backend.call_service(
+                        moveit.get("compute_ik_service", "/compute_ik"),
+                        GetPositionIK, ik_request,
+                    ),
+                    service_timeout,
+                )
+                if getattr(ik_response.error_code, "val", None) != 1:
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": "MoveIt could not solve IK for an intermediate Cartesian pose",
+                        "ik_error_code": getattr(ik_response.error_code, "val", None),
+                        "contacts": [],
+                    }
+                candidate = ik_response.solution
+                candidate.attached_collision_objects = copy.deepcopy(current_state.attached_collision_objects)
+                try:
+                    _validate_direct_joint_positions(
+                        list(candidate.joint_state.name),
+                        list(candidate.joint_state.position),
+                        joint_limits,
+                        "MovL IK solution",
+                    )
+                except ValueError as exc:
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": str(exc), "contacts": [],
+                    }
+                candidate_by_name = dict(zip(
+                    candidate.joint_state.name, candidate.joint_state.position
+                ))
+                missing_step_names = [name for name in joint_names if name not in candidate_by_name]
+                if missing_step_names:
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": "MovL IK solution is missing joints: " + ", ".join(missing_step_names),
+                        "contacts": [],
+                    }
+                max_step = max(
+                    abs(float(candidate_by_name[name]) - previous_ik_positions[name])
+                    for name in joint_names
+                )
+                if max_step > max_ik_joint_step:
+                    worst_joint = max(
+                        joint_names,
+                        key=lambda name: abs(float(candidate_by_name[name]) - previous_ik_positions[name]),
+                    )
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": (
+                            f"MovL IK branch jump: {worst_joint} changed by "
+                            f"{math.degrees(max_step):.2f} degrees between Cartesian samples "
+                            f"(limit {math.degrees(max_ik_joint_step):.2f} degrees)"
+                        ),
+                        "contacts": [],
+                    }
+                valid, contacts = await _direct_state_validity(candidate)
+                checked += 1
+                if not valid:
+                    return {
+                        "type": movement_type, "collision_free": False,
+                        "samples_checked": checked, "failed_sample": index,
+                        "reason": "MoveIt reports a collision or invalid IK state",
+                        "contacts": contacts,
+                    }
+                previous_ik_positions = {
+                    name: float(candidate_by_name[name]) for name in joint_names
+                }
+                seed_state = candidate
+
+        return {
+            "type": movement_type,
+            "collision_free": True,
+            "samples_checked": checked,
+            "joint_names": joint_names,
+            "_scene_fingerprint": scene_fingerprint,
+            "_start_joint_positions_rad": current_positions,
+            "message": (
+                "All sampled robot states passed MoveIt collision/state validation. "
+                "This is a discrete pre-check, not a safety-rated guarantee."
+            ),
+        }
+
+    async def _execute_direct_movement_body(payload):
+        robot_cfg = config.get("robot", {})
+        if not robot_cfg.get("allow_commands", False) or not robot_cfg.get("allow_direct_movement", False):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Direct movement requires both robot.allow_commands and "
+                    "robot.allow_direct_movement in bridge safety configuration"
+                ),
+            )
+        movement_type = str(payload.get("type", "")).lower()
+        direct_cfg = config.get("direct_movement", {})
+        if movement_type == "movl":
+            try:
+                controller_user, controller_tool = _movl_controller_frame()
+            except HTTPException as exc:
+                raise HTTPException(status_code=403, detail=exc.detail) from exc
+        checked = await check_direct_movement_impl(payload)
+        if not checked.get("collision_free"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": checked.get("reason", "Path validation failed"),
+                    "collision_check": checked,
+                },
+            )
+
+        # The path check can involve many MoveIt service round trips. Reject
+        # execution if the robot start state or collision scene changed while
+        # those samples were being checked.
+        latest_scene = await get_scene()
+        if _direct_scene_fingerprint(latest_scene) != checked.get("_scene_fingerprint"):
+            raise HTTPException(
+                status_code=409,
+                detail="MoveIt collision scene changed during path validation; check the path again",
+            )
+        latest_state, latest_names, latest_positions, _ = await _direct_current_state(latest_scene)
+        checked_names = list(checked.get("joint_names") or [])
+        checked_start = list(checked.get("_start_joint_positions_rad") or [])
+        if (
+            latest_names != checked_names
+            or len(latest_positions) != len(checked_start)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Robot joint set changed during path validation; check the path again",
+            )
+        try:
+            start_tolerance = finite_vector(
+                [config.get("moveit", {}).get("start_state_tolerance_rad", 0.03)],
+                1, "start_state_tolerance_rad",
+            )[0]
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail="Invalid start-state tolerance configuration") from exc
+        if start_tolerance <= 0:
+            raise HTTPException(status_code=503, detail="start_state_tolerance_rad must be greater than zero")
+        max_start_delta = max(
+            abs(float(current) - float(previous))
+            for current, previous in zip(latest_positions, checked_start)
+        )
+        if max_start_delta > start_tolerance:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Robot moved during path validation (max joint delta {max_start_delta:.4f} rad "
+                    f"> {start_tolerance:.4f} rad); check the path again"
+                ),
+            )
+        current_valid, current_contacts = await _direct_state_validity(latest_state)
+        if not current_valid:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Robot current state became invalid after path validation",
+                    "contacts": current_contacts,
+                },
+            )
+
+        values = (
+            movj_target(payload.get("target_joints_deg"))
+            if movement_type == "movj"
+            else movl_target(payload.get("target_pose_mm_deg"))
+        )
+        service_name = "MovJ" if movement_type == "movj" else "MovL"
+        # Dobot parser maps mode=true to joint={...} and false to pose={...}.
+        request_payload = {
+            "mode": movement_type == "movj",
+            "a": values[0], "b": values[1], "c": values[2],
+            "d": values[3], "e": values[4], "f": values[5],
+            "param_value": (
+                ["user=" + str(controller_user),
+                 "tool=" + str(controller_tool)]
+                if movement_type == "movl" else []
+            ),
+        }
+        _set_direct_motion_state(
+            "dispatching",
+            "Collision check passed; sending the direct command to the Dobot controller.",
+            movement_type,
+        )
+        response = await _await_ros(
+            backend.robot_service(service_name, request_payload),
+            float(config.get("ros", {}).get("action_timeout_sec", 45.0)),
+        )
+        result = _dict(response)
+        if int(result.get("res", -1)) != 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Dobot rejected or could not confirm the direct movement command; direct movement is locked for manual recovery.",
+                    "controller_response": result,
+                },
+            )
+        try:
+            accepted_mode = _parse_dobot_mode_value(result.get("robot_return"))
+        except HTTPException:
+            accepted_mode = None
+        completion = await _wait_for_direct_motion_completion(
+            list(checked.get("joint_names") or []),
+            list(checked.get("_start_joint_positions_rad") or []),
+            accepted_mode,
+        )
+        public_check = _public_direct_check(checked)
+        backend.emit("robot.state", {
+            "command": "direct-" + movement_type,
+            "response": result,
+            "collision_check": public_check,
+        })
+        return {
+            "type": movement_type,
+            "collision_check": public_check,
+            "robot_response": result,
+            "completion": completion,
+        }
+
+    async def execute_direct_movement_impl(payload):
+        if direct_motion_state.get("phase") != "idle":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "A prior direct movement is still active or its completion is uncertain.",
+                    "direct_motion": dict(direct_motion_state),
+                },
+            )
+        if direct_motion_lock.locked():
+            raise HTTPException(status_code=409, detail="Another direct movement request is already being processed")
+        async with direct_motion_lock:
+            if direct_motion_state.get("phase") != "idle":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "A prior direct movement is still active or its completion is uncertain.",
+                        "direct_motion": dict(direct_motion_state),
+                    },
+                )
+            command = str(payload.get("type", "")).lower()
+            _set_direct_motion_state("checking", "Validating the requested path.", command)
+            try:
+                result = await _execute_direct_movement_body(payload)
+            except BaseException as exc:
+                phase = direct_motion_state.get("phase")
+                if phase in ("dispatching", "awaiting_motion", "moving"):
+                    detail = str(getattr(exc, "detail", exc))
+                    _set_direct_motion_state(
+                        "recovery_required",
+                        "The command may have reached the controller, but completion was not confirmed. "
+                        + (detail if isinstance(detail, str) else json.dumps(detail, default=str)),
+                        command,
+                    )
+                else:
+                    _set_direct_motion_state("idle", str(getattr(exc, "detail", exc)), command)
+                raise
+            _set_direct_motion_state(
+                "idle",
+                "Controller returned to idle and stable joint telemetry confirmed completion.",
+                command,
+            )
+            return result
+
+    async def direct_motion_status_impl():
+        return dict(direct_motion_state)
+
+    async def recover_direct_movement_impl(payload):
+        if payload.get("confirmed_idle") is not True:
+            raise HTTPException(
+                status_code=422,
+                detail="Explicit confirmed_idle=true is required after visually verifying the robot is stopped.",
+            )
+        if direct_motion_state.get("phase") != "recovery_required":
+            return {"recovered": False, "direct_motion": dict(direct_motion_state)}
+        if direct_motion_lock.locked():
+            raise HTTPException(status_code=409, detail="Direct movement monitoring is still active")
+        async with direct_motion_lock:
+            if direct_motion_state.get("phase") != "recovery_required":
+                return {"recovered": False, "direct_motion": dict(direct_motion_state)}
+            try:
+                scene = await get_scene()
+                current_state, _, _, _ = await _direct_current_state(scene)
+                valid, contacts = await _direct_state_validity(current_state)
+                if not valid:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "Current robot state is invalid or in collision", "contacts": contacts},
+                    )
+            except HTTPException:
+                raise
+            _set_direct_motion_state(
+                "idle",
+                "Operator confirmed the robot was stopped; fresh controller idle state and MoveIt validity were verified.",
+            )
+            return {"recovered": True, "direct_motion": dict(direct_motion_state)}
+
+    @app.get("/api/v1/robot/direct-movement/status")
+    async def direct_motion_status():
+        return await direct_motion_status_impl()
+
+    @app.post("/api/v1/robot/direct-movement/recover")
+    async def recover_direct_movement(payload: dict):
+        return await recover_direct_movement_impl(payload)
+
+    @app.post("/api/v1/robot/direct-movement/check")
+    async def check_direct_movement(payload: dict):
+        if direct_motion_state.get("phase") != "idle" or direct_motion_lock.locked():
+            raise HTTPException(status_code=409, detail="Direct path checks are blocked while a move is active or requires recovery")
+        return _public_direct_check(await check_direct_movement_impl(payload))
+
+    @app.post("/api/v1/robot/direct-movement/execute")
+    async def execute_direct_movement(payload: dict):
+        return await execute_direct_movement_impl(payload)
+
     async def apply_scene(scene):
         service_name = config.get("moveit", {}).get(
             "apply_planning_scene_service", "/apply_planning_scene"
@@ -1099,7 +1912,7 @@ def create_app(backend, config):
             if max_state_age <= 0:
                 raise ValueError("max_joint_state_age_sec must be greater than zero")
             snapshot_time = current_snapshot.get("timestamp")
-            from datetime import datetime
+            from datetime import datetime, timezone
             observed_at = datetime.fromisoformat(
                 str(snapshot_time).replace("Z", "+00:00")
             ).timestamp()
@@ -1355,6 +2168,19 @@ def create_app(backend, config):
                 "simulation": bool(robot_cfg.get("simulation", False)),
                 "capabilities": {
                     "robot_commands_enabled": bool(config.get("robot", {}).get("allow_commands", False)),
+                    "direct_movement_enabled": bool(
+                        config.get("robot", {}).get("allow_commands", False)
+                        and config.get("robot", {}).get("allow_direct_movement", False)
+                    ),
+                    "movl_frame_confirmed": bool(
+                        config.get("direct_movement", {}).get("controller_pose_frame_confirmed", False)
+                        and isinstance(config.get("direct_movement", {}).get("controller_user"), int)
+                        and not isinstance(config.get("direct_movement", {}).get("controller_user"), bool)
+                        and config.get("direct_movement", {}).get("controller_user") >= 0
+                        and isinstance(config.get("direct_movement", {}).get("controller_tool"), int)
+                        and not isinstance(config.get("direct_movement", {}).get("controller_tool"), bool)
+                        and config.get("direct_movement", {}).get("controller_tool") >= 0
+                    ),
                     "error_clear_enabled": bool(config.get("robot", {}).get("allow_error_clear", False)),
                     "motion_execution_enabled": bool(config.get("moveit", {}).get("allow_execution", False)),
                     "gripper_commands_enabled": bool(config.get("gripper", {}).get("allow_commands", False)),
@@ -1419,6 +2245,20 @@ def create_app(backend, config):
                 backend.robot_service("GetError", {"language": language}), 3.0
             )
             return _dict(result)
+
+        if method == "robot.direct.check":
+            if direct_motion_state.get("phase") != "idle" or direct_motion_lock.locked():
+                raise HTTPException(status_code=409, detail="Direct path checks are blocked while a move is active or requires recovery")
+            return _public_direct_check(await check_direct_movement_impl(params))
+
+        if method == "robot.direct.execute":
+            return await execute_direct_movement_impl(params)
+
+        if method == "robot.direct.status":
+            return await direct_motion_status_impl()
+
+        if method == "robot.direct.recover":
+            return await recover_direct_movement_impl(params)
 
         if method == "robot.command":
             if not config.get("robot", {}).get("allow_commands", False):
