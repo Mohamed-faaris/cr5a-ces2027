@@ -24,9 +24,9 @@
     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
     <!-- PGEA mounting stack and finger links are part of the planning robot model. -->
     <disable_collisions link1="Link6" link2="connector_slabs" reason="Adjacent"/>
-    <disable_collisions link1="connector_slabs" link2="gripper_body" reason="Adjacent"/>
-    <disable_collisions link1="gripper_body" link2="left_finger" reason="Adjacent"/>
-    <disable_collisions link1="gripper_body" link2="right_finger" reason="Adjacent"/>
+    <disable_collisions link1="Link6" link2="gripper_body" reason="Adjacent"/>
+    <disable_collisions link1="Link6" link2="left_finger" reason="Adjacent"/>
+    <disable_collisions link1="Link6" link2="right_finger" reason="Adjacent"/>
     <disable_collisions link1="Link1" link2="Link2" reason="Adjacent"/>
     <disable_collisions link1="Link1" link2="Link4" reason="Never"/>
     <disable_collisions link1="Link1" link2="base_link" reason="Adjacent"/>
