@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pgea_gripper</name>
+  <version>0.1.0</version>
+  <description>
+    ROS 2 bridge for the DH-Robotics PGEA integrated gripper on the DOBOT CR5A.
+    Serves a control_msgs/GripperCommand action for MoveIt and feeds finger
+    joint states, using Modbus-RTU through the CR controller tool-RS485
+    gateway — by default via dobot_bringup_v4's services (transport:=bringup,
+    works alongside the arm driver), or a direct Dashboard TCP client
+    (transport:=dashboard, arm driver stopped) or PC USB-RS485 adapter
+    (transport:=serial).
+  </description>
+  <maintainer email="futingxing@dobot-robot.com">FTX</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>control_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <exec_depend>pgea_gripper_interfaces</exec_depend>
+  <depend>ament_index_python</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>dobot_bringup_v4</exec_depend>
+
+  <!-- transport:=bringup (default): Modbus via dobot_bringup_v4 services. -->
+  <exec_depend>dobot_msgs_v4</exec_depend>
+
+  <!-- Only needed for transport:=serial (direct USB-RS485 adapter). -->
+  <exec_depend>python3-serial</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

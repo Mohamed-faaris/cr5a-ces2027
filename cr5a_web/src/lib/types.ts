@@ -16,6 +16,7 @@ export interface RobotCapabilities {
   robot_commands_enabled?: boolean;
   error_clear_enabled?: boolean;
   motion_execution_enabled?: boolean;
+  gripper_commands_enabled?: boolean;
 }
 export interface RobotModel {
   urdf: string; srdf?: string;

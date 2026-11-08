@@ -56,6 +56,15 @@ robot:
   allow_commands: true
   allow_error_clear: true
 
+gripper:
+  allow_commands: true
+  action_name: /gripper_action_controller/gripper_cmd
+  status_service: /pgea_gripper/get_status
+  initialize_service: /pgea_gripper/initialize
+  calibrate_service: /pgea_gripper/calibrate
+  action_timeout_sec: 25.0
+  lifecycle_timeout_sec: 70.0
+
 auth:
   enabled: false
   # Set CR5A_BRIDGE_TOKEN when enabling auth. Do not commit secrets here.

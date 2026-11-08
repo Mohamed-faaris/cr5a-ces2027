@@ -19,6 +19,7 @@ setup(
     entry_points={
         "console_scripts": [
             "dobot_simulation = dobot_simulation.simulator:main",
+            "pgea_gripper_simulation = dobot_simulation.pgea_simulation:main",
         ],
     },
 )

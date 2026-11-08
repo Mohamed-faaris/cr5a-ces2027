@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import logging
 import os
 import time
@@ -25,6 +26,8 @@ from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene
 from geometry_msgs.msg import Pose
 from shape_msgs.msg import SolidPrimitive
 from rosidl_runtime_py.convert import message_to_ordereddict
+from pgea_gripper_interfaces.srv import GetStatus as PgeaGetStatus
+from std_srvs.srv import Trigger
 
 
 _json_logger = logging.getLogger("cr5a_ros_bridge.api")
@@ -460,6 +463,79 @@ def create_app(backend, config):
             raise HTTPException(status_code=403, detail="Error clearing is disabled by bridge safety configuration")
         result = await _await_ros(backend.robot_service("ClearError"))
         return _dict(result)
+
+    async def read_gripper_status():
+        gripper_cfg = config.get("gripper", {})
+        service_name = gripper_cfg.get("status_service", "/pgea_gripper/get_status")
+        try:
+            response = await _await_ros(
+                backend.call_service(service_name, PgeaGetStatus, PgeaGetStatus.Request()),
+                float(gripper_cfg.get("status_timeout_sec", 2.0)),
+            )
+            if not response.success:
+                return {
+                    "connected": False,
+                    "simulation": bool(config.get("robot", {}).get("simulation", False)),
+                    "status": None,
+                    "error": response.message or "PGEA status read failed",
+                    "commands_enabled": bool(gripper_cfg.get("allow_commands", False)),
+                }
+            try:
+                status = json.loads(response.status_json or "{}")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=502, detail=f"Invalid PGEA status response: {exc}") from exc
+            return {
+                "connected": True,
+                "simulation": bool(config.get("robot", {}).get("simulation", False)),
+                "status": status,
+                "error": None,
+                "message": response.message,
+                "commands_enabled": bool(gripper_cfg.get("allow_commands", False)),
+            }
+        except HTTPException as exc:
+            return {
+                "connected": False,
+                "simulation": bool(config.get("robot", {}).get("simulation", False)),
+                "status": None,
+                "error": exc.detail,
+                "commands_enabled": bool(gripper_cfg.get("allow_commands", False)),
+            }
+
+    def require_gripper_commands():
+        if not config.get("gripper", {}).get("allow_commands", False):
+            raise HTTPException(
+                status_code=403,
+                detail="PGEA commands are disabled by bridge safety configuration",
+            )
+
+    async def require_connected_arm(enabled=False):
+        status_topic = config.get("robot", {}).get(
+            "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
+        )
+        snapshot = backend.topic_snapshot(status_topic)
+        data = snapshot.get("data", {}) if snapshot else {}
+        if data.get("is_connected") is not True:
+            raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
+        try:
+            from datetime import datetime, timezone
+            observed_at = datetime.fromisoformat(
+                str(snapshot.get("timestamp", "")).replace("Z", "+00:00")
+            )
+            age = (datetime.now(timezone.utc) - observed_at).total_seconds()
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Robot status timestamp is invalid")
+        max_age = float(config.get("gripper", {}).get("max_robot_status_age_sec", 2.0))
+        if age < -1.0 or age > max_age:
+            raise HTTPException(status_code=409, detail="Robot status is stale; wait for fresh telemetry")
+        mode = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+        mode_code = int(str(mode.robot_return))
+        if int(mode.res) != 0 or mode_code not in (3, 4, 5):
+            raise HTTPException(
+                status_code=409,
+                detail="PGEA operation is blocked while the robot controller is running, dragging, paused, or faulted",
+            )
+        if enabled and mode_code != 5:
+            raise HTTPException(status_code=409, detail="Robot must be enabled and idle before moving the PGEA gripper")
 
     command_services = {
         "enable": "EnableRobot",
@@ -954,6 +1030,70 @@ def create_app(backend, config):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def websocket_request(method: str, params: dict):
+        if method == "gripper.get_status":
+            return await read_gripper_status()
+
+        if method in ("gripper.initialize", "gripper.calibrate"):
+            require_gripper_commands()
+            await require_connected_arm(enabled=False)
+            service_key = "initialize_service" if method == "gripper.initialize" else "calibrate_service"
+            service_name = config.get("gripper", {}).get(
+                service_key,
+                "/pgea_gripper/initialize" if method == "gripper.initialize" else "/pgea_gripper/calibrate",
+            )
+            result = await _await_ros(
+                backend.call_service(service_name, Trigger, Trigger.Request()),
+                float(config.get("gripper", {}).get("lifecycle_timeout_sec", 70.0)),
+            )
+            data = {
+                "success": bool(result.success),
+                "message": str(result.message),
+                "operation": "initialize" if method == "gripper.initialize" else "calibrate",
+            }
+            backend.emit("gripper.status", data)
+            if not result.success:
+                raise HTTPException(status_code=409, detail=result.message or "PGEA lifecycle operation failed")
+            return data
+
+        if method == "gripper.move":
+            require_gripper_commands()
+            await require_connected_arm(enabled=True)
+            status = await read_gripper_status()
+            if not status.get("connected"):
+                raise HTTPException(status_code=503, detail=status.get("error") or "PGEA is not connected")
+            if int((status.get("status") or {}).get("init", 0)) != 1:
+                raise HTTPException(status_code=409, detail="PGEA is not initialized; initialize it before moving")
+
+            position = finite_vector([params.get("position_m")], 1, "position_m")[0]
+            if not 0.0 <= position <= 0.020:
+                raise HTTPException(status_code=422, detail="PGEA position must be between 0 and 0.020 m per finger")
+            max_effort = finite_vector([params.get("max_effort", 0.0)], 1, "max_effort")[0]
+            if max_effort != 0.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="PGEA max_effort must remain 0 until a calibrated Newton-to-percent force mapping exists",
+                )
+            result = await _await_ros(
+                backend.send_gripper_goal(position, max_effort),
+                float(config.get("gripper", {}).get("action_timeout_sec", 25.0)),
+            )
+            data = _dict(result)
+            data["status"] = "SUCCEEDED" if bool(getattr(result, "reached_goal", False)) else "FAILED"
+            backend.emit("gripper.result", data)
+            if data["status"] != "SUCCEEDED":
+                raise HTTPException(status_code=409, detail="PGEA did not confirm that it reached the requested position")
+            return data
+
+        if method == "gripper.stop":
+            require_gripper_commands()
+            try:
+                result = await _await_ros(backend.cancel_gripper_goal(), 3.0)
+                data = _dict(result)
+                backend.emit("gripper.result", {"status": "CANCEL_REQUESTED", "response": data})
+                return data
+            except KeyError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         if method == "robot.get_snapshot":
             robot_cfg = config.get("robot", {})
             status = backend.topic_snapshot(robot_cfg.get(
@@ -993,6 +1133,7 @@ def create_app(backend, config):
                     "robot_commands_enabled": bool(config.get("robot", {}).get("allow_commands", False)),
                     "error_clear_enabled": bool(config.get("robot", {}).get("allow_error_clear", False)),
                     "motion_execution_enabled": bool(config.get("moveit", {}).get("allow_execution", False)),
+                    "gripper_commands_enabled": bool(config.get("gripper", {}).get("allow_commands", False)),
                 },
             }
 
