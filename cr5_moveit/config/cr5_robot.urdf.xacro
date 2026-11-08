@@ -2,13 +2,13 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="cr5_robot">
     <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
 
-    <!-- Import cr5_robot urdf file -->
-    <xacro:include filename="$(find dobot_rviz)/urdf/cr5_robot.urdf" />
+    <!-- Use the complete CR5A + PGEA visual/collision model for every MoveIt
+         consumer (robot_state_publisher, RViz and planning scene). The file
+         intentionally contains no simulator plugin or ros2_control tags. -->
+    <xacro:include filename="$(find dobot_rviz)/urdf/cr5_pgea_visual.urdf" />
 
-    <!-- Import control_xacro -->
+    <!-- Keep the existing fake arm hardware contract; PGEA commands remain
+         handled by the dedicated gripper action server/bridge interface. -->
     <xacro:include filename="cr5_robot.ros2_control.xacro" />
-
-
     <xacro:cr5_robot_ros2_control name="FakeSystem" initial_positions_file="$(arg initial_positions_file)"/>
-
 </robot>

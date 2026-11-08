@@ -12,6 +12,7 @@ import time
 
 import rclpy
 from control_msgs.action import GripperCommand
+from sensor_msgs.msg import JointState
 from pgea_gripper_interfaces.srv import GetStatus
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -61,9 +62,25 @@ class PgeaGripperSimulation(Node):
         self._calibrate_service = self.create_service(
             Trigger, "/pgea_gripper/calibrate", self._calibrate
         )
+        # Match the physical PGEA node: publish both mimic finger joints so
+        # robot_state_publisher and native RViz update the gripper transforms.
+        self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
+        self.create_timer(0.05, self._publish_joint_state)
         self.get_logger().info(
             "Fake PGEA gripper ready: 0 mm open, 20 mm closed per finger"
         )
+
+    def _joint_state_message(self):
+        with self._lock:
+            position = self._position_m
+        message = JointState()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.name = ["left_finger_joint", "right_finger_joint"]
+        message.position = [position, position]
+        return message
+
+    def _publish_joint_state(self):
+        self._joint_state_pub.publish(self._joint_state_message())
 
     def _snapshot(self):
         with self._lock:

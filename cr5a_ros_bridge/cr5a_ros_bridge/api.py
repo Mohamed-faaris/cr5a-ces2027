@@ -2208,12 +2208,13 @@ def create_app(backend, config):
             pgea_urdf = None
             try:
                 from ament_index_python.packages import get_package_share_directory
-                pgea_path = Path(get_package_share_directory("dobot_rviz")) / "urdf" / "cr5_pgea.urdf"
+                pgea_path = Path(get_package_share_directory("dobot_rviz")) / "urdf" / "cr5_pgea_visual.urdf"
                 if pgea_path.is_file():
                     pgea_urdf = pgea_path.read_text(encoding="utf-8")
             except Exception:
-                # PGEA geometry is an optional visual overlay; the active arm URDF
-                # remains authoritative when this package/variant is unavailable.
+                # The PGEA visual description is a clean geometry-only URDF.
+                # MoveIt uses the same model as its authoritative planning URDF;
+                # retain the optional field for older bridge clients.
                 pass
             return {
                 "urdf": urdf,
