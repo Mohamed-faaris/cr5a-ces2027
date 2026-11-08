@@ -393,6 +393,7 @@ export function VisualizerPage(){
         <SceneManager
           scene={scene}
           frameId={model?.base_frame??"dummy_link"}
+          modelReady={model!==null}
           connected={bridgeState==="connected"}
           request={request}
           onNotice={setNotice}

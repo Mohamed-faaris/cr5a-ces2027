@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Download, FileJson, Pencil, Plus, Trash2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { CollisionObject, PlanningScene } from "@/lib/types";
@@ -216,12 +216,13 @@ function Field({ label, value, unit, onChange }: { label: string; value: number;
   </label>;
 }
 
-export function SceneManager({ scene, frameId, connected, request, onNotice, onSceneChanged }: {
-  scene: PlanningScene | null; frameId: string; connected: boolean; request: Request;
+export function SceneManager({ scene, frameId, connected, modelReady, request, onNotice, onSceneChanged }: {
+  scene: PlanningScene | null; frameId: string; connected: boolean; modelReady: boolean; request: Request;
   onNotice: (notice: Notice | null) => void; onSceneChanged: () => void;
 }) {
   const world = scene?.world?.collision_objects ?? [];
   const attached = scene?.robot_state?.attached_collision_objects ?? [];
+  const sceneReady = scene !== null;
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(initialDraft);
@@ -229,13 +230,50 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
   const [converterOpen, setConverterOpen] = useState(false);
   const [constraintsText, setConstraintsText] = useState(DEFAULT_CONSTRAINTS_JSON);
   const [convertedObjects, setConvertedObjects] = useState<Payload[] | null>(null);
+  const defaultLoadStarted = useRef(false);
   const existingIds = new Set(world.map((object) => object.id));
   const attachedIds = new Set(attached.map((item) => item.object?.id).filter((id): id is string => Boolean(id)));
 
   const refresh = async () => {
     const current = await request("moveit.get_scene");
     useRobotStore.getState().setScene(current);
+    return current as PlanningScene;
   };
+
+  useEffect(() => {
+    if (!connected || !modelReady || !sceneReady || defaultLoadStarted.current) return;
+    defaultLoadStarted.current = true;
+    const seedDefaultScene = async () => {
+      try {
+        const latest = await request("moveit.get_scene") as PlanningScene;
+        const currentWorld = latest?.world?.collision_objects ?? [];
+        const currentAttached = latest?.robot_state?.attached_collision_objects ?? [];
+        const currentIds = new Set(currentWorld.map((object) => object.id));
+        const currentAttachedIds = new Set(currentAttached.map((item) => item.object?.id).filter((id): id is string => Boolean(id)));
+        const defaults = convertConstraintConfig(JSON.parse(DEFAULT_CONSTRAINTS_JSON), frameId).map((object) => {
+          if (!object.id) throw new Error("Default scene object is missing its ID.");
+          return { ...object, id: object.id };
+        });
+        const missing = defaults.filter((object) => !currentIds.has(object.id));
+        const collisions = missing.filter((object) => currentAttachedIds.has(object.id));
+        if (collisions.length) {
+          throw new Error(`Default scene IDs already attached to the robot: ${collisions.map((item) => item.id).join(", ")}`);
+        }
+        for (const object of missing) {
+          await request("scene.add", object);
+        }
+        if (missing.length) {
+          await refresh();
+          onSceneChanged();
+          onNotice({ tone: "success", message: `Loaded ${missing.length} default obstacle(s) into the MoveIt planning scene.` });
+        }
+      } catch (error) {
+        defaultLoadStarted.current = false;
+        onNotice({ tone: "error", message: `Could not load default MoveIt scene: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    };
+    void seedDefaultScene();
+  }, [connected, modelReady, sceneReady, frameId, request, onNotice, onSceneChanged]);
   const add = () => { setEditingId(null); setDraft(initialDraft()); setOpen(true); };
   const edit = (object: CollisionObject) => {
     if ((object.header?.frame_id ?? frameId) !== frameId) {
@@ -334,6 +372,21 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
     }
   };
 
+  const toggleConstraintConverter = () => {
+    if (converterOpen) {
+      setConverterOpen(false);
+      return;
+    }
+    setConverterOpen(true);
+    try {
+      setConvertedObjects(convertConstraintConfig(JSON.parse(constraintsText), frameId));
+      onNotice(null);
+    } catch (error) {
+      setConvertedObjects(null);
+      onNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
   const convertConstraints = () => {
     try {
       const converted = convertConstraintConfig(JSON.parse(constraintsText), frameId);
@@ -404,7 +457,7 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
       <div><div className="text-sm font-semibold">Scene objects</div><div className="mt-0.5 text-[11px] text-zinc-400">{world.length} world · {attached.length} attached</div></div>
       <div className="flex flex-wrap items-center gap-1.5">
         <Button size="sm" onClick={add} disabled={!connected || busy}><Plus size={13}/> Add</Button>
-        <Button size="sm" variant="outline" onClick={() => { setConverterOpen((value) => !value); setConvertedObjects(null); }} disabled={!connected || busy}>Convert constraints</Button>
+        <Button size="sm" variant="outline" onClick={toggleConstraintConverter} disabled={!connected || busy}>Convert constraints</Button>
         <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium hover:bg-zinc-50 ${!connected || busy ? "pointer-events-none opacity-40" : ""}`}>
           <Upload size={13}/> Import
           <input type="file" accept=".json,application/json" className="hidden" disabled={!connected || busy} onChange={importFile}/>
@@ -416,7 +469,7 @@ export function SceneManager({ scene, frameId, connected, request, onNotice, onS
 
     {converterOpen && <div className="space-y-3 border-b border-zinc-100 px-4 py-4">
       <div className="flex items-center justify-between gap-2">
-        <div><div className="text-xs font-semibold">Constraint config converter</div><div className="mt-0.5 text-[10px] text-zinc-500">Paste the JSON form of your constraints configuration.</div></div>
+        <div><div className="text-xs font-semibold">Constraint config converter</div><div className="mt-0.5 text-[10px] text-zinc-500">Default constraints are preloaded. Edit, paste, or load another JSON file.</div></div>
         <Button type="button" size="icon" variant="ghost" className="h-7 w-7" aria-label="Close converter" onClick={() => { setConverterOpen(false); setConvertedObjects(null); }}><X size={14}/></Button>
       </div>
       <div className="flex justify-end">
