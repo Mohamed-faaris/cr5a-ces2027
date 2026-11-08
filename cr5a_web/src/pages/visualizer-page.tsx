@@ -23,8 +23,10 @@ const DIRECT_JOINT_NAMES=["joint1","joint2","joint3","joint4","joint5","joint6"]
 function readNumberTuple(params:URLSearchParams,key:string,length:number):number[]|null{
   const raw=params.get(key);
   if(!raw)return null;
-  const values=raw.split(",").map((value)=>Number(value));
-  return values.length===length&&values.every(Number.isFinite)?values:null;
+  const parts=raw.split(",").map((value)=>value.trim());
+  if(parts.length!==length||parts.some((value)=>value===""))return null;
+  const values=parts.map(Number);
+  return values.every(Number.isFinite)?values:null;
 }
 
 function planErrorDetail(code?:number|null):string|null{
