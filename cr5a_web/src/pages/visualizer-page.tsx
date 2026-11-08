@@ -61,7 +61,6 @@ export function VisualizerPage(){
   const modelLoading=useRobotStore((s)=>s.modelLoading);
   const modelError=useRobotStore((s)=>s.modelError);
   const scene=useRobotStore((s)=>s.scene);
-  const sceneLoading=useRobotStore((s)=>s.sceneLoading);
   const sceneError=useRobotStore((s)=>s.sceneError);
   const capabilities=useRobotStore((s)=>s.capabilities);
   const plan=useRobotStore((s)=>s.plan);
@@ -263,7 +262,7 @@ export function VisualizerPage(){
           <span className="text-[11px] text-zinc-400">{model?.base_frame??"dummy_link"}</span>
         </div>
         <RobotViewport model={model} jointState={joints} scene={scene} plan={plan}
-          loading={modelLoading||sceneLoading} error={modelError??sceneError}/>
+          loading={modelLoading} error={modelError??sceneError}/>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-4 py-3 text-[11px] text-zinc-500">
           <span>Blue line: planned end-effector path</span>
           <span>{plan?.status?"Plan: "+plan.status:"No planned trajectory"}</span>

@@ -82,13 +82,17 @@ async function requestRobotModel(){
 
 async function loadInitialState(){
   const store=useRobotStore.getState();
-  store.setSceneLoading(true);store.setModelLoading(true);
+  const needsModel=store.model===null;
+  store.setSceneLoading(true);
+  if(needsModel)store.setModelLoading(true);
   const tasks=[
     request("robot.get_snapshot").then((value)=>useRobotStore.getState().mergeSnapshot(value)),
     request("moveit.get_scene").then((value)=>useRobotStore.getState().setScene(value))
       .catch((error)=>useRobotStore.getState().setSceneLoading(false,String(error))),
-    requestRobotModel().then((value)=>useRobotStore.getState().setModel(value))
-      .catch((error)=>useRobotStore.getState().setModelLoading(false,String(error))),
+    ...(needsModel?[
+      requestRobotModel().then((value)=>useRobotStore.getState().setModel(value))
+        .catch((error)=>useRobotStore.getState().setModelLoading(false,String(error)))
+    ]:[]),
     request("robot.get_joint_limits").then((value)=>useRobotStore.getState().setJointLimits(value)).catch(()=>undefined)
   ];
   await Promise.allSettled(tasks);

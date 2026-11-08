@@ -8,41 +8,85 @@ import type {CollisionObject,JointStateMessage,MotionPlan,RobotModel} from "@/li
 type RobotObject=THREE.Object3D&{
   setJointValues:(values:Record<string,number>)=>void;
   links:Record<string,THREE.Object3D>;
+  joints:Record<string,THREE.Object3D>;
+  visual:Record<string,THREE.Object3D>;
+};
+
+type StickSegment={
+  rod:THREE.Mesh;
+  marker:THREE.Mesh;
+  parent:THREE.Object3D;
+  child:THREE.Object3D;
 };
 
 function RobotModelNode({
-  model,jointState,onLoaded
+  model,jointState,onLoaded,showRods,showMeshes
 }:{
   model:RobotModel;
   jointState:JointStateMessage|null;
   onLoaded:(robot:RobotObject|null,error?:string)=>void;
+  showRods:boolean;
+  showMeshes:boolean;
 }) {
   const [robot,setRobot]=useState<RobotObject|null>(null);
+  const segments=useRef<StickSegment[]>([]);
+  const stickGroup=useRef<THREE.Group|null>(null);
+
   useEffect(()=>{
     let active=true;
-    const loader=new URDFLoader();
-    const meshBase=new URL(model.mesh_base_url,window.location.origin).toString();
-    const urdf=model.urdf.split(model.mesh_prefix).join(meshBase);
-    const blob=new Blob([urdf],{type:"application/xml"});
-    const objectUrl=URL.createObjectURL(blob);
-    loader.load(objectUrl,(loaded)=>{
-      URL.revokeObjectURL(objectUrl);
-      if(!active)return;
-      const modelObject=loaded as RobotObject;
-      modelObject.traverse((item)=>{
-        const mesh=item as THREE.Mesh;
-        if(mesh.isMesh){
-          mesh.castShadow=true;mesh.receiveShadow=true;
-          mesh.material=new THREE.MeshStandardMaterial({color:0xb7bbc2,metalness:0.16,roughness:0.58});
-        }
+    setRobot(null);
+    onLoaded(null);
+    try{
+      const loader=new URDFLoader() as URDFLoader&{
+        parseVisual:boolean;
+        parseCollision:boolean;
+        parse:(content:string)=>RobotObject;
+        packages:Record<string,string>;
+      };
+      loader.parseVisual=true;
+      loader.parseCollision=false;
+      loader.packages={
+        dobot_rviz:new URL("/assets/dobot_rviz",window.location.origin).toString()
+      };
+      const modelObject=loader.parse(model.urdf);
+      const group=new THREE.Group();
+      group.name="CR5 rod skeleton";
+      const rodMaterial=new THREE.MeshStandardMaterial({color:0x9299a3,metalness:0.12,roughness:0.62});
+      const jointMaterial=new THREE.MeshStandardMaterial({color:0x2563eb,metalness:0.08,roughness:0.48});
+      const rods:StickSegment[]=[];
+      Object.values(modelObject.joints).forEach((joint)=>{
+        const parent=joint.parent;
+        const child=joint.children.find((item)=>(item as THREE.Object3D&{isURDFLink?:boolean}).isURDFLink);
+        if(!parent||!child)return;
+        const rod=new THREE.Mesh(new THREE.CylinderGeometry(0.014,0.014,1,12),rodMaterial);
+        const marker=new THREE.Mesh(new THREE.SphereGeometry(0.024,16,12),jointMaterial);
+        rod.castShadow=true;
+        marker.castShadow=true;
+        group.add(rod,marker);
+        rods.push({rod,marker,parent,child});
       });
-      setRobot(modelObject);onLoaded(modelObject);
-    },undefined,(error)=>{
-      URL.revokeObjectURL(objectUrl);
+      const baseMarker=new THREE.Mesh(new THREE.SphereGeometry(0.032,16,12),jointMaterial);
+      baseMarker.position.set(0,0,0);
+      group.add(baseMarker);
+      modelObject.add(group);
+      segments.current=rods;
+      stickGroup.current=group;
+      if(!active)return;
+      setRobot(modelObject);
+      onLoaded(modelObject);
+    }catch(error){
       if(active)onLoaded(null,error instanceof Error?error.message:String(error));
-    });
-    return ()=>{active=false;URL.revokeObjectURL(objectUrl);};
-  },[model.urdf,model.mesh_base_url,model.mesh_prefix,onLoaded]);
+    }
+    return ()=>{
+      active=false;
+      segments.current.forEach(({rod,marker})=>{
+        rod.geometry.dispose();
+        marker.geometry.dispose();
+      });
+      segments.current=[];
+      stickGroup.current=null;
+    };
+  },[model.urdf,onLoaded]);
 
   useFrame(()=>{
     if(!robot)return;
@@ -53,6 +97,23 @@ function RobotModelNode({
     });
     if(Object.keys(values).length)robot.setJointValues(values);
     robot.updateMatrixWorld(true);
+    Object.values(robot.visual).forEach((visual)=>{visual.visible=showMeshes;});
+    const group=stickGroup.current;
+    if(!group)return;
+    group.visible=showRods;
+    const up=new THREE.Vector3(0,1,0);
+    segments.current.forEach(({rod,marker,parent,child})=>{
+      const start=robot.worldToLocal(parent.getWorldPosition(new THREE.Vector3()));
+      const end=robot.worldToLocal(child.getWorldPosition(new THREE.Vector3()));
+      const delta=end.clone().sub(start);
+      const length=delta.length();
+      marker.position.copy(end);
+      rod.visible=length>0.004;
+      if(length<=0.004)return;
+      rod.position.copy(start).add(end).multiplyScalar(0.5);
+      rod.quaternion.setFromUnitVectors(up,delta.normalize());
+      rod.scale.set(1,length,1);
+    });
   });
   return robot?<primitive object={robot}/>:null;
 }
@@ -142,6 +203,11 @@ export function RobotViewport({
   const rootRef=useRef<THREE.Group|null>(null);
   const [robot,setRobot]=useState<RobotObject|null>(null);
   const [modelError,setModelError]=useState<string|null>(null);
+  const [showRods,setShowRods]=useState(true);
+  const [showMeshes,setShowMeshes]=useState(false);
+  const [showAxes,setShowAxes]=useState(false);
+  const [showGrid,setShowGrid]=useState(true);
+  const [showSceneObjects,setShowSceneObjects]=useState(true);
   const allObjects:CollisionObject[]=scene?.world?.collision_objects??[];
   const worldObjects=allObjects.filter((item)=>!item.header?.frame_id||item.header.frame_id===model?.base_frame);
   const attachedCount=scene?.robot_state?.attached_collision_objects?.length??0;
@@ -152,8 +218,20 @@ export function RobotViewport({
   return <div className="robot-viewport relative">
     <div className="absolute left-4 top-4 z-10 flex flex-wrap gap-2">
       <span className="viewport-chip">MODEL / {model?.group_name??"CR5 GROUP"}</span>
-      <span className="viewport-chip">WORLD OBJECTS / {allObjects.length}</span>
+      <span className="viewport-chip">WORLD / {allObjects.length}</span>
       {attachedCount>0&&<span className="viewport-chip">ATTACHED / {attachedCount}</span>}
+    </div>
+    <div className="absolute right-3 top-3 z-10 flex flex-wrap justify-end gap-1.5">
+      {([
+        ["Rods",showRods,()=>setShowRods((value)=>!value)],
+        ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value)],
+        ["Axes",showAxes,()=>setShowAxes((value)=>!value)],
+        ["Grid",showGrid,()=>setShowGrid((value)=>!value)],
+        ["Objects",showSceneObjects,()=>setShowSceneObjects((value)=>!value)],
+      ] as const).map(([label,active,onClick])=><button key={label} type="button" aria-pressed={active} onClick={onClick}
+        className={active?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
+        {label}
+      </button>)}
     </div>
     <div className="absolute bottom-4 left-4 z-10 text-[10px] text-zinc-400">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
     {loading&&<div className="absolute inset-0 z-20 flex items-center justify-center bg-white/85 text-sm text-zinc-500">Loading robot description…</div>}
@@ -161,9 +239,9 @@ export function RobotViewport({
       <div className="text-sm font-medium text-zinc-800">Robot model unavailable</div>
       <div className="max-w-sm text-xs text-zinc-500">{error??"Start robot_state_publisher and confirm robot_description is available."}</div>
     </div>}
-    {modelError&&<div className="absolute bottom-10 right-4 z-20 max-w-xs rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">Mesh load failed: {modelError}</div>}
+    {modelError&&<div className="absolute bottom-10 right-4 z-20 max-w-xs rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">Robot model parse failed: {modelError}</div>}
     {allObjects.some((item)=>item.header?.frame_id&&item.header.frame_id!==model?.base_frame)&&
-      <div className="absolute right-4 top-4 z-10 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
+      <div className="absolute bottom-10 right-4 z-10 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
         Objects outside {model?.base_frame??"base frame"} are listed but not drawn without TF transforms.
       </div>}
     <Canvas shadows camera={{position:[1.25,1.05,1.35],fov:42,near:0.01,far:100}} dpr={[1,1.75]} gl={{antialias:true,alpha:false}}>
@@ -173,13 +251,13 @@ export function RobotViewport({
       <directionalLight position={[-2,2,-3]} intensity={0.65}/>
       <Suspense fallback={null}>
         <group ref={rootRef} rotation={[-Math.PI/2,0,0]}>
-          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded}/>}
-          {worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
+          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes}/>}
+          {showSceneObjects&&worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
           {robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} jointState={jointState} rootRef={rootRef}/>}
-          <axesHelper args={[0.18]}/>
+          {showAxes&&<axesHelper args={[0.18]}/>}
         </group>
       </Suspense>
-      <Grid position={[0,-0.002,0]} args={[3,3]} cellSize={0.1} cellThickness={0.5} sectionSize={0.5} sectionThickness={0.9} fadeDistance={4} fadeStrength={1.3} infiniteGrid/>
+      {showGrid&&<Grid position={[0,-0.002,0]} args={[3,3]} cellSize={0.1} cellThickness={0.5} sectionSize={0.5} sectionThickness={0.9} fadeDistance={4} fadeStrength={1.3} infiniteGrid/>}
       <OrbitControls makeDefault target={[0,0.25,0]} minDistance={0.45} maxDistance={4}/>
     </Canvas>
     <div className="absolute bottom-4 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500">{model?.base_frame??"dummy_link"} · metres</div>

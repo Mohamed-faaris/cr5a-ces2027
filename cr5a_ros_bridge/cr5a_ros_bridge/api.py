@@ -49,8 +49,8 @@ class SafeJSONResponse(JSONResponse):
         return super().render(safe_content)
 
 
-class PackageMeshStaticFiles(StaticFiles):
-    """Serve package meshes installed with colcon's symlink-install option."""
+class PackageStaticFiles(StaticFiles):
+    """Serve package assets installed with colcon --symlink-install."""
 
     def lookup_path(self, path):
         for directory in self.all_directories:
@@ -201,18 +201,6 @@ def create_app(backend, config):
     )
     app.router.route_class = StrictJSONRoute
 
-    # Static meshes only; robot state and commands are carried over the application WebSocket.
-    try:
-        from ament_index_python.packages import get_package_share_directory
-        mesh_root = Path(get_package_share_directory("dobot_rviz")) / "meshes"
-        app.mount(
-            "/assets/dobot_rviz/meshes",
-            PackageMeshStaticFiles(directory=str(mesh_root), check_dir=False),
-            name="dobot-rviz-meshes",
-        )
-    except Exception:
-        pass
-
     auth = config.get("auth", {})
     auth_enabled = bool(auth.get("enabled", False))
     token_name = auth.get("token_env", "CR5A_BRIDGE_TOKEN")
@@ -225,13 +213,24 @@ def create_app(backend, config):
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        # CR5 visual meshes are read-only geometry assets; all robot data and commands stay authenticated.
-        if auth_enabled and request.url.path != "/health" and not request.url.path.startswith("/assets/dobot_rviz/meshes/"):
+        is_public_mesh = request.url.path.startswith("/assets/dobot_rviz/meshes/")
+        if auth_enabled and request.url.path != "/health" and not is_public_mesh:
             supplied = request.headers.get("Authorization", "")
             if supplied != "Bearer " + token:
                 return JSONResponse(status_code=401, content={"detail": "Bearer token required"})
 
         return await call_next(request)
+
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        package_share = Path(get_package_share_directory("dobot_rviz"))
+        app.mount(
+            "/assets/dobot_rviz",
+            PackageStaticFiles(directory=str(package_share), check_dir=False),
+            name="dobot-rviz-assets",
+        )
+    except Exception as exc:
+        _json_logger.warning("Dobot RViz package assets are unavailable: %s", exc)
 
     @app.get("/health")
     async def health():
@@ -965,6 +964,16 @@ def create_app(backend, config):
                 "tcp_topic", "/dobot_msgs_v4/msg/ToolVectorActual"
             ))
             mode = backend.event_snapshot("robot.mode")
+            try:
+                mode_response = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+                mode_data = {
+                    "value": str(mode_response.robot_return),
+                    "res": int(mode_response.res),
+                }
+                backend.emit("robot.mode", mode_data)
+                mode = {"data": mode_data}
+            except HTTPException:
+                pass
             errors = backend.event_snapshot("robot.errors")
             status_data = status.get("data", {}) if status else {}
             return {
@@ -1008,8 +1017,6 @@ def create_app(backend, config):
             return {
                 "urdf": urdf,
                 "srdf": descriptions.get("robot_description_semantic"),
-                "mesh_prefix": "package://dobot_rviz/meshes/",
-                "mesh_base_url": "/assets/dobot_rviz/meshes/",
                 "base_frame": config.get("moveit", {}).get("base_frame", "dummy_link"),
                 "end_effector_link": config.get("moveit", {}).get("end_effector_link", "Link6"),
                 "group_name": config.get("moveit", {}).get("group_name", "cr5_group"),

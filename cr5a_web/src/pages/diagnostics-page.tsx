@@ -31,21 +31,23 @@ export function DiagnosticsPage(){
   const [errorDetails,setErrorDetails]=useState<Record<string,unknown>|null>(null);
   const [errorDetailsError,setErrorDetailsError]=useState<string|null>(null);
 
+  const modeCode=extractRobotModeCode(robotMode?.value);
+  const modeEnabled=modeCode===5||modeCode===6||modeCode===7||modeCode===8||modeCode===11;
+  const modeDisabled=modeCode===2||modeCode===3||modeCode===4;
+  // RobotMode comes from a synchronous controller service query. RobotStatus
+  // is topic telemetry and can lag briefly after an enable/disable command.
+  const enabled=modeEnabled?true:modeDisabled?false:robotStatus?.is_enable;
   const status=deriveRobotStatus({
-    bridgeState,connected:robotStatus?.is_connected,enabled:robotStatus?.is_enable,
+    bridgeState,connected:robotStatus?.is_connected,enabled,
     mode:robotMode,errors,lastCommand,planningStatus:plan?.status,
     executionStatus,lastJointChangeAt
   });
   const activeError=hasActiveError(errors)||status.key==="error";
   const canCommand=bridgeState==="connected"&&robotStatus?.is_connected===true&&capabilities.robot_commands_enabled===true;
   const paused=status.key==="paused";
-  const enabled=robotStatus?.is_enable;
-  const modeCode=extractRobotModeCode(robotMode?.value);
   const dragActive=modeCode===6;
-  const enableModeAllowed=modeCode===3||modeCode===4;
   const canToggleEnable=canCommand&&enabled!==undefined&&busy===null&&enableTransition===null&&dragTransition===null&&
-    (enabled===true?modeCode===5:enableModeAllowed)&&
-    (enabled===true||!activeError);
+    !activeError&&(enabled===false||modeCode===5);
   const canToggleDrag=canCommand&&busy===null&&enableTransition===null&&
     (dragActive||(modeCode===5&&enabled===true&&!activeError));
 
@@ -54,7 +56,7 @@ export function DiagnosticsPage(){
     if(enabled===enableTransition){setEnableTransition(null);return;}
     const timeout=window.setTimeout(()=>{
       setEnableTransition(null);
-      setNotice({tone:"error",message:"RobotStatus did not confirm the enable-state change."});
+      setNotice({tone:"error",message:"RobotMode did not confirm the enable-state change."});
     },5000);
     return ()=>window.clearTimeout(timeout);
   },[enableTransition,enabled,setNotice]);
@@ -125,6 +127,11 @@ export function DiagnosticsPage(){
         return;
       }
       useRobotStore.getState().setCommand(command,response);
+      const refreshed=await request("robot.get_snapshot").catch(()=>null);
+      if(refreshed)useRobotStore.getState().mergeSnapshot(refreshed);
+      else if(typeof response?.robot_return==="string"){
+        useRobotStore.getState().setRobotMode({value:response.robot_return,res:response.res});
+      }
       setEnableTransition(target);
       setNotice({tone:"neutral",message:(target?"Enable":"Disable")+" request accepted; waiting for RobotStatus confirmation."});
     }catch(error){
@@ -210,7 +217,7 @@ export function DiagnosticsPage(){
       <div className="grid gap-5 px-5 py-5 sm:grid-cols-3">
         <Metric label="Robot mode" value={formatRobotMode(robotMode?.value)} hint={robotMode?.res===0?"RobotMode service · successful":"Raw controller response"}/>
         <Metric label="Connection" value={robotStatus?.is_connected===true?"Connected":robotStatus?.is_connected===false?"Disconnected":"Unknown"}/>
-        <Metric label="Motors" value={robotStatus?.is_enable===true?"Enabled":robotStatus?.is_enable===false?"Disabled":"Unknown"}/>
+        <Metric label="Motors" value={enabled===true?"Enabled":enabled===false?"Disabled":"Unknown"}/>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 bg-zinc-50/70 px-5 py-4">
         <Button variant="destructive" onClick={()=>runCommand("stop","Stop")} disabled={!canCommand||busy!==null}>

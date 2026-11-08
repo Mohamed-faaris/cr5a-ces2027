@@ -83,7 +83,7 @@ def client():
         yield test_client
 
 
-def test_robot_mesh_asset_is_served(client):
+def test_dobot_mesh_assets_are_served_from_package_share(client):
     response = client.get("/assets/dobot_rviz/meshes/cr5/J1.STL")
 
     assert response.status_code == 200
