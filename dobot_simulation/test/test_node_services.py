@@ -25,7 +25,7 @@ def test_pgea_simulation_publishes_both_finger_joint_states():
     try:
         message = node._joint_state_message()
         assert message.name == ["left_finger_joint", "right_finger_joint"]
-        assert message.position == [0.0, 0.0]
+        assert list(message.position) == [0.0, 0.0]
         assert message.header.stamp.sec > 0
     finally:
         node.destroy_node()
