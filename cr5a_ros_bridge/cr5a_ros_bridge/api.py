@@ -1155,8 +1155,19 @@ def create_app(backend, config):
                     status_code=503,
                     detail="robot_description is unavailable; start robot_state_publisher or MoveGroup",
                 )
+            pgea_urdf = None
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                pgea_path = Path(get_package_share_directory("dobot_rviz")) / "urdf" / "cr5_pgea.urdf"
+                if pgea_path.is_file():
+                    pgea_urdf = pgea_path.read_text(encoding="utf-8")
+            except Exception:
+                # PGEA geometry is an optional visual overlay; the active arm URDF
+                # remains authoritative when this package/variant is unavailable.
+                pass
             return {
                 "urdf": urdf,
+                "pgea_urdf": pgea_urdf,
                 "srdf": descriptions.get("robot_description_semantic"),
                 "base_frame": config.get("moveit", {}).get("base_frame", "dummy_link"),
                 "end_effector_link": config.get("moveit", {}).get("end_effector_link", "Link6"),

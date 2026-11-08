@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { Download, FileJson, Pencil, Plus, Trash2, Upload, X } from "lucide-react";
+import { Download, Eye, EyeOff, FileJson, Pencil, Plus, ShieldCheck, ShieldOff, Tag, Trash2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { CollisionObject, PlanningScene } from "@/lib/types";
 import { useRobotStore } from "@/store/robot-store";
@@ -38,9 +38,33 @@ function fromQuaternion(q: number[]): [number, number, number] {
   return [r, p, yv].map((v) => v * 180 / Math.PI) as [number, number, number];
 }
 
+function composeObjectPose(object: CollisionObject, localPose: NonNullable<CollisionObject["primitive_poses"]>[number]) {
+  const basePosition = object.pose?.position ?? { x: 0, y: 0, z: 0 };
+  const baseOrientation = object.pose?.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
+  const [qx, qy, qz, qw] = [baseOrientation.x, baseOrientation.y, baseOrientation.z, baseOrientation.w];
+  const p = [localPose.position.x, localPose.position.y, localPose.position.z];
+  const cross = [qy * p[2] - qz * p[1], qz * p[0] - qx * p[2], qx * p[1] - qy * p[0]];
+  const twiceCross = cross.map((value) => value * 2);
+  const rotated = [
+    p[0] + qw * twiceCross[0] + qy * twiceCross[2] - qz * twiceCross[1],
+    p[1] + qw * twiceCross[1] + qz * twiceCross[0] - qx * twiceCross[2],
+    p[2] + qw * twiceCross[2] + qx * twiceCross[1] - qy * twiceCross[0],
+  ];
+  const [x, y, z, w] = [localPose.orientation.x, localPose.orientation.y, localPose.orientation.z, localPose.orientation.w];
+  return {
+    position: { x: basePosition.x + rotated[0], y: basePosition.y + rotated[1], z: basePosition.z + rotated[2] },
+    orientation: {
+      x: qw * x + qx * w + qy * z - qz * y,
+      y: qw * y - qx * z + qy * w + qz * x,
+      z: qw * z + qx * y - qy * x + qz * w,
+      w: qw * w - qx * x - qy * y - qz * z,
+    },
+  };
+}
+
 function toDraft(object: CollisionObject): Draft | null {
   if (object.primitives?.length !== 1 || object.primitive_poses?.length !== 1) return null;
-  const primitive = object.primitives[0], pose = object.primitive_poses[0], d = primitive.dimensions ?? [];
+  const primitive = object.primitives[0], pose = composeObjectPose(object, object.primitive_poses[0]), d = primitive.dimensions ?? [];
   const shape: Shape | null = primitive.type === 1 ? "box" : primitive.type === 2 ? "sphere" : primitive.type === 3 ? "cylinder" : null;
   if (!shape || (shape === "box" && d.length < 3) || (shape === "sphere" && d.length < 1) || (shape === "cylinder" && d.length < 2)) return null;
   const xyz = [pose.position.x, pose.position.y, pose.position.z];
@@ -73,7 +97,7 @@ function toPayload(draft: Draft, frameId: string): Payload {
 
 function exportObject(object: CollisionObject, fallbackFrame: string): Record<string, unknown> | null {
   if (object.primitives?.length !== 1 || object.primitive_poses?.length !== 1) return null;
-  const primitive = object.primitives[0], pose = object.primitive_poses[0];
+  const primitive = object.primitives[0], pose = composeObjectPose(object, object.primitive_poses[0]);
   const shape: Shape | null = primitive.type === 1 ? "box" : primitive.type === 2 ? "sphere" : primitive.type === 3 ? "cylinder" : null;
   if (!shape) return null;
   const out: Record<string, unknown> = {
@@ -87,6 +111,10 @@ function exportObject(object: CollisionObject, fallbackFrame: string): Record<st
   else if (shape === "cylinder" && d.length >= 2) { out.height_m = d[0]; out.radius_m = d[1]; }
   else return null;
   return out;
+}
+
+export function collisionObjectToPayload(object: CollisionObject, fallbackFrame: string): Payload | null {
+  return exportObject(object, fallbackFrame) as Payload | null;
 }
 
 const DEFAULT_CONSTRAINTS_JSON = `{
@@ -245,11 +273,21 @@ function Field({ label, value, unit, onChange }: { label: string; value: number;
   </label>;
 }
 
-export function SceneManager({ scene, frameId, connected, modelReady, request, onNotice, onSceneChanged }: {
+export function SceneManager({ scene, frameId, connected, modelReady, request, onNotice, onSceneChanged,
+  objectLabels, onToggleObjectLabel, hiddenObjects, onToggleObjectVisibility,
+  disabledObjects, onToggleCollision, onRemoveDisabledObject, onClearDisabledObjects, collisionBusy
+}: {
   scene: PlanningScene | null; frameId: string; connected: boolean; modelReady: boolean; request: Request;
   onNotice: (notice: Notice | null) => void; onSceneChanged: () => void;
+  objectLabels: Record<string, boolean>; onToggleObjectLabel: (id: string) => void;
+  hiddenObjects: Record<string, boolean>; onToggleObjectVisibility: (id: string) => void;
+  disabledObjects: Record<string, CollisionObject>; onToggleCollision: (object: CollisionObject) => void;
+  onRemoveDisabledObject: (id: string) => void; onClearDisabledObjects: () => void;
+  collisionBusy: string | null;
 }) {
   const world = scene?.world?.collision_objects ?? [];
+  const inactiveObjects = Object.values(disabledObjects);
+  const objects = [...world, ...inactiveObjects.filter((object) => !world.some((active) => active.id === object.id))];
   const attached = scene?.robot_state?.attached_collision_objects ?? [];
   const sceneReady = scene !== null;
   const [open, setOpen] = useState(false);
@@ -260,7 +298,7 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
   const [constraintsText, setConstraintsText] = useState(DEFAULT_CONSTRAINTS_JSON);
   const [convertedObjects, setConvertedObjects] = useState<Payload[] | null>(null);
   const defaultLoadStarted = useRef(false);
-  const existingIds = new Set(world.map((object) => object.id));
+  const existingIds = new Set(objects.map((object) => object.id));
   const attachedIds = new Set(attached.map((item) => item.object?.id).filter((id): id is string => Boolean(id)));
 
   const refresh = async () => {
@@ -283,7 +321,8 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
           if (!object.id) throw new Error("Default scene object is missing its ID.");
           return { ...object, id: object.id };
         });
-        const missing = defaults.filter((object) => !currentIds.has(object.id));
+        const disabledIds = new Set(Object.keys(disabledObjects));
+        const missing = defaults.filter((object) => !currentIds.has(object.id) && !disabledIds.has(object.id));
         const collisions = missing.filter((object) => currentAttachedIds.has(object.id));
         if (collisions.length) {
           throw new Error(`Default scene IDs already attached to the robot: ${collisions.map((item) => item.id).join(", ")}`);
@@ -302,7 +341,7 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
       }
     };
     void seedDefaultScene();
-  }, [connected, modelReady, sceneReady, frameId, request, onNotice, onSceneChanged]);
+  }, [connected, modelReady, sceneReady, frameId, request, onNotice, onSceneChanged, disabledObjects]);
   const add = () => { setEditingId(null); setDraft(initialDraft()); setOpen(true); };
   const edit = (object: CollisionObject) => {
     if ((object.header?.frame_id ?? frameId) !== frameId) {
@@ -339,6 +378,11 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
   };
 
   const remove = async (id: string) => {
+    if (disabledObjects[id] && !world.some((object) => object.id === id)) {
+      onRemoveDisabledObject(id);
+      onNotice({ tone: "success", message: `Removed inactive object "${id}" from the visualizer.` });
+      return;
+    }
     if (busy || !connected) return;
     setBusy(true); onNotice(null);
     try {
@@ -350,10 +394,11 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
   };
 
   const clear = async () => {
-    if (busy || !connected || world.length === 0 || !window.confirm(`Remove all ${world.length} world objects from MoveIt?`)) return;
+    if (busy || !connected || (world.length === 0 && !inactiveObjects.length) ||
+      !window.confirm(`Remove all ${world.length + inactiveObjects.length} scene objects, including collision-disabled objects?`)) return;
     setBusy(true); onNotice(null);
     try {
-      await request("scene.clear"); await refresh(); onSceneChanged(); setOpen(false); setEditingId(null);
+      await request("scene.clear"); await refresh(); onClearDisabledObjects(); onSceneChanged(); setOpen(false); setEditingId(null);
       onNotice({ tone: "success", message: "Cleared world collision objects. Attached objects were left unchanged." });
     } catch (error) { onNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(false); }
@@ -367,11 +412,15 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
     setBusy(true); onNotice(null); let imported = 0;
     try {
       const payloads = importObjects(JSON.parse(await file.text()), frameId);
+      const activeIds = new Set(world.map((object) => object.id));
       for (const payload of payloads) {
-        if (payload.id && attachedIds.has(payload.id) && !existingIds.has(payload.id)) {
+        if (payload.id && disabledObjects[payload.id]) {
+          throw new Error(`ID "${payload.id}" is currently collision-disabled. Enable or remove it before importing a replacement.`);
+        }
+        if (payload.id && attachedIds.has(payload.id) && !activeIds.has(payload.id)) {
           throw new Error(`ID "${payload.id}" belongs to an attached object. Detach or rename it before importing.`);
         }
-        await request(payload.id && existingIds.has(payload.id) ? "scene.update" : "scene.add", payload);
+        await request(payload.id && activeIds.has(payload.id) ? "scene.update" : "scene.add", payload);
         imported += 1;
       }
       await refresh(); if (imported) onSceneChanged();
@@ -483,7 +532,7 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
 
   return <section className="panel">
     <div className="panel-header flex-wrap">
-      <div><div className="text-sm font-semibold">Scene objects</div><div className="mt-0.5 text-[11px] text-zinc-400">{world.length} world · {attached.length} attached</div></div>
+      <div><div className="text-sm font-semibold">Scene objects</div><div className="mt-0.5 text-[11px] text-zinc-400">{objects.length} objects · {world.length} collision active · {attached.length} attached</div></div>
       <div className="flex flex-wrap items-center gap-1.5">
         <Button size="sm" onClick={add} disabled={!connected || busy}><Plus size={13}/> Add</Button>
         <Button size="sm" variant="outline" onClick={toggleConstraintConverter} disabled={!connected || busy}>Convert constraints</Button>
@@ -492,7 +541,7 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
           <input type="file" accept=".json,application/json" className="hidden" disabled={!connected || busy} onChange={importFile}/>
         </label>
         <Button size="sm" variant="outline" onClick={exportFile} disabled={!world.length || busy}><Download size={13}/> Export</Button>
-        <Button size="sm" variant="ghost" onClick={clear} disabled={!connected || !world.length || busy}><Trash2 size={13}/> Clear</Button>
+        <Button size="sm" variant="ghost" onClick={clear} disabled={!connected || !objects.length || busy}><Trash2 size={13}/> Clear</Button>
       </div>
     </div>
 
@@ -559,17 +608,43 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
       <div className="flex justify-end gap-2"><Button type="button" size="sm" variant="outline" onClick={() => { setOpen(false); setEditingId(null); }}>Cancel</Button><Button type="submit" size="sm" disabled={!connected || busy}>{busy ? "Saving…" : editingId ? "Save changes" : "Add to scene"}</Button></div>
     </form>}
 
-    <div className="max-h-60 divide-y divide-zinc-100 overflow-auto">
-      {world.map((object) => <div key={object.id} className="flex items-center justify-between gap-2 px-4 py-2.5">
+    <div className="max-h-80 divide-y divide-zinc-100 overflow-auto">
+      {objects.map((object) => {
+        const collisionEnabled = world.some((active) => active.id === object.id);
+        const hidden = hiddenObjects[object.id] === true;
+        const labelVisible = objectLabels[object.id] !== false;
+        return <div key={object.id} className="flex items-center justify-between gap-2 px-4 py-2.5">
         <div className="flex min-w-0 items-center gap-2"><FileJson size={13} className="shrink-0 text-zinc-400"/><div className="min-w-0"><div className="truncate text-xs font-medium text-zinc-700">{object.id}</div>
           <div className="text-[10px] text-zinc-400">{object.header?.frame_id && object.header.frame_id !== frameId ? "other frame" : toDraft(object)?.shape ?? "unsupported geometry"} · {object.header?.frame_id ?? frameId}</div></div></div>
         <div className="flex shrink-0 items-center gap-1">
-          <Button size="icon" variant="ghost" className="h-7 w-7" title="Edit object" aria-label={`Edit ${object.id}`} disabled={!connected || busy || !toDraft(object) || (!!object.header?.frame_id && object.header.frame_id !== frameId)} onClick={() => edit(object)}><Pencil size={13}/></Button>
+          <span title={collisionEnabled ? "Collision enabled in MoveIt" : "Collision disabled in MoveIt"}
+            className={collisionEnabled ? "mr-1 h-2 w-2 shrink-0 rounded-full bg-emerald-500" : "mr-1 h-2 w-2 shrink-0 rounded-full bg-amber-500"}/>
+          <Button size="icon" variant="ghost" className="h-7 w-7"
+            title={labelVisible ? "Hide object label" : "Show object label"}
+            aria-label={labelVisible ? `Hide label for ${object.id}` : `Show label for ${object.id}`}
+            onClick={() => onToggleObjectLabel(object.id)}>
+            <Tag size={13} className={labelVisible ? "text-zinc-600" : "text-zinc-300"}/>
+          </Button>
+          <Button size="icon" variant="ghost" className="h-7 w-7"
+            title={hidden ? "Show object in 3D viewer" : "Hide object in 3D viewer"}
+            aria-label={hidden ? `Show ${object.id} in 3D viewer` : `Hide ${object.id} in 3D viewer`}
+            onClick={() => onToggleObjectVisibility(object.id)}>
+            {hidden ? <EyeOff size={13}/> : <Eye size={13}/>}
+          </Button>
+          <Button size="icon" variant="ghost" className={collisionEnabled ? "h-7 w-7 text-emerald-700" : "h-7 w-7 text-amber-700"}
+            title={collisionEnabled ? "Disable collision checking for this object" : "Enable collision checking for this object"}
+            aria-label={collisionEnabled ? `Disable collision for ${object.id}` : `Enable collision for ${object.id}`}
+            disabled={!connected || busy || collisionBusy === object.id || !toDraft(object)}
+            onClick={() => onToggleCollision(object)}>
+            {collisionEnabled ? <ShieldCheck size={13}/> : <ShieldOff size={13}/>}
+          </Button>
+          <Button size="icon" variant="ghost" className="h-7 w-7" title="Edit object" aria-label={`Edit ${object.id}`} disabled={!connected || busy || !collisionEnabled || !toDraft(object) || (!!object.header?.frame_id && object.header.frame_id !== frameId)} onClick={() => edit(object)}><Pencil size={13}/></Button>
           <Button size="icon" variant="ghost" className="h-7 w-7 text-red-600 hover:bg-red-50 hover:text-red-700" title="Remove object" aria-label={`Remove ${object.id}`} disabled={!connected || busy} onClick={() => void remove(object.id)}><Trash2 size={13}/></Button>
         </div>
-      </div>)}
+        </div>;
+      })}
       {attached.map((item) => <div key={item.object?.id} className="flex items-center justify-between gap-3 px-4 py-2.5"><span className="truncate text-xs text-zinc-700">{item.object?.id ?? "Attached object"}</span><span className="text-[10px] text-zinc-400">{item.link_name ?? "link ?"}</span></div>)}
-      {!world.length && !attached.length && <div className="px-4 py-5 text-xs text-zinc-400">No collision objects in the current MoveIt planning scene.</div>}
+      {!objects.length && !attached.length && <div className="px-4 py-5 text-xs text-zinc-400">No collision objects in the current MoveIt planning scene.</div>}
     </div>
     <div className="border-t border-zinc-100 px-4 py-2.5 text-[10px] text-zinc-400">MoveIt only · editor uses mm · JSON uses metres · attached objects are not editable or exported here.</div>
   </section>;

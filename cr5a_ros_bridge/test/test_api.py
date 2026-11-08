@@ -90,6 +90,13 @@ def test_dobot_mesh_assets_are_served_from_package_share(client):
     assert len(response.content) > 1024
 
 
+def test_pgea_mesh_assets_are_served_from_package_share(client):
+    response = client.get("/assets/dobot_rviz/meshes/pgea/PGEA-100-40-W.STL")
+
+    assert response.status_code == 200
+    assert len(response.content) > 1024
+
+
 def test_health_returns_bridge_identity_and_timestamp(client):
     response = client.get("/health")
 

@@ -3,12 +3,15 @@ import {Box,CheckCircle2,CircleAlert,Crosshair,Gauge,Move3D,Play,RefreshCw,Route
 import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {RobotViewport} from "@/components/robot/robot-viewport";
-import {SceneManager} from "@/components/robot/scene-manager";
+import {SceneManager,collisionObjectToPayload} from "@/components/robot/scene-manager";
+import type {CollisionObject} from "@/lib/types";
 import {StatusBadge} from "@/components/status-badge";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
 import {operationStatus} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
+import {GripperPositionCard} from "@/components/gripper/gripper-panels";
+import {useGripperController} from "@/components/gripper/use-gripper-controller";
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
 
@@ -50,6 +53,7 @@ function NumericInput({label,value,suffix,onChange}:{label:string;value:number;s
 }
 
 export function VisualizerPage(){
+  const gripper=useGripperController();
   const {request}=useRobotSocket();
   const bridgeState=useRobotStore((s)=>s.bridgeState);
   const robotStatus=useRobotStore((s)=>s.robotStatus);
@@ -78,6 +82,63 @@ export function VisualizerPage(){
   const [jointDirty,setJointDirty]=useState(false);
   const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
+  const [showObjectLabels,setShowObjectLabels]=useState(true);
+  const [objectLabels,setObjectLabels]=useState<Record<string,boolean>>({});
+  const [hiddenObjects,setHiddenObjects]=useState<Record<string,boolean>>({});
+  const [disabledObjects,setDisabledObjects]=useState<Record<string,CollisionObject>>(()=>{
+    try {
+      const stored=localStorage.getItem("cr5a-visualizer-disabled-objects-v1");
+      const parsed=stored?JSON.parse(stored):{};
+      return parsed&&typeof parsed==="object"&&!Array.isArray(parsed)?parsed:{};
+    } catch { return {}; }
+  });
+  const [collisionBusy,setCollisionBusy]=useState<string|null>(null);
+  const toggleObjectLabel=(id:string)=>setObjectLabels((current)=>({...current,[id]:!(current[id]??true)}));
+  const toggleObjectVisibility=(id:string)=>setHiddenObjects((current)=>({...current,[id]:!(current[id]??false)}));
+  const removeDisabledObject=(id:string)=>setDisabledObjects((current)=>{
+    const next={...current};delete next[id];return next;
+  });
+  const clearDisabledObjects=()=>setDisabledObjects({});
+  useEffect(()=>{
+    localStorage.setItem("cr5a-visualizer-disabled-objects-v1",JSON.stringify(disabledObjects));
+  },[disabledObjects]);
+
+  const toggleObjectCollision=async(object:CollisionObject)=>{
+    if(!model||collisionBusy)return;
+    const activeInMoveIt=worldObjects.some((item)=>item.id===object.id);
+    setCollisionBusy(object.id);
+    setNotice(null);
+    try {
+      if(activeInMoveIt){
+        await request("scene.remove",{id:object.id});
+        setDisabledObjects((current)=>({...current,[object.id]:object}));
+      } else {
+        const payload=collisionObjectToPayload(object,model.base_frame);
+        if(!payload)throw new Error("Only single box, sphere, and cylinder objects can be toggled here.");
+        await request("scene.add",payload as unknown as Record<string,unknown>);
+        setDisabledObjects((current)=>{
+          const next={...current};
+          delete next[object.id];
+          return next;
+        });
+      }
+      const latest=await request("moveit.get_scene");
+      useRobotStore.getState().setScene(latest);
+      setPlan(null);
+      setExecutionStatus(null);
+      setPlannedJointSnapshot(null);
+      setNotice({
+        tone:"success",
+        message:activeInMoveIt
+          ? `Collision checking disabled for "${object.id}". The object remains visible in the viewer.`
+          : `Collision checking enabled for "${object.id}" in MoveIt.`
+      });
+    } catch(error) {
+      setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
+    } finally {
+      setCollisionBusy(null);
+    }
+  };
 
   const bounds=useMemo(
     ()=>parseJointBounds(model?.urdf,jointLimits?.joint_limits),
@@ -263,9 +324,16 @@ export function VisualizerPage(){
           <span className="text-[11px] text-zinc-400">{model?.base_frame??"dummy_link"}</span>
         </div>
         <RobotViewport model={model} jointState={joints} scene={scene} plan={plan}
-          loading={modelLoading} error={modelError??sceneError}/>
+          gripperPositionMm={gripper.positionMm}
+          loading={modelLoading} error={modelError??sceneError}
+          showLabels={showObjectLabels} onToggleLabels={()=>setShowObjectLabels((value)=>!value)}
+          objectLabels={objectLabels} disabledObjects={disabledObjects} hiddenObjects={hiddenObjects}/>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-4 py-3 text-[11px] text-zinc-500">
           <span>Blue line: planned end-effector path</span>
+          <span className="flex flex-wrap items-center gap-3">
+            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-slate-500"/> Collision enabled</span>
+            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-amber-500"/> Collision disabled</span>
+          </span>
           <span>{plan?.status?"Plan: "+plan.status:"No planned trajectory"}</span>
         </div>
       </section>
@@ -355,6 +423,8 @@ export function VisualizerPage(){
           </div>
         </section>
 
+        <GripperPositionCard controller={gripper}/>
+
         <section className="panel">
           <div className="panel-header">
             <div className="text-sm font-semibold">Motion plan</div>
@@ -397,6 +467,15 @@ export function VisualizerPage(){
           connected={bridgeState==="connected"}
           request={request}
           onNotice={setNotice}
+          objectLabels={objectLabels}
+          onToggleObjectLabel={toggleObjectLabel}
+          hiddenObjects={hiddenObjects}
+          onToggleObjectVisibility={toggleObjectVisibility}
+          disabledObjects={disabledObjects}
+          onToggleCollision={toggleObjectCollision}
+          onRemoveDisabledObject={(id)=>setDisabledObjects((current)=>{const next={...current};delete next[id];return next;})}
+          onClearDisabledObjects={()=>setDisabledObjects({})}
+          collisionBusy={collisionBusy}
           onSceneChanged={()=>{
             setPlan(null);
             setExecutionStatus(null);

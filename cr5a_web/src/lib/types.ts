@@ -19,11 +19,15 @@ export interface RobotCapabilities {
   gripper_commands_enabled?: boolean;
 }
 export interface RobotModel {
-  urdf: string; srdf?: string;
+  urdf: string; pgea_urdf?: string|null; srdf?: string;
   base_frame: string; end_effector_link: string; group_name: string;
 }
 export interface CollisionObject {
   id: string; header?: { frame_id?: string };
+  pose?: {
+    position: { x: number; y: number; z: number };
+    orientation: { x: number; y: number; z: number; w: number };
+  };
   primitives?: Array<{ type: number; dimensions: number[] }>;
   primitive_poses?: Array<{
     position: { x: number; y: number; z: number };
