@@ -18,6 +18,17 @@ import {useGripperController} from "@/components/gripper/use-gripper-controller"
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
 type DirectMotionStatus={phase:string;detail?:string|null;last_command?:string|null};
+
+const DIRECT_JOINT_NAMES=["joint1","joint2","joint3","joint4","joint5","joint6"] as const;
+
+function readNumberTuple(params:URLSearchParams,key:string,length:number):number[]|null{
+  const raw=params.get(key);
+  if(!raw)return null;
+  const parts=raw.split(",").map((value)=>value.trim());
+  if(parts.length!==length||parts.some((value)=>value===""))return null;
+  const values=parts.map(Number);
+  return values.every(Number.isFinite)?values:null;
+}
 const plannerProfileLabel=(profile:PlannerProfile)=>profile.planner_id|| (profile.pipeline_id==="pilz_industrial_motion_planner"?"Pilz":profile.pipeline_id.toUpperCase());
 
 function planErrorDetail(code?:number|null):string|null{
@@ -91,12 +102,20 @@ export function VisualizerPage(){
   const setNotice=useRobotStore((s)=>s.setNotice);
   const notice=useRobotStore((s)=>s.notice);
 
-  const [tab,setTab]=useState("tcp");
+  const initialParams=new URLSearchParams(window.location.search);
+  const initialTcp=readNumberTuple(initialParams,"tcp",6);
+  const initialJointDegrees=readNumberTuple(initialParams,"joints",6);
+  const initialMovJ=readNumberTuple(initialParams,"movj",6);
+  const initialMovL=readNumberTuple(initialParams,"movl",6);
+  const [tab,setTab]=useState(()=>initialParams.get("tab")==="joints"?"joints":"tcp");
   const [workspaceTab,setWorkspaceTab]=useState("robot");
-  const [tcpTarget,setTcpTarget]=useState<TcpTarget|null>(null);
-  const [tcpDirty,setTcpDirty]=useState(false);
-  const [jointTargets,setJointTargets]=useState<Record<string,number>>({});
-  const [jointDirty,setJointDirty]=useState(false);
+  const [tcpTarget,setTcpTarget]=useState<TcpTarget|null>(()=>initialTcp?{
+    x:initialTcp[0],y:initialTcp[1],z:initialTcp[2],rx:initialTcp[3],ry:initialTcp[4],rz:initialTcp[5]
+  }:null);
+  const [tcpDirty,setTcpDirty]=useState(()=>initialTcp!==null);
+  const [jointTargets,setJointTargets]=useState<Record<string,number>>(()=>initialJointDegrees
+    ?Object.fromEntries(DIRECT_JOINT_NAMES.map((name,index)=>[name,initialJointDegrees[index]*Math.PI/180])):{});
+  const [jointDirty,setJointDirty]=useState(()=>initialJointDegrees!==null);
   const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
   const [showObjectLabels,setShowObjectLabels]=useState(false);
@@ -162,11 +181,14 @@ export function VisualizerPage(){
   const [comparisonPaths,setComparisonPaths]=useState<Array<{key:string;label:string;color:string;plan:MotionPlan}>>([]);
   const [benchmarkStartSnapshot,setBenchmarkStartSnapshot]=useState<Record<string,number>|null>(null);
   const [benchmarkSceneSnapshot,setBenchmarkSceneSnapshot]=useState<string|null>(null);
-  const directJointNames=["joint1","joint2","joint3","joint4","joint5","joint6"];
-  const [directType,setDirectType]=useState<"movj"|"movl">("movj");
-  const [directJointTarget,setDirectJointTarget]=useState<number[]>([0,0,0,0,0,0]);
-  const [directJointDirty,setDirectJointDirty]=useState(false);
-  const [directPoseTarget,setDirectPoseTarget]=useState<TcpTarget>({x:0,y:0,z:0,rx:0,ry:0,rz:0});
+  const directJointNames=[...DIRECT_JOINT_NAMES];
+  const [directType,setDirectType]=useState<"movj"|"movl">(()=>initialParams.get("direct")==="movl"?"movl":"movj");
+  const [directJointTarget,setDirectJointTarget]=useState<number[]>(()=>initialMovJ??[0,0,0,0,0,0]);
+  const [directJointDirty,setDirectJointDirty]=useState(()=>initialMovJ!==null);
+  const [directPoseTarget,setDirectPoseTarget]=useState<TcpTarget>(()=>initialMovL?{
+    x:initialMovL[0],y:initialMovL[1],z:initialMovL[2],rx:initialMovL[3],ry:initialMovL[4],rz:initialMovL[5]
+  }:{x:0,y:0,z:0,rx:0,ry:0,rz:0});
+  const [directPoseDirty,setDirectPoseDirty]=useState(()=>initialMovL!==null);
   const [directCheck,setDirectCheck]=useState<any>(null);
   const [directMotionStatus,setDirectMotionStatus]=useState<DirectMotionStatus|null>(null);
 
@@ -181,6 +203,23 @@ export function VisualizerPage(){
   );
   const worldObjects=scene?.world?.collision_objects??[];
   const attachedObjects=scene?.robot_state?.attached_collision_objects??[];
+
+  useEffect(()=>{
+    const params=new URLSearchParams(window.location.search);
+    params.set("tab",tab);
+    params.set("direct",directType);
+    if(tcpDirty&&tcpTarget)params.set("tcp",[tcpTarget.x,tcpTarget.y,tcpTarget.z,tcpTarget.rx,tcpTarget.ry,tcpTarget.rz].join(","));
+    else params.delete("tcp");
+    if(jointDirty&&DIRECT_JOINT_NAMES.every((name)=>Number.isFinite(jointTargets[name])))params.set("joints",DIRECT_JOINT_NAMES.map((name)=>String(jointTargets[name]*180/Math.PI)).join(","));
+    else params.delete("joints");
+    if(directJointDirty)params.set("movj",directJointTarget.join(","));
+    else params.delete("movj");
+    if(directPoseDirty)params.set("movl",[directPoseTarget.x,directPoseTarget.y,directPoseTarget.z,directPoseTarget.rx,directPoseTarget.ry,directPoseTarget.rz].join(","));
+    else params.delete("movl");
+    const query=params.toString();
+    const nextUrl=window.location.pathname+(query?"?"+query:"")+window.location.hash;
+    window.history.replaceState(null,"",nextUrl);
+  },[tab,directType,tcpTarget,tcpDirty,jointTargets,jointDirty,directJointTarget,directJointDirty,directPoseTarget,directPoseDirty]);
 
   useEffect(()=>{
     if(bridgeState!=="connected")return;
@@ -289,7 +328,7 @@ export function VisualizerPage(){
 
   const resetTargets=()=>{
     setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);
-    setTcpDirty(false);setJointDirty(false);setDirectJointDirty(false);setDirectCheck(null);
+    setTcpDirty(false);setJointDirty(false);setDirectJointDirty(false);setDirectPoseDirty(false);setDirectCheck(null);
     if(tcp&&[tcp.x,tcp.y,tcp.z,tcp.rx,tcp.ry,tcp.rz].every((value)=>typeof value==="number"&&Number.isFinite(value))){
       setTcpTarget({
         x:tcp.x as number,y:tcp.y as number,z:tcp.z as number,
@@ -621,7 +660,14 @@ export function VisualizerPage(){
         <h1 className="page-title">Scene visualizer</h1>
         <p className="mt-1 text-sm text-zinc-500">Robot state, collision scene and motion planning workspace.</p>
       </div>
-      <Button variant="outline" size="sm" onClick={resetTargets} title="Discard target edits and restore the latest controller readings"><RefreshCw size={13}/> Use actual state</Button>
+      <div className="flex gap-2">
+        <Button variant="outline" size="sm" onClick={()=>{
+          void navigator.clipboard.writeText(window.location.href).then(()=>{
+            setNotice({tone:"success",message:"Shareable visualizer URL copied."});
+          }).catch(()=>setNotice({tone:"error",message:"Clipboard access was blocked by the browser."}));
+        }}>Copy URL</Button>
+        <Button variant="outline" size="sm" onClick={resetTargets} title="Discard target edits and restore the latest controller readings"><RefreshCw size={13}/> Use actual state</Button>
+      </div>
     </div>
     {notice&&<div className={notice.tone==="error"?"notice notice-error":notice.tone==="success"?"notice notice-success":"notice"}>{notice.message}</div>}
     <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
@@ -740,7 +786,7 @@ export function VisualizerPage(){
                 <div className="grid grid-cols-3 gap-3">
                   {(["x","y","z"] as const).map((key)=><NumericInput key={key}
                     label={key.toUpperCase()} value={directPoseTarget[key]} suffix="mm"
-                    onChange={(value)=>{setDirectCheck(null);setDirectPoseTarget((current)=>({...current,[key]:value}));}}/>)}
+                    onChange={(value)=>{setDirectPoseDirty(true);setDirectCheck(null);setDirectPoseTarget((current)=>({...current,[key]:value}));}}/>)}
                   {(["rx","ry","rz"] as const).map((key)=><NumericInput key={key}
                     label={key.toUpperCase()} value={directPoseTarget[key]} suffix="deg"
                     onChange={(value)=>{setDirectCheck(null);setDirectPoseTarget((current)=>({...current,[key]:value}));}}/>)}
