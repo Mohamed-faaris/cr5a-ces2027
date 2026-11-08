@@ -46,7 +46,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 ## 3D viewer assumptions
 
 - Reuse `src/components/robot/robot-viewport.tsx`; it is the existing URDF, MoveIt scene, and trajectory renderer.
-- The bridge supplies `urdf`, `mesh_prefix`, and `mesh_base_url`. The viewer replaces the URDF mesh prefix with the supplied mesh base URL before loading. Do not substitute workstation-specific mesh paths.
+- The bridge supplies `urdf`, optional `pgea_urdf`, `mesh_prefix`, and `mesh_base_url`. `pgea_urdf` is the clean PGEA visual model also used by MoveIt; it must not contain simulator plugins or ros2_control. The viewport may parse it as the rendered model while continuing to use `urdf`/MoveIt metadata for planning frames. The viewer replaces the URDF mesh prefix with the supplied mesh base URL before loading. Do not substitute workstation-specific mesh paths.
 - The viewer displays geometry in metres and rotates its scene root by -90° around X. Preserve this coordinate conversion when changing model or scene transforms.
 - Collision objects are drawn only when `header.frame_id` is empty or equals `model.base_frame`. The viewer does not perform TF transforms; objects in other frames remain in the scene response but are not rendered.
 - The current scene renderer handles BOX, SPHERE, and CYLINDER primitives only. Other primitive types are not visualized.
