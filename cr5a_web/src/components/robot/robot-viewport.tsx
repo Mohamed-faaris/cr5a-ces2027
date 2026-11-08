@@ -152,6 +152,39 @@ function BaseAxes() {
   return <axesHelper ref={axesRef} args={[0.4]} position={[0,0,0.04]}/>;
 }
 
+function TcpFrame({
+  robot,linkName,visible
+}:{robot:RobotObject|null;linkName:string;visible:boolean}) {
+  useEffect(()=>{
+    if(!robot||!linkName||!visible)return;
+    const link=robot.links[linkName];
+    if(!link)return;
+    const axes=new THREE.AxesHelper(0.16);
+    const axisMaterials=Array.isArray(axes.material)?axes.material:[axes.material];
+    axisMaterials.forEach((material)=>{
+      material.depthTest=false;
+      material.depthWrite=false;
+      material.needsUpdate=true;
+    });
+    axes.renderOrder=30;
+    const markerGeometry=new THREE.SphereGeometry(0.009,16,12);
+    const markerMaterial=new THREE.MeshBasicMaterial({
+      color:0x111827,depthTest:false,depthWrite:false
+    });
+    const marker=new THREE.Mesh(markerGeometry,markerMaterial);
+    marker.renderOrder=31;
+    link.add(axes,marker);
+    return ()=>{
+      link.remove(axes,marker);
+      axes.geometry.dispose();
+      axisMaterials.forEach((material)=>material.dispose());
+      markerGeometry.dispose();
+      markerMaterial.dispose();
+    };
+  },[robot,linkName,visible]);
+  return null;
+}
+
 function ScenePrimitive({object}:{object:CollisionObject}) {
   const primitive=object.primitives?.[0];
   const pose=object.primitive_poses?.[0];
@@ -236,6 +269,7 @@ export function RobotViewport({
   const [showMeshes,setShowMeshes]=useState(false);
   const [showPath,setShowPath]=useState(true);
   const [showAxes,setShowAxes]=useState(false);
+  const [showTcp,setShowTcp]=useState(false);
   const [showGrid,setShowGrid]=useState(true);
   const [showSceneObjects,setShowSceneObjects]=useState(true);
   const [trajectoryPosition,setTrajectoryPosition]=useState<number|null>(null);
@@ -286,6 +320,7 @@ export function RobotViewport({
         ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value),false],
         ["Path",showPath,()=>setShowPath((value)=>!value),!hasTrajectory],
         ["Axes",showAxes,()=>setShowAxes((value)=>!value),false],
+        ["TCP",showTcp,()=>setShowTcp((value)=>!value),!robot||!model?.end_effector_link],
         ["Grid",showGrid,()=>setShowGrid((value)=>!value),false],
         ["Objects",showSceneObjects,()=>setShowSceneObjects((value)=>!value),false],
       ] as const).map(([label,active,onClick,disabled])=><button key={label} type="button" aria-pressed={active} onClick={onClick} disabled={disabled}
@@ -338,6 +373,7 @@ export function RobotViewport({
       <Suspense fallback={null}>
         <group ref={rootRef} rotation={[-Math.PI/2,0,0]}>
           {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes} previewPositions={previewPositions}/>}
+          <TcpFrame robot={robot} linkName={model?.end_effector_link??""} visible={showTcp}/>
           {showSceneObjects&&worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
           {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef}/>}
           {showAxes&&<BaseAxes/>}
