@@ -3,6 +3,7 @@ import {Box,CheckCircle2,CircleAlert,Crosshair,Gauge,Move3D,Play,RefreshCw,Route
 import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {RobotViewport} from "@/components/robot/robot-viewport";
+import {SceneManager} from "@/components/robot/scene-manager";
 import {StatusBadge} from "@/components/status-badge";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
 import {operationStatus} from "@/lib/status";
@@ -389,23 +390,18 @@ export function VisualizerPage(){
           </div>
         </section>
 
-        <section className="panel">
-          <div className="panel-header">
-            <div className="text-sm font-semibold">Scene objects</div>
-            <span className="text-[11px] text-zinc-400">{worldObjects.length+attachedObjects.length} total</span>
-          </div>
-          <div className="max-h-44 divide-y divide-zinc-100 overflow-auto">
-            {worldObjects.map((object)=><div key={object.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-              <div className="flex min-w-0 items-center gap-2"><Box size={13} className="shrink-0 text-zinc-400"/><span className="truncate text-xs text-zinc-700">{object.id}</span></div>
-              <span className="text-[10px] text-zinc-400">{object.header?.frame_id??"frame ?"}</span>
-            </div>)}
-            {attachedObjects.map((item)=><div key={item.object?.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-              <div className="flex min-w-0 items-center gap-2"><Box size={13} className="shrink-0 text-zinc-400"/><span className="truncate text-xs text-zinc-700">{item.object?.id??"Attached object"}</span></div>
-              <span className="text-[10px] text-zinc-400">{item.link_name??"link ?"}</span>
-            </div>)}
-            {worldObjects.length===0&&attachedObjects.length===0&&<div className="px-4 py-5 text-xs text-zinc-400">No collision objects in the current planning scene.</div>}
-          </div>
-        </section>
+        <SceneManager
+          scene={scene}
+          frameId={model?.base_frame??"dummy_link"}
+          connected={bridgeState==="connected"}
+          request={request}
+          onNotice={setNotice}
+          onSceneChanged={()=>{
+            setPlan(null);
+            setExecutionStatus(null);
+            setPlannedJointSnapshot(null);
+          }}
+        />
       </aside>
     </div>
   </div>;
