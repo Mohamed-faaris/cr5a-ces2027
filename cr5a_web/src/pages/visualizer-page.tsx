@@ -4,10 +4,11 @@ import {Button} from "@/components/ui/button";
 import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {RobotViewport} from "@/components/robot/robot-viewport";
 import {SceneManager,collisionObjectToPayload} from "@/components/robot/scene-manager";
-import type {CollisionObject} from "@/lib/types";
+import type {CollisionObject,MotionPlan} from "@/lib/types";
 import {StatusBadge} from "@/components/status-badge";
-import {PlannerSettings} from "@/components/planner-settings";
-import {DEFAULT_PLANNER_PROFILE,plannerRequestOptions,type PlannerProfile} from "@/lib/planner-profiles";
+import {PlannerSettings,type PlannerBenchmarkResult} from "@/components/planner-settings";
+import {DEFAULT_PLANNER_PROFILE,PLANNER_PATH_COLORS,plannerRequestOptions,type PlannerProfile} from "@/lib/planner-profiles";
+import {describeMoveItError} from "@/lib/moveit-errors";
 import {formatNumber,parseJointBounds,rpyDegreesToQuaternion} from "@/lib/utils";
 import {extractRobotModeCode,hasActiveError,operationStatus} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
@@ -17,42 +18,54 @@ import {useGripperController} from "@/components/gripper/use-gripper-controller"
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
 type DirectMotionStatus={phase:string;detail?:string|null;last_command?:string|null};
+const plannerProfileLabel=(profile:PlannerProfile)=>profile.planner_id|| (profile.pipeline_id==="pilz_industrial_motion_planner"?"Pilz":profile.pipeline_id.toUpperCase());
 
 function planErrorDetail(code?:number|null):string|null{
   if(code===undefined||code===null)return null;
-  const reasons:Record<number,string>={
-    [-1]:"Planning failed: no valid trajectory was found.",
-    [-2]:"Invalid motion plan returned by the planner.",
-    [-3]:"Plan invalidated by the current environment or robot state.",
-    [-10]:"Start state is invalid (check current joints/collisions).",
-    [-11]:"Start state is in collision.",
-    [-12]:"Start state violates path constraints.",
-    [-13]:"Goal state is invalid.",
-    [-14]:"Goal state is in collision.",
-    [-15]:"Goal violates path constraints.",
-    [-16]:"Goal constraints are invalid.",
-    [-17]:"Robot state is invalid.",
-    [-18]:"Planner configuration is invalid.",
-    [-21]:"Required transform is unavailable.",
-    [-22]:"A required transform lookup failed.",
-    [-23]:"A required transform is stale.",
-    [-24]:"A required transform extrapolation failed.",
-    [99999]:"MoveIt reported a generic failure."
-  };
-  return `MoveIt code ${code}: ${reasons[code]??"Unclassified planning result; inspect MoveIt logs."}`;
+  return `MoveIt code ${code}: ${describeMoveItError(code)}`;
 }
 
 
-function NumericInput({label,value,suffix,onChange}:{label:string;value:number;suffix:string;onChange:(value:number)=>void}){
-  return <label className="block">
-    <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">{label}</span>
+function NumericInput({label,value,suffix,actual,disabled=false,onChange}:{label:string;value:number;suffix:string;actual?:number|null;disabled?:boolean;onChange:(value:number)=>void}){
+  return <label className="block min-w-0">
+    <span className="mb-1.5 flex items-center justify-between gap-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+      <span>{label}</span>
+      <span title="Controller-reported ToolVectorActual. Its tool or user frame may differ from the MoveIt target frame." className="whitespace-nowrap text-[10px] font-normal normal-case tracking-normal text-zinc-400">
+        Actual {typeof actual==="number"&&Number.isFinite(actual)?formatNumber(actual,1)+" "+suffix:"—"}
+      </span>
+    </span>
     <div className="flex h-9 items-center rounded-md border border-zinc-200 bg-white focus-within:border-zinc-500">
-      <input type="number" step="0.1" value={Number.isFinite(value)?Number(value.toFixed(3)):0}
+      <input type="number" step="0.1" value={Number.isFinite(value)?Number(value.toFixed(3)):0} disabled={disabled}
         onChange={(event)=>onChange(Number(event.target.value))}
-        className="min-w-0 flex-1 bg-transparent px-2.5 font-mono text-sm outline-none"/>
+        className="min-w-0 flex-1 bg-transparent px-2.5 font-mono text-sm outline-none disabled:opacity-50"/>
       <span className="px-2 text-[10px] text-zinc-400">{suffix}</span>
     </div>
   </label>;
+}
+
+function durationSeconds(plan:MotionPlan):number|null{
+  const points=plan.trajectory?.joint_trajectory?.points;
+  const last=points?.[points.length-1]?.time_from_start;
+  if(!last)return null;
+  const seconds=Number(last.sec??0)+Number(last.nanosec??0)/1e9;
+  return Number.isFinite(seconds)?seconds:null;
+}
+
+function planningSceneSignature(scene:any):string{
+  return JSON.stringify({world:scene?.world?.collision_objects??[],attached:scene?.robot_state?.attached_collision_objects??[]});
+}
+function jointSpaceTravel(plan:MotionPlan):number|null{
+  const points=plan.trajectory?.joint_trajectory?.points;
+  if(!Array.isArray(points)||points.length<2)return null;
+  const vectors=points.map((point:any)=>point.positions);
+  if(vectors.some((values:any)=>!Array.isArray(values)||!values.length||values.some((value:any)=>typeof value!=="number"||!Number.isFinite(value))))return null;
+  let travel=0;
+  for(let index=1;index<vectors.length;index++){
+    if(vectors[index].length!==vectors[index-1].length)return null;
+    const squared=vectors[index].reduce((sum:number,value:number,joint:number)=>sum+Math.pow(value-vectors[index-1][joint],2),0);
+    travel+=Math.sqrt(squared);
+  }
+  return Number.isFinite(travel)?travel:null;
 }
 
 export function VisualizerPage(){
@@ -79,13 +92,14 @@ export function VisualizerPage(){
   const notice=useRobotStore((s)=>s.notice);
 
   const [tab,setTab]=useState("tcp");
+  const [workspaceTab,setWorkspaceTab]=useState("robot");
   const [tcpTarget,setTcpTarget]=useState<TcpTarget|null>(null);
   const [tcpDirty,setTcpDirty]=useState(false);
   const [jointTargets,setJointTargets]=useState<Record<string,number>>({});
   const [jointDirty,setJointDirty]=useState(false);
   const [plannedJointSnapshot,setPlannedJointSnapshot]=useState<Record<string,number>|null>(null);
   const [busy,setBusy]=useState<string|null>(null);
-  const [showObjectLabels,setShowObjectLabels]=useState(true);
+  const [showObjectLabels,setShowObjectLabels]=useState(false);
   const [objectLabels,setObjectLabels]=useState<Record<string,boolean>>({});
   const [hiddenObjects,setHiddenObjects]=useState<Record<string,boolean>>({});
   const [disabledObjects,setDisabledObjects]=useState<Record<string,CollisionObject>>(()=>{
@@ -143,6 +157,11 @@ export function VisualizerPage(){
     }
   };
   const [plannerProfile,setPlannerProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
+  const [activePlanProfile,setActivePlanProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
+  const [benchmarkResults,setBenchmarkResults]=useState<PlannerBenchmarkResult[]>([]);
+  const [comparisonPaths,setComparisonPaths]=useState<Array<{key:string;label:string;color:string;plan:MotionPlan}>>([]);
+  const [benchmarkStartSnapshot,setBenchmarkStartSnapshot]=useState<Record<string,number>|null>(null);
+  const [benchmarkSceneSnapshot,setBenchmarkSceneSnapshot]=useState<string|null>(null);
   const directJointNames=["joint1","joint2","joint3","joint4","joint5","joint6"];
   const [directType,setDirectType]=useState<"movj"|"movl">("movj");
   const [directJointTarget,setDirectJointTarget]=useState<number[]>([0,0,0,0,0,0]);
@@ -173,6 +192,18 @@ export function VisualizerPage(){
   },[bridgeState,request]);
 
   useEffect(()=>{
+    if(directJointDirty)return;
+    const byName:Record<string,number>={};
+    jointNames.forEach((name,index)=>{
+      const value=actualJoints[index];
+      if(typeof value==="number"&&Number.isFinite(value))byName[name]=value*180/Math.PI;
+    });
+    if(directJointNames.every((name)=>Number.isFinite(byName[name]))) {
+      setDirectJointTarget(directJointNames.map((name)=>byName[name]));
+    }
+  },[jointNames.join("|"),actualJoints.join("|"),directJointDirty]);
+
+  useEffect(()=>{
     if(tcpDirty)return;
     if(!tcp){
       setTcpTarget(null);
@@ -200,16 +231,25 @@ export function VisualizerPage(){
   },[jointNames.join("|"),actualJoints.join("|"),jointDirty]);
 
   useEffect(()=>{
-    if(directJointDirty)return;
-    const byName:Record<string,number>={};
-    jointNames.forEach((name,index)=>{
-      const value=actualJoints[index];
-      if(typeof value==="number"&&Number.isFinite(value))byName[name]=value*180/Math.PI;
+    if(!benchmarkStartSnapshot||!comparisonPaths.length||busy==="benchmark")return;
+    const changed=Object.entries(benchmarkStartSnapshot).some(([name,value])=>{
+      const index=jointNames.indexOf(name);
+      const current=index>=0?actualJoints[index]:undefined;
+      return typeof current!=="number"||!Number.isFinite(current)||Math.abs(current-value)>0.03;
     });
-    if(directJointNames.every((name)=>Number.isFinite(byName[name]))) {
-      setDirectJointTarget(directJointNames.map((name)=>byName[name]));
+    if(changed){
+      setComparisonPaths([]);
+      setNotice({tone:"neutral",message:"Benchmark paths were hidden because the robot moved from the benchmark start state. Results remain available for reference."});
     }
-  },[jointNames.join("|"),actualJoints.join("|"),directJointDirty]);
+  },[actualJoints.join("|"),jointNames.join("|"),benchmarkStartSnapshot,comparisonPaths.length,busy]);
+
+  useEffect(()=>{
+    if(!benchmarkSceneSnapshot||!comparisonPaths.length||busy==="benchmark")return;
+    if(planningSceneSignature(scene)!==benchmarkSceneSnapshot){
+      setComparisonPaths([]);
+      setNotice({tone:"neutral",message:"Benchmark paths were hidden because the planning scene changed. Run the comparison again for the current scene."});
+    }
+  },[scene,benchmarkSceneSnapshot,comparisonPaths.length,busy]);
 
   useEffect(()=>{
     if(plan?.status!=="SUCCEEDED"||!plannedJointSnapshot||executionStatus==="EXECUTING")return;
@@ -233,7 +273,6 @@ export function VisualizerPage(){
   const canExecute=capabilities.motion_execution_enabled===true&&bridgeState==="connected"&&
     robotStatus?.is_connected===true&&robotStatus?.is_enable===true;
   const hasPlan=plan?.status==="SUCCEEDED"&&Boolean(plan.plan_id);
-
   const modeCode=extractRobotModeCode(robotMode?.value);
   const telemetryFresh=(timestamp?:string)=> {
     if(!timestamp)return false;
@@ -249,7 +288,7 @@ export function VisualizerPage(){
   const directMotionBlocked=directMotionStatus!==null&&directMotionStatus.phase!=="idle";
 
   const resetTargets=()=>{
-    setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
+    setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);
     setTcpDirty(false);setJointDirty(false);setDirectJointDirty(false);setDirectCheck(null);
     if(tcp&&[tcp.x,tcp.y,tcp.z,tcp.rx,tcp.ry,tcp.rz].every((value)=>typeof value==="number"&&Number.isFinite(value))){
       setTcpTarget({
@@ -274,6 +313,7 @@ export function VisualizerPage(){
     const startJoints:Record<string,number>={};
     jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index] as number;});
     setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
+    setActivePlanProfile(plannerProfile);setComparisonPaths([]);setBenchmarkResults([]);
     try{
       const quaternion=rpyDegreesToQuaternion(tcpTarget.rx,tcpTarget.ry,tcpTarget.rz);
       const result=await request("motion.plan",{
@@ -310,6 +350,7 @@ export function VisualizerPage(){
     const startJoints:Record<string,number>={};
     jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index] as number;});
     setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
+    setActivePlanProfile(plannerProfile);setComparisonPaths([]);setBenchmarkResults([]);
     try{
       const result=await request("motion.plan",{
         group_name:model.group_name,
@@ -330,6 +371,152 @@ export function VisualizerPage(){
       setNotice({tone:"error",message:error instanceof Error?error.message:String(error)});
     }finally{setBusy(null);}
   };
+
+  const runBenchmark=async(profiles:PlannerProfile[],repeatCount:1|3|5)=>{
+    if(!model||profiles.length<2||busy!==null)return;
+    if(gripper.busy!==null){setNotice({tone:"error",message:"Wait for the gripper action to finish before benchmarking motion plans."});return;}
+    if(!actualJointsValid){setNotice({tone:"error",message:"Benchmark requires complete current joint telemetry."});return;}
+    const targetType=tab==="tcp"?"pose":"joints";
+    let target:Record<string,unknown>;
+    if(targetType==="pose"){
+      if(!tcpTarget||![tcpTarget.x,tcpTarget.y,tcpTarget.z,tcpTarget.rx,tcpTarget.ry,tcpTarget.rz].every(Number.isFinite)){
+        setNotice({tone:"error",message:"Enter a complete finite TCP target before benchmarking."});return;
+      }
+      target={type:"pose",frame_id:model.base_frame,link_name:model.end_effector_link,
+        position_m:[tcpTarget.x/1000,tcpTarget.y/1000,tcpTarget.z/1000],
+        orientation_xyzw:rpyDegreesToQuaternion(tcpTarget.rx,tcpTarget.ry,tcpTarget.rz),
+        position_tolerance_m:0.002,orientation_tolerance_rad:0.02};
+    }else{
+      if(!jointNames.length||jointNames.some(name=>typeof jointTargets[name]!=="number"||!Number.isFinite(jointTargets[name]))){
+        setNotice({tone:"error",message:"Set a finite target for every joint before benchmarking."});return;
+      }
+      target={type:"joints",joint_names:jointNames,positions_rad:jointNames.map(name=>jointTargets[name]??0),tolerance_rad:0.01};
+    }
+    const startSnapshot:Record<string,number>={};
+    jointNames.forEach((name,index)=>{startSnapshot[name]=actualJoints[index] as number;});
+    const sceneSnapshot=planningSceneSignature(useRobotStore.getState().scene);
+    setBenchmarkSceneSnapshot(sceneSnapshot);
+    const previousPlan=plan;
+    const previousExecution=executionStatus;
+    const previousPlannedSnapshot=plannedJointSnapshot;
+    const previousPlanProfile=activePlanProfile;
+    setBenchmarkStartSnapshot(startSnapshot);
+    setBusy("benchmark");setNotice(null);setExecutionStatus(null);setPlan(null);
+    setBenchmarkResults([]);setComparisonPaths([]);
+    type RunRecord={plan:MotionPlan;exception?:string};
+    const records=new Map<string,{profile:PlannerProfile;color:string;runs:RunRecord[]}>();
+    profiles.forEach((selected,index)=>records.set(selected.id,{
+      profile:selected,color:PLANNER_PATH_COLORS[index%PLANNER_PATH_COLORS.length],runs:[]
+    }));
+    const median=(values:number[])=>{
+      const sorted=values.filter(Number.isFinite).sort((a,b)=>a-b);
+      if(!sorted.length)return null;
+      const middle=Math.floor(sorted.length/2);
+      return sorted.length%2?sorted[middle]:(sorted[middle-1]+sorted[middle])/2;
+    };
+    const buildRows=()=>profiles.map(selected=>{
+      const record=records.get(selected.id)!;
+      const successes=record.runs.filter(item=>item.plan.status==="SUCCEEDED");
+      const usable=successes.filter(item=>Boolean(item.plan.plan_id)&&
+        (item.plan.trajectory?.joint_trajectory?.points?.length??0)>1);
+      const planningTimes=record.runs.map(item=>item.plan.planning_time)
+        .filter((value):value is number=>typeof value==="number"&&Number.isFinite(value));
+      const successfulTimes=successes.map(item=>item.plan.planning_time)
+        .filter((value):value is number=>typeof value==="number"&&Number.isFinite(value));
+      const metricRuns=successes;
+      const representativeTime=median(successfulTimes);
+      const representative=usable.length
+        ?[...usable].sort((a,b)=>Math.abs((a.plan.planning_time??representativeTime??0)-(representativeTime??0))-
+          Math.abs((b.plan.planning_time??representativeTime??0)-(representativeTime??0)))[0]
+        :successes[0];
+      const errorCounts=new Map<number,number>();
+      for(const item of record.runs){
+        const code=item.plan.error_code;
+        if(item.plan.status!=="SUCCEEDED"&&typeof code==="number")errorCounts.set(code,(errorCounts.get(code)??0)+1);
+      }
+      const commonError=[...errorCounts.entries()].sort((a,b)=>b[1]-a[1])[0]?.[0]??null;
+      const exception=record.runs.find(item=>item.exception)?.exception;
+      const failedCount=record.runs.length-successes.length;
+      const error=failedCount>0
+        ?`${successes.length}/${record.runs.length} runs succeeded.`+
+          (exception?` Request error: ${exception}`:commonError===null?" No MoveIt error code was returned; inspect move_group logs.":"")+
+          (errorCounts.size>1?" Other failure codes: "+[...errorCounts.keys()].filter(code=>code!==commonError).join(", ")+".":"")
+        :undefined;
+      const points=metricRuns.map(item=>item.plan.trajectory?.joint_trajectory?.points?.length??0);
+      const durations=metricRuns.map(item=>durationSeconds(item.plan)).filter((value):value is number=>typeof value==="number"&&Number.isFinite(value));
+      const travels=metricRuns.map(item=>jointSpaceTravel(item.plan)).filter((value):value is number=>typeof value==="number"&&Number.isFinite(value));
+      return {
+        profile:selected,
+        status:successes.length===record.runs.length&&record.runs.length===repeatCount?"SUCCEEDED":successes.length>0?"PARTIAL":"FAILED",
+        targetType,successfulRuns:successes.length,totalRuns:repeatCount,
+        planningTime:median(successfulTimes.length?successfulTimes:planningTimes),
+        trajectoryDuration:median(durations),
+        trajectoryPoints:Math.round(median(points)??0),
+        jointTravel:median(travels),
+        errorCode:commonError,
+        error,
+        plan:representative?.plan??{status:"FAILED"},
+        color:record.color
+      } satisfies PlannerBenchmarkResult;
+    });
+    const rows:PlannerBenchmarkResult[]=[];
+    // Interleave profiles on each round so one planner does not always get the cold MoveGroup/cache state.
+    for(let round=0;round<repeatCount;round++){
+      for(const selected of profiles){
+        const record=records.get(selected.id)!;
+        try{
+          const result=await request("motion.plan",{
+            group_name:model.group_name,target,...plannerRequestOptions(selected)
+          }) as MotionPlan;
+          record.runs.push({plan:result});
+        }catch(error){
+          record.runs.push({plan:{status:"FAILED"},exception:error instanceof Error?error.message:String(error)});
+        }
+        rows.splice(0,rows.length,...buildRows());
+        setBenchmarkResults([...rows]);
+      }
+    }
+    const paths:Array<{key:string;label:string;color:string;plan:MotionPlan}>=[];
+    for(const result of rows){
+      const points=result.plan.trajectory?.joint_trajectory?.points??[];
+      if(result.successfulRuns>0&&result.plan.plan_id&&points.length>1){
+        paths.push({key:result.plan.plan_id,label:result.profile.name,color:result.color,plan:result.plan});
+      }
+    }
+    await new Promise(resolve=>window.setTimeout(resolve,150));
+    const currentJoints=useRobotStore.getState().joints;
+    const jointsChanged=jointNames.some((name,index)=>{
+      const currentIndex=currentJoints?.name?.indexOf(name)??-1;
+      const current=currentIndex>=0?currentJoints?.position?.[currentIndex]:undefined;
+      return typeof current!=="number"||!Number.isFinite(current)||Math.abs(current-startSnapshot[name])>0.03;
+    });
+    const sceneChanged=planningSceneSignature(useRobotStore.getState().scene)!==sceneSnapshot;
+    setPlan(previousPlan);setExecutionStatus(previousExecution);setPlannedJointSnapshot(previousPlannedSnapshot);
+    setActivePlanProfile(previousPlanProfile);setComparisonPaths(paths);setBenchmarkResults(rows);setBusy(null);
+    const successCount=rows.filter(item=>item.successfulRuns>0).length;
+    const fullSuccessCount=rows.filter(item=>item.successfulRuns===repeatCount).length;
+    setNotice({tone:jointsChanged||sceneChanged?"neutral":successCount?"success":"error",
+      message:(successCount+" of "+profiles.length+" profiles found at least one plan; "+fullSuccessCount+" succeeded in all "+repeatCount+" runs. No trajectory was executed.")+
+        (jointsChanged||sceneChanged?" Start state or scene changed during benchmarking; treat timing comparisons cautiously.":"")});
+  };
+
+  const useBenchmarkPlan=(result:PlannerBenchmarkResult)=>{
+    if(!benchmarkStartSnapshot||!benchmarkSceneSnapshot){setNotice({tone:"error",message:"Benchmark start-state metadata is missing. Run the benchmark again."});return;}
+    const latestJoints=useRobotStore.getState().joints;
+    const jointsChanged=Object.entries(benchmarkStartSnapshot).some(([name,value])=>{
+      const index=latestJoints?.name?.indexOf(name)??-1;
+      const current=index>=0?latestJoints?.position?.[index]:undefined;
+      return typeof current!=="number"||!Number.isFinite(current)||Math.abs(current-value)>0.03;
+    });
+    const sceneChanged=planningSceneSignature(useRobotStore.getState().scene)!==benchmarkSceneSnapshot;
+    if(jointsChanged||sceneChanged){setNotice({tone:"error",message:"This benchmark plan is stale because the robot start state or collision scene changed. Run the comparison again before activating it."});return;}
+    setPlan(result.plan);setActivePlanProfile(result.profile);
+    setExecutionStatus(null);setPlannedJointSnapshot(benchmarkStartSnapshot);
+    setNotice({tone:"success",message:result.profile.name+" is now the active plan. Inspect its colored path before explicitly executing it."});
+  };
+
+  const benchmarkDisabledReason=bridgeState!=="connected"?"Waiting for the ROS bridge connection.":!model?"Robot model is not available.":
+    !actualJointsValid?"Waiting for complete joint telemetry.":gripper.busy!==null?"Wait for the gripper action to finish.":null;
 
   const directPayload=()=>{
     if(directType==="movj")return {type:"movj",target_joints_deg:directJointTarget};
@@ -427,45 +614,99 @@ export function VisualizerPage(){
     }finally{setBusy(null);}
   };
 
-  return <div className="space-y-5">
+  return <div className="space-y-4">
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div>
         <div className="eyebrow">MOTION / PLANNING SCENE</div>
         <h1 className="page-title">Scene visualizer</h1>
-        <p className="mt-1 text-sm text-zinc-500">CR5 model, MoveIt collision scene and trajectory planning.</p>
+        <p className="mt-1 text-sm text-zinc-500">Robot state, collision scene and motion planning workspace.</p>
       </div>
-      <Button variant="outline" size="sm" onClick={resetTargets}><RefreshCw size={13}/> Use actual state</Button>
+      <Button variant="outline" size="sm" onClick={resetTargets} title="Discard target edits and restore the latest controller readings"><RefreshCw size={13}/> Use actual state</Button>
     </div>
-
     {notice&&<div className={notice.tone==="error"?"notice notice-error":notice.tone==="success"?"notice notice-success":"notice"}>{notice.message}</div>}
-
-    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+    <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
       <section className="panel overflow-hidden">
         <div className="panel-header">
-          <div className="flex items-center gap-2">
-            <Box size={15} className="text-zinc-500"/>
-            <span className="text-sm font-semibold">Planning scene</span>
-            <span className="text-xs text-zinc-400">{worldObjects.length} world · {attachedObjects.length} attached</span>
-          </div>
+          <div className="flex items-center gap-2"><Box size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D scene</span><span className="text-xs text-zinc-400">{worldObjects.length} world · {attachedObjects.length} attached</span></div>
           <span className="text-[11px] text-zinc-400">{model?.base_frame??"dummy_link"}</span>
         </div>
-        <RobotViewport model={model} jointState={joints} scene={scene} plan={plan}
-          gripperPositionMm={gripper.positionMm}
-          loading={modelLoading} error={modelError??sceneError}
-          showLabels={showObjectLabels} onToggleLabels={()=>setShowObjectLabels((value)=>!value)}
+        <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} comparisonPaths={comparisonPaths} targetTcp={tcpTarget}
+          gripperPositionMm={gripper.positionMm} loading={modelLoading} error={modelError??sceneError}
+          showLabels={showObjectLabels} onToggleLabels={()=>setShowObjectLabels(value=>!value)}
           objectLabels={objectLabels} disabledObjects={disabledObjects} hiddenObjects={hiddenObjects}/>
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-4 py-3 text-[11px] text-zinc-500">
-          <span>Blue line: planned end-effector path</span>
-          <span className="flex flex-wrap items-center gap-3">
-            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-slate-500"/> Collision enabled</span>
-            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-amber-500"/> Collision disabled</span>
-          </span>
-          <span>{plan?.status?"Plan: "+plan.status:"No planned trajectory"}</span>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-3 py-2.5 text-[10px] text-zinc-500">
+          <div className="flex flex-wrap items-center gap-2">
+            {comparisonPaths.length>0?comparisonPaths.map(item=><span key={item.key} className="inline-flex items-center gap-1.5" title={item.label}><i className="h-2 w-5 rounded-full" style={{backgroundColor:item.color}}/>{item.label}</span>)
+              :<span className="inline-flex items-center gap-1.5"><i className="h-2 w-5 rounded-full bg-blue-600"/>Active plan path</span>}
+          </div>
+          <div className="flex flex-wrap items-center gap-3"><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-slate-500"/>Collision enabled</span><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-amber-500"/>Collision disabled</span></div>
         </div>
       </section>
 
-      <aside className="space-y-4">
-        <PlannerSettings onProfileChange={setPlannerProfile} disabled={busy!==null}/>
+      <aside className="min-w-0">
+        <Tabs value={workspaceTab} onValueChange={setWorkspaceTab}>
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="robot"><Move3D size={13} className="mr-1.5"/> Robot</TabsTrigger>
+            <TabsTrigger value="scene"><Box size={13} className="mr-1.5"/> Scene</TabsTrigger>
+          </TabsList>
+          <TabsContent value="robot" className="mt-3 space-y-3">
+            <PlannerSettings onProfileChange={setPlannerProfile} disabled={busy!==null}
+              onBenchmark={runBenchmark} benchmarking={busy==="benchmark"} benchmarkResults={benchmarkResults}
+              benchmarkDisabledReason={benchmarkDisabledReason} onUseBenchmarkPlan={useBenchmarkPlan}
+              benchmarkTargetType={tab==="tcp"?"pose":"joints"}/>
+            <section className="panel overflow-hidden">
+              <div className="panel-header">
+                <div><div className="text-sm font-semibold">Robot target</div><div className="mt-0.5 text-xs text-zinc-500">CR5A arm · planning only until Execute</div></div>
+                <Move3D size={16} className="text-zinc-400"/>
+              </div>
+              <div className="px-3 py-3">
+                <Tabs value={tab} onValueChange={setTab}>
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="tcp" disabled={busy!==null}><Crosshair size={13} className="mr-1.5"/> TCP</TabsTrigger>
+                    <TabsTrigger value="joints" disabled={busy!==null}><Gauge size={13} className="mr-1.5"/> Joints</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="tcp" className="mt-3">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {(["x","y","z"] as const).map(key=><NumericInput key={key} label={key.toUpperCase()} value={tcpTarget?.[key]??0} suffix="mm" actual={tcp?.[key]??null} disabled={busy!==null}
+                        onChange={value=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);setTcpDirty(true);setTcpTarget(current=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));}}/>)}
+                      {(["rx","ry","rz"] as const).map(key=><NumericInput key={key} label={key.toUpperCase()} value={tcpTarget?.[key]??0} suffix="°" actual={tcp?.[key]??null} disabled={busy!==null}
+                        onChange={value=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);setTcpDirty(true);setTcpTarget(current=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));}}/>)}
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-400"><span>Position mm · RPY degrees</span><span>Frame: {model?.base_frame??"—"}</span></div>
+                    <p className="mt-2 text-[10px] leading-4 text-zinc-500" title="Controller ToolVectorActual may use a different tool/user frame or TCP offset. The displayed actual values are raw controller telemetry.">
+                      Actual values are controller-reported. MoveIt targets use {model?.end_effector_link??"the end-effector"} in {model?.base_frame??"the planning frame"}; frame/TCP offsets may differ.
+                    </p>
+                    <Button className="mt-3 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget||!actualJointsValid}>
+                      {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan TCP target
+                    </Button>
+                  </TabsContent>
+                  <TabsContent value="joints" className="mt-3">
+                    <div className="space-y-3">
+                      {jointNames.map((name,index)=>{
+                        const bound=bounds[name];const rawActual=actualJoints[index];
+                        const actual=typeof rawActual==="number"&&Number.isFinite(rawActual)?rawActual:null;
+                        const target=jointTargets[name]??actual??0;
+                        if(!bound)return <div key={name} className="text-xs text-zinc-500">{name}: position limits unavailable.</div>;
+                        return <div key={name}>
+                          <div className="mb-1 flex items-center justify-between gap-2"><span className="text-xs font-medium text-zinc-700">{name}</span><span className="font-mono text-[11px] tabular-nums text-zinc-500">{formatNumber(target*180/Math.PI,1)}° <span className="ml-1 text-zinc-400">Actual {actual===null?"—":formatNumber(actual*180/Math.PI,1)+"°"}</span></span></div>
+                          <input type="range" min={bound.lower*180/Math.PI} max={bound.upper*180/Math.PI} step="0.1" value={target*180/Math.PI} disabled={busy!==null}
+                            onChange={event=>{setJointDirty(true);setComparisonPaths([]);setBenchmarkResults([]);const radians=Number(event.target.value)*Math.PI/180;setJointTargets(current=>({...current,[name]:radians}));}} className="range-control w-full"/>
+                          <div className="mt-1 flex justify-between font-mono text-[10px] text-zinc-400"><span>{formatNumber(bound.lower*180/Math.PI,0)}°</span><span>{formatNumber(bound.upper*180/Math.PI,0)}°</span></div>
+                        </div>;
+                      })}
+                      {!jointNames.length&&<div className="text-xs text-zinc-400">Waiting for joint state messages.</div>}
+                      {jointNames.length>0&&!actualJointsValid&&<div className="text-xs text-amber-700">Current joint readings are incomplete. Planning is disabled.</div>}
+                    </div>
+                    <Button className="mt-3 w-full" onClick={planJoints} disabled={busy!==null||!model||!actualJointsValid||jointNames.some(name=>!bounds[name])}>
+                      {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan joint target
+                    </Button>
+                  </TabsContent>
+                </Tabs>
+              </div>
+            </section>
+
+            <GripperPositionCard controller={gripper} disabled={busy==="benchmark"}/>
+
         <section className="panel">
           <div className="panel-header">
             <div>
@@ -549,149 +790,35 @@ export function VisualizerPage(){
             </p>
           </div>
         </section>
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <div className="text-sm font-semibold">Target control</div>
-              <div className="mt-0.5 text-xs text-zinc-500">Plan first · execute separately</div>
-            </div>
-            <Move3D size={16} className="text-zinc-400"/>
-          </div>
-          <div className="px-4 py-4">
-            <Tabs value={tab} onValueChange={setTab}>
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="tcp"><Crosshair size={13} className="mr-1.5"/> TCP coordinates</TabsTrigger>
-                <TabsTrigger value="joints"><Gauge size={13} className="mr-1.5"/> Joint sliders</TabsTrigger>
-              </TabsList>
-              <TabsContent value="tcp">
-                <div className="grid grid-cols-3 gap-3">
-                  {(["x","y","z"] as const).map((key)=><NumericInput key={key} label={key.toUpperCase()}
-                    value={tcpTarget?.[key]??0} suffix="mm"
-                    onChange={(value)=>{
-                      setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
-                      setTcpDirty(true);
-                      setTcpTarget((current)=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));
-                    }}/>)}
-                  {(["rx","ry","rz"] as const).map((key)=><NumericInput key={key} label={key.toUpperCase()}
-                    value={tcpTarget?.[key]??0} suffix="deg"
-                    onChange={(value)=>{
-                      setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);
-                      setTcpDirty(true);
-                      setTcpTarget((current)=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));
-                    }}/>)}
+
+            {(plan||executionStatus)&&<section className="panel overflow-hidden">
+              <div className="panel-header"><div className="text-sm font-semibold">Plan result</div><div className="flex items-center gap-2"><StatusBadge state={operationStatus(plan?.status).key} label={operationStatus(plan?.status).label} compact/></div></div>
+              <div className="space-y-3 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]"><span className="text-zinc-500">Profile used</span><strong>{activePlanProfile.name} · {plannerProfileLabel(activePlanProfile)}</strong></div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-md bg-zinc-50 p-2.5"><div className="text-[10px] uppercase tracking-wider text-zinc-400">Planning time</div><div className="mt-1 font-mono text-sm">{formatNumber(plan?.planning_time,3)} s</div></div>
+                  <div className="rounded-md bg-zinc-50 p-2.5"><div className="text-[10px] uppercase tracking-wider text-zinc-400">Trajectory points</div><div className="mt-1 font-mono text-sm">{plan?.trajectory?.joint_trajectory?.points?.length??0}</div></div>
                 </div>
-                <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-400">
-                  <span>Position mm · RPY degrees</span><span>Frame: {model?.base_frame??"—"}</span>
-                </div>
-                <p className="mt-3 text-[11px] leading-4 text-zinc-500">
-                  Manual TCP targets use the MoveIt end-effector link ({model?.end_effector_link??"—"}) in {model?.base_frame??"the planning frame"}.
-                  Controller ToolVectorActual values may use a different tool/user frame or TCP offset; copying them directly is not guaranteed to reproduce the same pose.
-                  A failed plan can mean unreachable position/orientation, joint limits, collision, stale start state, or a missing transform. Check the MoveIt error code below.
-                </p>
-                <Button className="mt-4 w-full" onClick={planTcp} disabled={busy!==null||!model||!tcpTarget||!actualJointsValid}>
-                  {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan TCP target
+                {plan?.status==="FAILED"&&<div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">{planErrorDetail(plan.error_code)??"Planning failed. Check MoveIt logs and verify target frame, orientation, reachability and collision state."}</div>}
+                {plan?.status==="SUCCEEDED"&&<div className="text-[10px] text-zinc-500">Inspect the colored path in the viewport. Execution is a separate operation.</div>}
+                <Button className="w-full" variant="secondary" onClick={execute} disabled={!hasPlan||!canExecute||busy!==null}>
+                  {busy==="execute"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Execute active plan
                 </Button>
-              </TabsContent>
-              <TabsContent value="joints">
-                <div className="space-y-4">
-                  {jointNames.map((name,index)=>{
-                    const bound=bounds[name];
-                    const rawActual=actualJoints[index];
-                    const actual=typeof rawActual==="number"&&Number.isFinite(rawActual)?rawActual:null;
-                    const target=jointTargets[name]??actual??0;
-                    if(!bound)return <div key={name} className="text-xs text-zinc-500">{name}: position limits unavailable in URDF and MoveIt configuration.</div>;
-                    return <div key={name}>
-                      <div className="mb-1.5 flex items-center justify-between">
-                        <span className="text-xs font-medium text-zinc-700">{name}</span>
-                        <span className="font-mono text-[11px] tabular-nums text-zinc-500">
-                          {formatNumber(target*180/Math.PI,1)}°
-                          <span className="ml-2 text-zinc-300">actual {actual===null?"—":formatNumber(actual*180/Math.PI,1)+"°"}</span>
-                        </span>
-                      </div>
-                      <input type="range" min={bound.lower*180/Math.PI} max={bound.upper*180/Math.PI}
-                        step="0.1" value={target*180/Math.PI}
-                        onChange={(event)=>{
-                          setJointDirty(true);
-                          const radians=Number(event.target.value)*Math.PI/180;
-                          setJointTargets((current)=>({...current,[name]:radians}));
-                        }} className="range-control w-full"/>
-                      <div className="mt-1 flex justify-between font-mono text-[10px] text-zinc-400">
-                        <span>{formatNumber(bound.lower*180/Math.PI,0)}°</span>
-                        <span>{formatNumber(bound.upper*180/Math.PI,0)}°</span>
-                      </div>
-                    </div>;
-                  })}
-                  {!jointNames.length&&<div className="text-xs text-zinc-400">Waiting for joint state messages.</div>}
-                  {jointNames.length>0&&!actualJointsValid&&<div className="text-xs text-amber-700">One or more joint readings are missing or invalid. Planning is disabled until all current joint positions are finite.</div>}
-                </div>
-                <Button className="mt-4 w-full" onClick={planJoints}
-                  disabled={busy!==null||!model||!actualJointsValid||jointNames.some((name)=>!bounds[name])}>
-                  {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan joint target
-                </Button>
-              </TabsContent>
-            </Tabs>
-          </div>
-        </section>
-
-        <GripperPositionCard controller={gripper}/>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div className="text-sm font-semibold">Motion plan</div>
-            <span className="text-[11px] text-zinc-400">{plan?.plan_id??"Not planned"}</span>
-          </div>
-          <div className="px-4 py-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-xs text-zinc-500">Planning result</div>
-              <StatusBadge state={operationStatus(plan?.status).key} label={operationStatus(plan?.status).label} compact/>
-            </div>
-            <div className="mt-2 grid grid-cols-2 gap-3">
-              <div className="rounded-md bg-zinc-50 p-3">
-                <div className="text-[10px] uppercase tracking-wider text-zinc-400">Planning time</div>
-                <div className="mt-1 font-mono text-sm">{formatNumber(plan?.planning_time,3)} s</div>
+                {!canExecute&&<p className="text-[10px] text-zinc-400">Execution is disabled by bridge safety configuration or the robot is not enabled.</p>}
+                {executionStatus&&<div className="flex items-center gap-2"><StatusBadge state={operationStatus(executionStatus).key} label={operationStatus(executionStatus).label} compact/></div>}
               </div>
-              <div className="rounded-md bg-zinc-50 p-3">
-                <div className="text-[10px] uppercase tracking-wider text-zinc-400">Trajectory points</div>
-                <div className="mt-1 font-mono text-sm">{plan?.trajectory?.joint_trajectory?.points?.length??0}</div>
-              </div>
-            </div>
-            {plan?.status==="FAILED"&&<div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">
-              {planErrorDetail(plan.error_code)??"Planning failed without a reported MoveIt error code. Check MoveIt logs and verify target frame, orientation, reachability, and collision state."}
-            </div>}
-            <Button className="mt-3 w-full" variant="secondary" onClick={execute}
-              disabled={!hasPlan||!canExecute||busy!==null}>
-              {busy==="execute"?<RefreshCw size={14} className="animate-spin"/>:<Play size={14}/>} Execute trajectory
-            </Button>
-            {!canExecute&&<p className="mt-2 text-[11px] text-zinc-400">Execution is disabled by bridge safety configuration or the robot is not enabled.</p>}
-            {executionStatus&&<div className="mt-3 flex items-center gap-2">
-              {executionStatus==="SUCCEEDED"?<CheckCircle2 size={14} className="text-emerald-700"/>:executionStatus==="FAILED"?<CircleAlert size={14} className="text-red-700"/>:null}
-              <StatusBadge state={operationStatus(executionStatus).key} label={operationStatus(executionStatus).label} compact/>
-            </div>}
-          </div>
-        </section>
-
-        <SceneManager
-          scene={scene}
-          frameId={model?.base_frame??"dummy_link"}
-          modelReady={model!==null}
-          connected={bridgeState==="connected"}
-          request={request}
-          onNotice={setNotice}
-          objectLabels={objectLabels}
-          onToggleObjectLabel={toggleObjectLabel}
-          hiddenObjects={hiddenObjects}
-          onToggleObjectVisibility={toggleObjectVisibility}
-          disabledObjects={disabledObjects}
-          onToggleCollision={toggleObjectCollision}
-          onRemoveDisabledObject={(id)=>setDisabledObjects((current)=>{const next={...current};delete next[id];return next;})}
-          onClearDisabledObjects={()=>setDisabledObjects({})}
-          collisionBusy={collisionBusy}
-          onSceneChanged={()=>{
-            setPlan(null);
-            setExecutionStatus(null);
-            setPlannedJointSnapshot(null);
-          }}
-        />
+            </section>}
+          </TabsContent>
+          <TabsContent value="scene" className="mt-3">
+            <SceneManager scene={scene} frameId={model?.base_frame??"dummy_link"} modelReady={model!==null}
+              connected={bridgeState==="connected"&&busy===null} request={request} onNotice={setNotice}
+              objectLabels={objectLabels} onToggleObjectLabel={toggleObjectLabel} hiddenObjects={hiddenObjects}
+              onToggleObjectVisibility={toggleObjectVisibility} disabledObjects={disabledObjects}
+              onToggleCollision={toggleObjectCollision} onRemoveDisabledObject={id=>setDisabledObjects(current=>{const next={...current};delete next[id];return next;})}
+              onClearDisabledObjects={()=>setDisabledObjects({})} collisionBusy={collisionBusy}
+              onSceneChanged={()=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);}}/>
+          </TabsContent>
+        </Tabs>
       </aside>
     </div>
   </div>;

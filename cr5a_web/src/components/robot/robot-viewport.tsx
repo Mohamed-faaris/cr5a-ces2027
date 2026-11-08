@@ -1,9 +1,11 @@
 import {Suspense,useCallback,useEffect,useRef,useState,type RefObject} from "react";
 import {Canvas,useFrame} from "@react-three/fiber";
 import {Billboard,Grid,OrbitControls,Text} from "@react-three/drei";
+import {ChevronDown,Eye,Grid3X3} from "lucide-react";
 import * as THREE from "three";
 import URDFLoader from "urdf-loader";
 import type {CollisionObject,JointStateMessage,MotionPlan,RobotModel} from "@/lib/types";
+import {rpyDegreesToQuaternion} from "@/lib/utils";
 
 type RobotObject=THREE.Object3D&{
   setJointValues:(values:Record<string,number>)=>void;
@@ -267,10 +269,10 @@ function ScenePrimitive({object,showLabel,collisionEnabled}:{object:CollisionObj
 }
 
 function TrajectoryPreview({
-  robot,model,plan,rootRef
+  robot,model,plan,rootRef,color
 }:{
   robot:RobotObject|null;model:RobotModel;plan:MotionPlan|null;
-  rootRef:RefObject<THREE.Group|null>;
+  rootRef:RefObject<THREE.Group|null>;color:string;
 }) {
   const [line,setLine]=useState<THREE.Line|null>(null);
   useEffect(()=>{
@@ -308,7 +310,7 @@ function TrajectoryPreview({
     }
     if(path.length<2){setLine(null);return;}
     const geometry=new THREE.BufferGeometry().setFromPoints(path);
-    const material=new THREE.LineBasicMaterial({color:0x2563eb});
+    const material=new THREE.LineBasicMaterial({color});
     const next=new THREE.Line(geometry,material);
     setLine(next);
     return ()=>{geometry.dispose();material.dispose();};
@@ -317,23 +319,27 @@ function TrajectoryPreview({
 }
 
 export function RobotViewport({
-  model,jointState,scene,plan,gripperPositionMm=null,loading,error,showLabels,onToggleLabels,objectLabels,
+  model,jointState,scene,plan,comparisonPaths=[],targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,showLabels,onToggleLabels,objectLabels,
   disabledObjects,hiddenObjects
 }:{
   model:RobotModel|null;jointState:JointStateMessage|null;scene:any;
-  plan:MotionPlan|null;gripperPositionMm?:number|null;loading:boolean;error:string|null;
+  plan:MotionPlan|null;comparisonPaths?:Array<{key:string;label:string;color:string;plan:MotionPlan}>;
+  poseMarkers?:Array<{id:string;label:string;position:[number,number,number];color?:string;selected?:boolean}>;
+  targetTcp?:{x:number;y:number;z:number;rx:number;ry:number;rz:number}|null;
+  gripperPositionMm?:number|null;loading:boolean;error:string|null;
   showLabels:boolean;onToggleLabels:()=>void;objectLabels:Record<string,boolean>;
   disabledObjects:Record<string,CollisionObject>;hiddenObjects:Record<string,boolean>;
 }) {
   const rootRef=useRef<THREE.Group|null>(null);
   const [robot,setRobot]=useState<RobotObject|null>(null);
   const [modelError,setModelError]=useState<string|null>(null);
-  const [showRods,setShowRods]=useState(true);
-  const [showMeshes,setShowMeshes]=useState(false);
+  const [showRods,setShowRods]=useState(false);
+  const [showMeshes,setShowMeshes]=useState(true);
   const [showGripperMeshes,setShowGripperMeshes]=useState(true);
   const [showPath,setShowPath]=useState(true);
   const [showAxes,setShowAxes]=useState(false);
   const [showTcp,setShowTcp]=useState(false);
+  const [showTargetTcp,setShowTargetTcp]=useState(false);
   const [showGrid,setShowGrid]=useState(true);
   const [showSceneObjects,setShowSceneObjects]=useState(true);
   const [trajectoryPosition,setTrajectoryPosition]=useState<number|null>(null);
@@ -380,31 +386,38 @@ export function RobotViewport({
 
   return <div className="robot-viewport relative">
     <div className="absolute left-4 top-4 z-10 flex flex-wrap gap-2">
-      <span className="viewport-chip">MODEL / {model?.group_name??"CR5 GROUP"}</span>
-      <span className="viewport-chip">WORLD / {renderObjects.length} objects · {activeObjects.length} collision active</span>
-      {attachedCount>0&&<span className="viewport-chip">ATTACHED / {attachedCount}</span>}
+      <span className="viewport-chip">{model?.group_name??"CR5 GROUP"}</span>
+      <span className="viewport-chip">{renderObjects.length} objects · {poseMarkers.length} poses</span>
+      {attachedCount>0&&<span className="viewport-chip">{attachedCount} attached</span>}
     </div>
-    <div className="absolute right-3 top-3 z-10 flex flex-wrap justify-end gap-1.5">
-      {([
-        ["Rods",showRods,()=>setShowRods((value)=>!value),false],
-        ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value),false],
-        ["Gripper",showGripperMeshes,()=>setShowGripperMeshes((value)=>!value),!model?.pgea_urdf],
-        ["Path",showPath,()=>setShowPath((value)=>!value),!hasTrajectory],
-        ["Axes",showAxes,()=>setShowAxes((value)=>!value),false],
-        ["TCP",showTcp,()=>setShowTcp((value)=>!value),!robot||!model?.end_effector_link],
-        ["Grid",showGrid,()=>setShowGrid((value)=>!value),false],
-        ["Objects",showSceneObjects,()=>setShowSceneObjects((value)=>!value),false],
-      ] as const).map(([label,active,onClick,disabled])=><button key={label} type="button" aria-pressed={active} onClick={onClick} disabled={disabled}
-        className={disabled?"cursor-not-allowed rounded-md border border-zinc-100 bg-zinc-50 px-2.5 py-1.5 text-[10px] font-medium text-zinc-300":active?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
-        {label}
-      </button>)}
-      <button type="button" aria-pressed={showLabels} onClick={onToggleLabels}
-        className={showLabels?"rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10px] font-medium text-white shadow-sm":"rounded-md border border-zinc-200 bg-white/90 px-2.5 py-1.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-400"}>
-        Labels
-      </button>
-    </div>
-    <div className={hasTrajectory?"absolute bottom-24 left-4 z-10 text-[10px] text-zinc-400":"absolute bottom-4 left-4 z-10 text-[10px] text-zinc-400"}>
-      Drag to orbit · Scroll to zoom · Right-drag to pan
+    <div className="absolute right-3 top-3 z-10 flex items-start gap-1.5">
+      <details className="group relative">
+        <summary title="Show or hide robot geometry, gripper, scene objects, labels and paths" className="flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-200 bg-white/95 px-2.5 py-2 text-[11px] font-medium text-zinc-700 shadow-sm">
+          <Eye size={13}/> Display <ChevronDown size={12}/>
+        </summary>
+        <div className="absolute right-0 mt-1 w-52 space-y-1 rounded-lg border border-zinc-200 bg-white p-2 shadow-xl">
+          <div className="px-2 pb-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-400">Robot</div>
+          <button type="button" title="Show the full URDF visual meshes for the arm." onClick={()=>{setShowMeshes(true);setShowRods(false);}} className={"w-full rounded px-2 py-1.5 text-left text-xs "+(showMeshes?"bg-zinc-900 text-white":"hover:bg-zinc-100")}>Visual mesh</button>
+          <button type="button" title="Show a simplified joint-to-joint skeleton instead of the detailed meshes." onClick={()=>{setShowMeshes(false);setShowRods(true);}} className={"w-full rounded px-2 py-1.5 text-left text-xs "+(showRods?"bg-zinc-900 text-white":"hover:bg-zinc-100")}>Joint skeleton</button>
+          <button type="button" title="Toggle the PGEA gripper visual model. This does not connect or disconnect the gripper." aria-pressed={showGripperMeshes} onClick={()=>setShowGripperMeshes(value=>!value)} disabled={!model?.pgea_urdf} className={"w-full rounded px-2 py-1.5 text-left text-xs disabled:opacity-40 "+(showGripperMeshes?"bg-zinc-100":"hover:bg-zinc-100")}>Gripper model {showGripperMeshes?"· On":"· Off"}</button>
+          <div className="my-1 border-t border-zinc-100"/>
+          <button type="button" title="Hide or show scene collision geometry only. It does not change MoveIt's collision checking." aria-pressed={showSceneObjects} onClick={()=>setShowSceneObjects(value=>!value)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Scene objects <span>{showSceneObjects?"On":"Off"}</span></button>
+          <button type="button" title="Show or hide object name labels. This is a visual-only setting." aria-pressed={showLabels} onClick={onToggleLabels} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Object labels <span>{showLabels?"On":"Off"}</span></button>
+          <button type="button" title="Show or hide the planned end-effector trajectory. Compared profiles retain their own colors." aria-pressed={showPath} onClick={()=>setShowPath(value=>!value)} disabled={!hasTrajectory&&!comparisonPaths.length} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Trajectory paths <span>{showPath?"On":"Off"}</span></button>
+        </div>
+      </details>
+      <details className="group relative">
+        <summary title="Show or hide coordinate references and the ground grid" className="flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-200 bg-white/95 px-2.5 py-2 text-[11px] font-medium text-zinc-700 shadow-sm">
+          <Grid3X3 size={13}/> View <ChevronDown size={12}/>
+        </summary>
+        <div className="absolute right-0 mt-1 w-48 space-y-1 rounded-lg border border-zinc-200 bg-white p-2 shadow-xl">
+          <button type="button" title="Show base_link axes at the robot base. X/Y/Z axes are visual references." aria-pressed={showAxes} onClick={()=>setShowAxes(value=>!value)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Base axes <span>{showAxes?"On":"Off"}</span></button>
+          <button type="button" title="Show the actual TCP frame attached to the current robot model pose." aria-pressed={showTcp} onClick={()=>setShowTcp(value=>!value)} disabled={!robot||!model?.end_effector_link} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Actual TCP frame <span>{showTcp?"On":"Off"}</span></button>
+          <button type="button" title="Preview the entered TCP target as an orange marker and oriented axes in the MoveIt base frame. Controller-reported actual values may use a different tool/user frame or TCP offset. This does not move the robot." aria-pressed={showTargetTcp} onClick={()=>setShowTargetTcp(value=>!value)} disabled={!targetTcp||![targetTcp.x,targetTcp.y,targetTcp.z,targetTcp.rx,targetTcp.ry,targetTcp.rz].every(isFiniteNumber)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-40">Target TCP <span>{showTargetTcp?"On":"Off"}</span></button>
+          <button type="button" title="Show or hide the world ground grid. This does not represent a collision object." aria-pressed={showGrid} onClick={()=>setShowGrid(value=>!value)} className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100">Ground grid <span>{showGrid?"On":"Off"}</span></button>
+          <div className="border-t border-zinc-100 px-2 pt-2 text-[10px] leading-4 text-zinc-400">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
+        </div>
+      </details>
     </div>
     {loading&&<div className="absolute inset-0 z-20 flex items-center justify-center bg-white/85 text-sm text-zinc-500">Loading robot description…</div>}
     {!loading&&!model&&<div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 px-6 text-center">
@@ -451,10 +464,34 @@ export function RobotViewport({
             showRods={showRods} showMeshes={showMeshes} showGripperMeshes={showGripperMeshes}
             previewPositions={previewPositions} gripperPositionMm={gripperPositionMm}/>}
           <TcpFrame robot={robot} linkName={model?.pgea_urdf?"tcp":model?.end_effector_link??""} visible={showTcp}/>
+          {showTargetTcp&&targetTcp&&[targetTcp.x,targetTcp.y,targetTcp.z,targetTcp.rx,targetTcp.ry,targetTcp.rz].every(isFiniteNumber)&&(()=>{
+            const [qx,qy,qz,qw]=rpyDegreesToQuaternion(targetTcp.rx,targetTcp.ry,targetTcp.rz);
+            return <group position={[targetTcp.x/1000,targetTcp.y/1000,targetTcp.z/1000]} quaternion={new THREE.Quaternion(qx,qy,qz,qw)}>
+              <axesHelper args={[0.12]}/>
+              <mesh renderOrder={32}>
+                <sphereGeometry args={[0.012,18,14]}/>
+                <meshBasicMaterial color="#f97316" depthTest={false}/>
+              </mesh>
+              <mesh renderOrder={32}>
+                <ringGeometry args={[0.018,0.023,32]}/>
+                <meshBasicMaterial color="#f97316" side={THREE.DoubleSide} depthTest={false}/>
+              </mesh>
+              <Billboard position={[0,0,0.045]}>
+                <Text fontSize={0.018} color="#c2410c" outlineWidth={0.001} outlineColor="#ffffff">TARGET TCP</Text>
+              </Billboard>
+            </group>;
+          })()}
           {showSceneObjects&&renderObjects.filter((object)=>hiddenObjects[object.id]!==true).map((object)=><ScenePrimitive key={object.id} object={object}
             showLabel={showLabels&&objectLabels[object.id]!==false}
             collisionEnabled={activeObjects.some((active)=>active.id===object.id)}/>)}
-          {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef}/>}
+          {poseMarkers.filter((item)=>item.position.every(isFiniteNumber)).map((item,index)=><group key={item.id} position={item.position}>
+            <mesh renderOrder={35}><sphereGeometry args={[item.selected?0.018:0.012,16,12]}/><meshStandardMaterial color={item.color??(item.selected?"#f97316":"#0d9488")} emissive={item.color??(item.selected?"#c2410c":"#0f766e")} emissiveIntensity={0.35}/></mesh>
+            <Billboard position={[0,0,0.035]}><Text fontSize={0.018} color={item.color??"#0f766e"} outlineWidth={0.0015} outlineColor="#ffffff">{item.label||("POSE "+(index+1))}</Text></Billboard>
+          </group>)}
+
+          {showPath&&robot&&model&&comparisonPaths.length>0
+            ?comparisonPaths.map((item)=><TrajectoryPreview key={item.key} robot={robot} model={model} plan={item.plan} rootRef={rootRef} color={item.color}/>)
+            :showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef} color="#2563eb"/>}
           {showAxes&&<BaseAxes/>}
         </group>
       </Suspense>

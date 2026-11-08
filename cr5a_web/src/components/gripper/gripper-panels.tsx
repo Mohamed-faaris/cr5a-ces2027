@@ -83,9 +83,9 @@ export function GripperDiagnosticsCard({controller}:{controller:GripperControlle
   </section>;
 }
 
-export function GripperPositionCard({controller}:{controller:GripperController}){
+export function GripperPositionCard({controller,disabled=false}:{controller:GripperController;disabled?:boolean}){
   const {
-    busy,currentLabel,targetMm,targetValid,readiness,profiles,selectedProfile,
+    gripper,busy,currentLabel,targetMm,targetValid,readiness,profiles,selectedProfile,
     selectedProfileId,profileName,forcePercent,speedPercent,profileValid,
     profileBusy,profileDraftDirty
   }=controller;
@@ -97,7 +97,11 @@ export function GripperPositionCard({controller}:{controller:GripperController})
         <div className="text-sm font-semibold">Gripper controls</div>
         <div className="mt-0.5 text-xs text-zinc-500">PGEA-100-40-W · 0–20 mm per finger</div>
       </div>
-      <MoveHorizontal size={16} className="text-zinc-400"/>
+      <div className="flex items-center gap-2">
+        <StatusBadge state={!gripper?.connected?"disconnected":busy==="move"?"moving":"idle"}
+          label={!gripper?.connected?"Offline":gripper.simulation?"Simulation":"Connected"} compact/>
+        <MoveHorizontal size={16} className="text-zinc-400"/>
+      </div>
     </div>
     <div className="space-y-4 px-4 py-4">
       <Notice controller={controller}/>
@@ -106,7 +110,7 @@ export function GripperPositionCard({controller}:{controller:GripperController})
           <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">Target opening · per finger</span>
           <div className="flex h-10 items-center rounded-md border border-zinc-200 bg-white focus-within:border-zinc-500">
             <input type="number" min="0" max="20" step="0.1" value={targetMm}
-              disabled={busy!==null}
+              disabled={disabled||busy!==null}
               onChange={(event)=>controller.setTargetMm(event.target.value)}
               className="min-w-0 flex-1 bg-transparent px-3 font-mono text-lg outline-none disabled:opacity-50"/>
             <span className="px-3 text-xs text-zinc-400">mm</span>
@@ -119,7 +123,7 @@ export function GripperPositionCard({controller}:{controller:GripperController})
       </div>
       <input type="range" min="0" max="20" step="0.1"
         value={Math.max(0,Math.min(20,Number(targetMm)||0))}
-        disabled={busy!==null}
+        disabled={disabled||busy!==null}
         onChange={(event)=>controller.setTargetMm(event.target.value)}
         className="range-control w-full" aria-label="Target PGEA opening"/>
       <div className="flex justify-between font-mono text-[10px] text-zinc-400">
@@ -127,13 +131,13 @@ export function GripperPositionCard({controller}:{controller:GripperController})
       </div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" onClick={()=>void controller.move(Number(targetMm))}
-          disabled={!controller.canMove||!targetValid}>
+          disabled={disabled||!controller.canMove||!targetValid}>
           {busy==="move"?<RefreshCw size={13} className="animate-spin"/>:<MoveHorizontal size={13}/>} Move
         </Button>
         <Button size="sm" variant="outline" onClick={()=>{controller.setTargetMm("0");void controller.move(0);}}
-          disabled={!controller.canMove}><Hand size={13}/> Open</Button>
+          disabled={disabled||!controller.canMove}><Hand size={13}/> Open</Button>
         <Button size="sm" variant="outline" onClick={()=>{controller.setTargetMm("20");void controller.move(20);}}
-          disabled={!controller.canMove}><Hand size={13}/> Close</Button>
+          disabled={disabled||!controller.canMove}><Hand size={13}/> Close</Button>
         <div className="flex-1"/>
         <Button size="sm" variant="destructive" onClick={()=>void controller.stop()} disabled={busy!=="move"}>
           <Square size={12} fill="currentColor"/> Stop
@@ -141,13 +145,13 @@ export function GripperPositionCard({controller}:{controller:GripperController})
       </div>
       {!targetValid&&<p className="text-xs text-red-700">Enter a finite target between 0 and 20 mm per finger.</p>}
 
-      <div className="rounded-md border border-zinc-200">
-        <div className="flex items-center justify-between border-b border-zinc-100 px-3 py-2.5">
+      <details className="rounded-md border border-zinc-200">
+        <summary className="flex cursor-pointer list-none items-center justify-between border-b border-zinc-100 px-3 py-2.5">
           <div className="flex items-center gap-2 text-xs font-semibold text-zinc-800">
             <SlidersHorizontal size={14}/> Force &amp; speed profiles
           </div>
-          {active&&<StatusBadge state="idle" label="Active"/>}
-        </div>
+          <span className="flex items-center gap-2">{active&&<StatusBadge state="idle" label="Active"/>}<span className="text-[10px] font-normal text-zinc-400">Advanced</span></span>
+        </summary>
         <div className="space-y-3 p-3">
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-zinc-500">Profile</span>
@@ -166,7 +170,7 @@ export function GripperPositionCard({controller}:{controller:GripperController})
           </label>
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
-              <span className="flex items-center justify-between text-[11px] font-medium text-zinc-500">
+              <span title="PGEA force register percentage, not force in Newtons. The device-specific configured range is 20–100%." className="flex items-center justify-between text-[11px] font-medium text-zinc-500">
                 Force <strong className="font-mono text-zinc-800">{forcePercent}%</strong>
               </span>
               <input type="range" min="20" max="100" step="1" value={Math.max(20,Math.min(100,Number(forcePercent)||20))}
@@ -178,7 +182,7 @@ export function GripperPositionCard({controller}:{controller:GripperController})
               <span className="mt-1 block text-[10px] text-zinc-400">20–100% · PGEA register</span>
             </label>
             <label className="block">
-              <span className="flex items-center justify-between text-[11px] font-medium text-zinc-500">
+              <span title="PGEA speed register percentage (1–100%). Higher values command faster gripper motion." className="flex items-center justify-between text-[11px] font-medium text-zinc-500">
                 Speed <strong className="font-mono text-zinc-800">{speedPercent}%</strong>
               </span>
               <input type="range" min="1" max="100" step="1" value={Math.max(1,Math.min(100,Number(speedPercent)||1))}
@@ -221,7 +225,7 @@ export function GripperPositionCard({controller}:{controller:GripperController})
             Saved on bridge host: {profiles.storage_path}
           </div>}
         </div>
-      </div>
+      </details>
 
       <div className="rounded-md bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">{readiness}</div>
       <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">

@@ -1,13 +1,26 @@
 import {useCallback,useEffect,useMemo,useState,type ReactNode} from "react";
-import {Activity,AlertCircle,Camera,CheckCircle2,Circle,Crosshair,FileImage,Focus,Grid3X3,Info,RefreshCw,Save,Scan,ShieldCheck,Sparkles,Target} from "lucide-react";
+import {Activity,AlertCircle,Camera,CheckCircle2,Circle,Crosshair,FileImage,Focus,Grid3X3,Info,RefreshCw,Save,Scan,ShieldCheck,Sparkles,Target,Upload,Eye,EyeOff} from "lucide-react";
 import {Link} from "react-router-dom";
 import {Button} from "@/components/ui/button";
 import {StatusBadge} from "@/components/status-badge";
 import {deriveRobotStatus,hasActiveError} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
+import {RobotViewport} from "@/components/robot/robot-viewport";
 
 const CAMERA_INFO_TOPIC="/cr5/wrist_camera/color/camera_info";
+type GeneratedPose={id:string;label:string;position_m:[number,number,number];joints?:Record<string,number>};
+function parseGeneratedPoses(value:unknown):GeneratedPose[]{
+  const rows=Array.isArray(value)?value:(value&&typeof value==="object"&&Array.isArray((value as {poses?:unknown}).poses)?(value as {poses:unknown[]}).poses:[]);
+  if(!rows.length)throw new Error("Expected a non-empty array or an object with a poses array.");
+  return rows.map((row,index)=>{
+    if(!row||typeof row!=="object")throw new Error("Pose "+(index+1)+" is not an object.");
+    const item=row as Record<string,unknown>;
+    const p=item.position_m;
+    if(!Array.isArray(p)||p.length!==3||!p.every(v=>typeof v==="number"&&Number.isFinite(v)))throw new Error("Pose "+(index+1)+" needs position_m: [x, y, z] in metres.");
+    return {id:String(item.id??("pose-"+(index+1))),label:String(item.label??("Pose "+(index+1))),position_m:p as [number,number,number],joints:item.joints&&typeof item.joints==="object"?item.joints as Record<string,number>:undefined};
+  });
+}
 const SETTINGS_KEY="cr5a.calibration.settings.v1";
 type TargetKind="apriltag"|"aruco"|"checkerboard"|"gridboard";
 type Settings={
@@ -88,6 +101,13 @@ export function CalibrationPage(){
   const [settings,setSettings]=useState<Settings>(loadSettings);
   const [refreshing,setRefreshing]=useState(false);
   const [saved,setSaved]=useState(false);
+  const plan=useRobotStore(s=>s.plan);
+  const [generatedPoses,setGeneratedPoses]=useState<GeneratedPose[]>([]);
+  const [selectedPoseId,setSelectedPoseId]=useState<string|null>(null);
+  const [showAllPoses,setShowAllPoses]=useState(true);
+  const [showPoseMarkers,setShowPoseMarkers]=useState(true);
+  const [poseImportError,setPoseImportError]=useState<string|null>(null);
+  const visiblePoseMarkers=showPoseMarkers?generatedPoses.filter(p=>showAllPoses||p.id===selectedPoseId).map(p=>({id:p.id,label:p.label,position:p.position_m,selected:p.id===selectedPoseId})):[];
 
   useEffect(()=>subscribeChannels(["topic:"+CAMERA_INFO_TOPIC]),[subscribeChannels]);
 
@@ -145,6 +165,26 @@ export function CalibrationPage(){
     {notice&&<div className={notice.tone==="error"?"notice notice-error":notice.tone==="success"?"notice notice-success":"notice"}>{notice.message}</div>}
     <div className="notice border-amber-200 bg-amber-50 text-amber-900"><div className="flex items-start gap-2"><Info size={15} className="mt-0.5 shrink-0"/><div><div className="text-xs font-semibold">Calibration engine not implemented yet</div><p className="mt-1 text-xs leading-5 text-amber-800">This page provides target setup, live readiness and saved browser configuration. Live image transport, target detection, collision insertion, automatic viewpoint generation, synchronized capture, solving and activation still require the ROS calibration backend. Start is intentionally disabled until those operations exist.</p></div></div></div>
 
+    <section className="panel overflow-hidden">
+      <div className="panel-header"><div className="flex items-center gap-2"><Crosshair size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D calibration workspace</span><span className="text-xs text-zinc-400">{generatedPoses.length} generated poses</span></div><span className="text-[10px] text-zinc-400">{model?.base_frame??"dummy_link"}</span></div>
+      <div className="grid items-start xl:grid-cols-[minmax(0,1fr)_280px]">
+        <div className="min-w-0">
+          <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} loading={modelLoading} error={modelError??sceneError}
+            showLabels={false} onToggleLabels={()=>{}} objectLabels={{}} disabledObjects={{}} hiddenObjects={{}} poseMarkers={visiblePoseMarkers}/>
+          <div className="flex flex-wrap items-center gap-4 border-t border-zinc-100 px-3 py-2 text-[10px] text-zinc-500"><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-teal-600"/>Generated viewpoint</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-orange-500"/>Selected viewpoint</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        </div>
+        <aside className="space-y-3 border-t border-zinc-100 p-3 xl:border-l xl:border-t-0">
+          <div><div className="text-xs font-semibold text-zinc-800">Generated viewpoints</div><p className="mt-1 text-[10px] leading-4 text-zinc-500">Import a generated pose set to inspect every target position in the robot base frame. Positions must be in metres.</p></div>
+          <label className="flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50"><Upload size={13}/> Import pose JSON<input type="file" accept=".json,application/json" className="hidden" onChange={async event=>{const file=event.target.files?.[0];if(!file)return;try{const parsed=parseGeneratedPoses(JSON.parse(await file.text()));setGeneratedPoses(parsed);setSelectedPoseId(parsed[0]?.id??null);setShowAllPoses(true);setPoseImportError(null);}catch(error){setPoseImportError(error instanceof Error?error.message:String(error));}finally{event.target.value="";}}}/></label>
+          {poseImportError&&<div className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-[10px] text-red-700">{poseImportError}</div>}
+          <div className="flex items-center justify-between gap-2"><button type="button" onClick={()=>setShowAllPoses(true)} disabled={!generatedPoses.length} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Show all</button><button type="button" onClick={()=>setShowAllPoses(false)} disabled={!generatedPoses.length||!selectedPoseId} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(!showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Selected only</button><button type="button" onClick={()=>setShowPoseMarkers(value=>!value)} className="rounded-md border border-zinc-200 p-1.5 text-zinc-600" title={showPoseMarkers?"Hide pose markers":"Show pose markers"}>{showPoseMarkers?<Eye size={13}/>:<EyeOff size={13}/>}</button></div>
+          <div className="max-h-64 space-y-1 overflow-y-auto">
+            {generatedPoses.length===0?<div className="rounded-md border border-dashed border-zinc-200 px-3 py-5 text-center"><Crosshair size={18} className="mx-auto mb-2 text-zinc-300"/><div className="text-[11px] font-medium text-zinc-600">No generated poses loaded</div><div className="mt-1 text-[10px] leading-4 text-zinc-400">The viewpoint-generation backend is not implemented yet. Import a pose JSON file to preview a generated set.</div></div>:generatedPoses.map((pose,index)=><button key={pose.id} type="button" onClick={()=>{setSelectedPoseId(pose.id);setShowAllPoses(false);}} className={"w-full rounded-md border px-2.5 py-2 text-left "+(selectedPoseId===pose.id?"border-orange-300 bg-orange-50":"border-zinc-100 hover:bg-zinc-50")}><div className="flex items-center justify-between gap-2"><span className="truncate text-[11px] font-medium text-zinc-800">{index+1}. {pose.label}</span><span className="shrink-0 text-[9px] text-zinc-400">{pose.joints?Object.keys(pose.joints).length+" joints":"position only"}</span></div><div className="mt-1 font-mono text-[9px] tabular-nums text-zinc-500">[{pose.position_m.map(v=>v.toFixed(3)).join(", ")}] m</div></button>)}
+          </div>
+          {generatedPoses.length>0&&<div className="flex items-center justify-between border-t border-zinc-100 pt-2 text-[10px] text-zinc-400"><span>{visiblePoseMarkers.length} / {generatedPoses.length} visible</span><button type="button" onClick={()=>{setGeneratedPoses([]);setSelectedPoseId(null);setShowAllPoses(true);}} className="font-medium text-zinc-500 hover:text-red-700">Clear set</button></div>}
+        </aside>
+      </div>
+    </section>
     <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_350px]">
       <div className="space-y-5">
         <section className="panel">

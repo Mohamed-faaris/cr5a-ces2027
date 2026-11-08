@@ -1,5 +1,11 @@
 export type PlanningPipeline = "ompl" | "pilz_industrial_motion_planner" | "chomp";
 
+// Stable colors used to identify profile trajectories in comparison views.
+export const PLANNER_PATH_COLORS = [
+  "#2563eb", "#db2777", "#16a34a", "#d97706",
+  "#7c3aed", "#0891b2", "#dc2626", "#65a30d",
+] as const;
+
 export interface PlannerProfile {
   id: string;
   name: string;
