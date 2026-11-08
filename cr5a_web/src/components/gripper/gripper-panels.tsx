@@ -1,4 +1,4 @@
-import {AlertCircle,Hand,MoveHorizontal,Power,RefreshCw,Square,Wrench} from "lucide-react";
+import {AlertCircle,Check,CopyPlus,Hand,MoveHorizontal,Power,RefreshCw,Save,SlidersHorizontal,Square,Trash2,Wrench} from "lucide-react";
 import {Link} from "react-router-dom";
 import {Button} from "@/components/ui/button";
 import {Metric} from "@/components/metric";
@@ -84,7 +84,13 @@ export function GripperDiagnosticsCard({controller}:{controller:GripperControlle
 }
 
 export function GripperPositionCard({controller}:{controller:GripperController}){
-  const {status,busy,currentLabel,targetMm,targetValid,readiness}=controller;
+  const {
+    busy,currentLabel,targetMm,targetValid,readiness,profiles,selectedProfile,
+    selectedProfileId,profileName,forcePercent,speedPercent,profileValid,
+    profileBusy,profileDraftDirty
+  }=controller;
+  const resetProfileDraft=controller.resetProfileDraft;
+  const active=profiles?.active_profile_id===selectedProfileId;
   return <section className="panel overflow-hidden">
     <div className="panel-header">
       <div>
@@ -97,7 +103,7 @@ export function GripperPositionCard({controller}:{controller:GripperController})
       <Notice controller={controller}/>
       <div className="flex items-end justify-between gap-4">
         <label className="block min-w-0 flex-1">
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">Target opening</span>
+          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">Target opening · per finger</span>
           <div className="flex h-10 items-center rounded-md border border-zinc-200 bg-white focus-within:border-zinc-500">
             <input type="number" min="0" max="20" step="0.1" value={targetMm}
               disabled={busy!==null}
@@ -134,9 +140,92 @@ export function GripperPositionCard({controller}:{controller:GripperController})
         </Button>
       </div>
       {!targetValid&&<p className="text-xs text-red-700">Enter a finite target between 0 and 20 mm per finger.</p>}
+
+      <div className="rounded-md border border-zinc-200">
+        <div className="flex items-center justify-between border-b border-zinc-100 px-3 py-2.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-zinc-800">
+            <SlidersHorizontal size={14}/> Force &amp; speed profiles
+          </div>
+          {active&&<StatusBadge state="idle" label="Active"/>}
+        </div>
+        <div className="space-y-3 p-3">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-zinc-500">Profile</span>
+            <select value={selectedProfileId} onChange={(event)=>controller.selectProfile(event.target.value)}
+              disabled={!profiles||profileBusy}
+              className="h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm">
+              {(profiles?.profiles??[]).map((profile)=><option key={profile.id} value={profile.id}>
+                {profile.name}{profile.id===profiles?.active_profile_id?" · Active":""}
+              </option>)}
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-zinc-500">Profile name</span>
+            <input value={profileName} maxLength={48} onChange={(event)=>controller.updateProfileDraft({name:event.target.value})}
+              disabled={profileBusy} className="h-9 w-full rounded-md border border-zinc-200 px-2 text-sm"/>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="flex items-center justify-between text-[11px] font-medium text-zinc-500">
+                Force <strong className="font-mono text-zinc-800">{forcePercent}%</strong>
+              </span>
+              <input type="range" min="20" max="100" step="1" value={Math.max(20,Math.min(100,Number(forcePercent)||20))}
+                disabled={profileBusy} onChange={(event)=>controller.updateProfileDraft({force:event.target.value})}
+                className="range-control mt-2 w-full" aria-label="PGEA force percentage"/>
+              <input type="number" min="20" max="100" step="1" value={forcePercent}
+                disabled={profileBusy} onChange={(event)=>controller.updateProfileDraft({force:event.target.value})}
+                className="mt-1 h-8 w-full rounded-md border border-zinc-200 px-2 font-mono text-sm"/>
+              <span className="mt-1 block text-[10px] text-zinc-400">20–100% · PGEA register</span>
+            </label>
+            <label className="block">
+              <span className="flex items-center justify-between text-[11px] font-medium text-zinc-500">
+                Speed <strong className="font-mono text-zinc-800">{speedPercent}%</strong>
+              </span>
+              <input type="range" min="1" max="100" step="1" value={Math.max(1,Math.min(100,Number(speedPercent)||1))}
+                disabled={profileBusy} onChange={(event)=>controller.updateProfileDraft({speed:event.target.value})}
+                className="range-control mt-2 w-full" aria-label="PGEA speed percentage"/>
+              <input type="number" min="1" max="100" step="1" value={speedPercent}
+                disabled={profileBusy} onChange={(event)=>controller.updateProfileDraft({speed:event.target.value})}
+                className="mt-1 h-8 w-full rounded-md border border-zinc-200 px-2 font-mono text-sm"/>
+              <span className="mt-1 block text-[10px] text-zinc-400">1–100% · PGEA register</span>
+            </label>
+          </div>
+          {!profileValid&&<p className="text-xs text-red-700">Check profile name, force (20–100), and speed (1–100). Values must be whole numbers.</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={()=>void controller.applyProfile()}
+              disabled={!controller.canControl||!selectedProfile||profileDraftDirty||active||profileBusy}>
+              {busy==="profile-apply"?<RefreshCw size={13} className="animate-spin"/>:<Check size={13}/>} Apply
+            </Button>
+            <Button size="sm" variant="outline" onClick={()=>void controller.saveProfile(false)}
+              disabled={!profileValid||!profileDraftDirty||profileBusy}>
+              {busy==="profile-save"?<RefreshCw size={13} className="animate-spin"/>:<Save size={13}/>} Save changes
+            </Button>
+            {profileDraftDirty&&<Button size="sm" variant="ghost" onClick={resetProfileDraft} disabled={profileBusy}>
+              Discard edits
+            </Button>}
+            <Button size="sm" variant="outline" onClick={()=>void controller.saveProfile(true)}
+              disabled={!profileValid||profileBusy}>
+              <CopyPlus size={13}/> Save as new
+            </Button>
+            <Button size="sm" variant="destructive" onClick={()=>void controller.deleteProfile()}
+              disabled={!selectedProfile||active||profileBusy}>
+              {busy==="profile-delete"?<RefreshCw size={13} className="animate-spin"/>:<Trash2 size={13}/>} Delete
+            </Button>
+          </div>
+          <div className="text-[11px] leading-4 text-zinc-500">
+            {profiles?.runtime_synced
+              ?"Runtime settings are synchronized with the PGEA node."
+              :profiles?.runtime_error??"Waiting for the PGEA node to accept the active profile."}
+          </div>
+          {profiles?.storage_path&&<div className="break-all border-t border-zinc-100 pt-2 font-mono text-[10px] text-zinc-400">
+            Saved on bridge host: {profiles.storage_path}
+          </div>}
+        </div>
+      </div>
+
       <div className="rounded-md bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">{readiness}</div>
       <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">
-        No calibrated conversion exists between Newtons and the PGEA force register. Commands keep <code>max_effort = 0</code> and use the gripper node's configured force percentage.
+        Force is PGEA percentage, not Newtons. Profiles apply to the standard Move/Open/Close position action. No calibrated conversion exists between this register and physical force in N.
       </div>
       <div className="text-right text-[11px]">
         <Link to="/gripper" className="font-medium text-zinc-600 underline decoration-zinc-300 underline-offset-2 hover:text-zinc-950">

@@ -181,6 +181,7 @@ class FakeGripperBackend(FakeBackend):
         from datetime import datetime, timezone
         self.mode = mode
         self.sent_gripper_goals = []
+        self.parameter_updates = []
         self._topic_cache["/dobot_msgs_v4/msg/RobotStatus"] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"is_connected": True, "is_enable": mode == "5"},
@@ -213,7 +214,18 @@ class FakeGripperBackend(FakeBackend):
             response.message = "fake lifecycle completed"
             future.set_result(response)
         else:
-            future.set_exception(RuntimeError(f"Unexpected service: {service_name}"))
+            from rcl_interfaces.srv import SetParametersAtomically
+            if service_type is SetParametersAtomically:
+                response = SetParametersAtomically.Response()
+                response.result.successful = True
+                response.result.reason = ""
+                self.parameter_updates.append({
+                    parameter.name: parameter.value.integer_value
+                    for parameter in request.parameters
+                })
+                future.set_result(response)
+            else:
+                future.set_exception(RuntimeError(f"Unexpected service: {service_name}"))
         return future
 
     def robot_service(self, name, payload=None):
@@ -395,3 +407,68 @@ def test_gripper_initialize_uses_dedicated_trigger_service():
     assert response["ok"] is True
     assert response["data"]["success"] is True
     assert response["data"]["operation"] == "initialize"
+
+
+def _profile_test_config(tmp_path):
+    return {
+        "auth": {"enabled": False},
+        "ros": {"topic_publish_enabled": False, "generic_service_calls_enabled": False},
+        "robot": {"status_topic": "/dobot_msgs_v4/msg/RobotStatus"},
+        "moveit": {"allow_execution": False},
+        "gripper": {
+            "allow_commands": True,
+            "profiles_file": str(tmp_path / "persistent" / "gripper_profiles.yaml"),
+            "profiles": [
+                {"id": "gentle", "name": "Gentle", "force_percent": 30, "speed_percent": 25},
+                {"id": "balanced", "name": "Balanced", "force_percent": 60, "speed_percent": 50},
+                {"id": "firm", "name": "Firm", "force_percent": 80, "speed_percent": 30},
+            ],
+        },
+    }
+
+
+def test_gripper_profiles_apply_and_persist_active_profile(tmp_path):
+    backend = FakeGripperBackend()
+    config = _profile_test_config(tmp_path)
+    with TestClient(create_app(backend, config)) as client:
+        initial = _gripper_ws_request(client, "gripper.get_profiles")
+        applied = _gripper_ws_request(client, "gripper.apply_profile", {"profile_id": "gentle"})
+
+    assert initial["ok"] is True
+    assert initial["data"]["active_profile_id"] == "balanced"
+    assert applied["ok"] is True
+    assert applied["data"]["active_profile_id"] == "gentle"
+    assert applied["data"]["runtime_synced"] is True
+    assert backend.parameter_updates[-1] == {"force_percent": 30, "speed_percent": 25}
+    import yaml
+    saved = yaml.safe_load((tmp_path / "persistent" / "gripper_profiles.yaml").read_text())
+    assert saved["active_profile_id"] == "gentle"
+
+
+def test_gripper_profiles_can_be_created_and_invalid_values_are_rejected(tmp_path):
+    backend = FakeGripperBackend()
+    config = _profile_test_config(tmp_path)
+    with TestClient(create_app(backend, config)) as client:
+        created = _gripper_ws_request(client, "gripper.save_profile", {
+            "profile": {"name": "Soft insert", "force_percent": 24, "speed_percent": 15}
+        })
+        invalid = _gripper_ws_request(client, "gripper.save_profile", {
+            "profile": {"name": "Unsafe", "force_percent": 10, "speed_percent": 15}
+        })
+
+    assert created["ok"] is True
+    profile = created["data"]["saved_profile"]
+    assert profile["name"] == "Soft insert"
+    assert 20 <= profile["force_percent"] <= 100
+    assert invalid["ok"] is False
+    assert invalid["error"]["code"] == 422
+
+
+def test_gripper_profiles_cannot_delete_the_active_profile(tmp_path):
+    backend = FakeGripperBackend()
+    config = _profile_test_config(tmp_path)
+    with TestClient(create_app(backend, config)) as client:
+        response = _gripper_ws_request(client, "gripper.delete_profile", {"profile_id": "balanced"})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == 409
