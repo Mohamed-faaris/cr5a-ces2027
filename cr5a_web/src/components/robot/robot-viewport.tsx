@@ -373,6 +373,10 @@ export function RobotViewport({
   const renderObjects=allObjects.filter((item)=>
     hiddenObjects[item.id]!==true&&(!item.header?.frame_id||item.header.frame_id===model?.base_frame)
   );
+  const hasGripperModel=Boolean(
+    model?.urdf?.includes('name="gripper_body"')||
+    model?.pgea_urdf?.includes('name="gripper_body"')
+  );
   const attachedCount=scene?.robot_state?.attached_collision_objects?.length??0;
   const onLoaded=useCallback((value:RobotObject|null,message?:string)=>{
     setRobot(value);setModelError(message??null);
@@ -388,7 +392,7 @@ export function RobotViewport({
       {([
         ["Rods",showRods,()=>setShowRods((value)=>!value),false],
         ["Meshes",showMeshes,()=>setShowMeshes((value)=>!value),false],
-        ["Gripper",showGripperMeshes,()=>setShowGripperMeshes((value)=>!value),!model?.pgea_urdf],
+        ["Gripper",showGripperMeshes,()=>setShowGripperMeshes((value)=>!value),!hasGripperModel],
         ["Path",showPath,()=>setShowPath((value)=>!value),!hasTrajectory],
         ["Axes",showAxes,()=>setShowAxes((value)=>!value),false],
         ["TCP",showTcp,()=>setShowTcp((value)=>!value),!robot||!model?.end_effector_link],
