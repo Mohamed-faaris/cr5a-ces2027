@@ -135,6 +135,23 @@ function isFiniteNumber(value:unknown):value is number{
   return typeof value==="number"&&Number.isFinite(value);
 }
 
+function BaseAxes() {
+  const axesRef=useRef<THREE.AxesHelper|null>(null);
+  useEffect(()=>{
+    const axes=axesRef.current;
+    if(!axes)return;
+    // Keep the base-frame axes visible over the robot base and scene geometry.
+    const materials=Array.isArray(axes.material)?axes.material:[axes.material];
+    materials.forEach((material)=>{
+      material.depthTest=false;
+      material.depthWrite=false;
+      material.needsUpdate=true;
+    });
+    axes.renderOrder=20;
+  },[]);
+  return <axesHelper ref={axesRef} args={[0.4]} position={[0,0,0.04]}/>;
+}
+
 function ScenePrimitive({object}:{object:CollisionObject}) {
   const primitive=object.primitives?.[0];
   const pose=object.primitive_poses?.[0];
@@ -323,7 +340,7 @@ export function RobotViewport({
           {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded} showRods={showRods} showMeshes={showMeshes} previewPositions={previewPositions}/>}
           {showSceneObjects&&worldObjects.map((object)=><ScenePrimitive key={object.id} object={object}/>)}
           {showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef}/>}
-          {showAxes&&<axesHelper args={[0.18]}/>}
+          {showAxes&&<BaseAxes/>}
         </group>
       </Suspense>
       {showGrid&&<Grid position={[0,-0.002,0]} args={[3,3]} cellSize={0.1} cellThickness={0.5} sectionSize={0.5} sectionThickness={0.9} fadeDistance={4} fadeStrength={1.3} infiniteGrid/>}
