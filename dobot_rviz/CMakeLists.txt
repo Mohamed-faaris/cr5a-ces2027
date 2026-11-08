@@ -27,6 +27,13 @@ install(
   DESTINATION share/${PROJECT_NAME}  
 )
 
+# Keep the MoveIt/web PGEA model explicitly in the install manifest so adding
+# this model also triggers a CMake reconfigure in existing symlink-install workspaces.
+install(
+  FILES urdf/cr5_pgea_visual.urdf
+  DESTINATION share/${PROJECT_NAME}/urdf
+)
+
 install(PROGRAMS
   dobot_rviz/joint_state_relay.py
   DESTINATION lib/${PROJECT_NAME}
