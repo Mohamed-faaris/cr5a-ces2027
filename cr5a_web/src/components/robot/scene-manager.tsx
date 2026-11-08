@@ -634,7 +634,7 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
           <Button size="icon" variant="ghost" className={collisionEnabled ? "h-7 w-7 text-emerald-700" : "h-7 w-7 text-amber-700"}
             title={collisionEnabled ? "Disable collision checking for this object" : "Enable collision checking for this object"}
             aria-label={collisionEnabled ? `Disable collision for ${object.id}` : `Enable collision for ${object.id}`}
-            disabled={!connected || busy || collisionBusy === object.id || !toDraft(object)}
+            disabled={!connected || busy || collisionBusy !== null || !toDraft(object)}
             onClick={() => onToggleCollision(object)}>
             {collisionEnabled ? <ShieldCheck size={13}/> : <ShieldOff size={13}/>}
           </Button>
