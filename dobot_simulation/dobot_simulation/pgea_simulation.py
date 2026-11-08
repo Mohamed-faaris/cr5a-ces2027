@@ -18,6 +18,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
+from sensor_msgs.msg import JointState
 
 
 STROKE_M = 0.020
@@ -42,6 +43,8 @@ class PgeaGripperSimulation(Node):
         self._busy = False
         self._initialized = True
         self._grip_state = 1
+        self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
+        self._joint_state_timer = self.create_timer(0.05, self._publish_joint_state)
         self._action_group = ReentrantCallbackGroup()
         self._action_server = ActionServer(
             self,
@@ -64,6 +67,17 @@ class PgeaGripperSimulation(Node):
         self.get_logger().info(
             "Fake PGEA gripper ready: 0 mm open, 20 mm closed per finger"
         )
+
+    def _publish_joint_state(self):
+        """Publish the actuated finger joint; robot_state_publisher applies URDF mimic."""
+        with self._lock:
+            position = self._position_m
+        message = JointState()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.name = ["left_finger_joint"]
+        message.position = [position]
+        message.velocity = [0.0]
+        self._joint_state_pub.publish(message)
 
     def _snapshot(self):
         with self._lock:
