@@ -5,6 +5,8 @@ serialization and response contracts without requiring a running ROS graph.
 """
 from concurrent.futures import Future
 from types import SimpleNamespace
+from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import pytest
 from fastapi.testclient import TestClient
@@ -100,6 +102,23 @@ def test_pgea_mesh_assets_are_served_from_package_share(client):
 
     assert response.status_code == 200
     assert len(response.content) > 1024
+\n\ndef test_pgea_visual_urdf_is_clean_and_contains_gripper_geometry():
+    from ament_index_python.packages import get_package_share_directory
+
+    path = Path(get_package_share_directory("dobot_rviz")) / "urdf" / "cr5_pgea_visual.urdf"
+    root = ET.parse(path).getroot()
+    links = {link.attrib["name"] for link in root.findall("link")}
+
+    assert root.attrib["name"] == "cr5_robot"
+    assert {"connector_slabs", "gripper_body", "left_finger", "right_finger", "tcp"} <= links
+    assert root.find("ros2_control") is None
+    assert root.find("gazebo") is None
+    assert root.find("link[@name='world']") is None
+    for index in range(1, 7):
+        limit = root.find(f"joint[@name='joint{index}']/limit")
+        assert limit is not None
+        assert float(limit.attrib["effort"]) > 0
+        assert float(limit.attrib["velocity"]) > 0
 def test_set_planner_parameters_builds_moveit_service_request():
     captured = {}
     backend = SimpleNamespace(
