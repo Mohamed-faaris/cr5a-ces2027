@@ -5,7 +5,7 @@ The `/pick-place` route is a reusable task workspace. It accepts synthetic prese
 ## Grasp variables
 
 - **Centroid**: nominal target for the configured MoveIt end-effector link / TCP, expressed in the selected MoveIt base frame.
-- **Gripper yaw**: rotation around the world Z axis. A future candidate generator should sample yaw around symmetric objects and use detected object orientation for boxes.
+- **Gripper yaw**: relative rotation around the object Z axis. The absolute base-frame yaw is object yaw plus this relative angle. Candidate generation samples yaw around symmetric objects and uses detected object orientation for boxes.
 - **Approach angle**: tilt of the approach vector, separate from yaw.
 - **Approach distance**: pre-grasp offset along the approach vector.
 - **TCP offset**: calibrated translation from the nominal object centroid to the actual TCP. Keep zero only when the selected link frame truly coincides with the grasp point.

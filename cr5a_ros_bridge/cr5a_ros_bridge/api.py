@@ -1942,7 +1942,7 @@ def create_app(backend, config):
                 "gripper_fit": evaluate_gripper_fit(
                     obj["dimensions_m"],
                     strategy=payload.get("grasp_strategy", "parallel_jaw"),
-                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0) - math.degrees(obj["rpy_rad"][2]),
+                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0),
                     clearance_m=payload.get("gripper_clearance_m", 0.006),
                     nominal_stroke_m=config.get("gripper", {}).get("nominal_total_stroke_m", 0.040),
                     finger_mesh_span_m=config.get("gripper", {}).get("finger_mesh_span_m", 0.045),
@@ -1951,7 +1951,7 @@ def create_app(backend, config):
                 "gripper_width_feasible": evaluate_gripper_fit(
                     obj["dimensions_m"],
                     strategy=payload.get("grasp_strategy", "parallel_jaw"),
-                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0) - math.degrees(obj["rpy_rad"][2]),
+                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0),
                     clearance_m=payload.get("gripper_clearance_m", 0.006),
                     nominal_stroke_m=config.get("gripper", {}).get("nominal_total_stroke_m", 0.040),
                     finger_mesh_span_m=config.get("gripper", {}).get("finger_mesh_span_m", 0.045),
