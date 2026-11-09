@@ -79,7 +79,13 @@ def normalize_object(payload: dict) -> dict:
         raise ValueError("shape must be box, cylinder, or sphere")
     dims = payload.get("dimensions_m", preset["dimensions_m"] if preset else None)
     if shape == "sphere":
-        radius = _finite(payload.get("radius_m"), "radius_m", minimum=0.001)
+        if payload.get("radius_m") is not None:
+            radius = _finite(payload.get("radius_m"), "radius_m", minimum=0.001)
+        else:
+            sphere_dims = _vector(dims, 3, "dimensions_m", minimum=0.001)
+            if max(sphere_dims) - min(sphere_dims) > 1e-6:
+                raise ValueError("sphere dimensions_m must be equal on all axes")
+            radius = sphere_dims[0] / 2
         dimensions = [radius * 2, radius * 2, radius * 2]
     else:
         dimensions = _vector(dims, 3, "dimensions_m", minimum=0.001)
