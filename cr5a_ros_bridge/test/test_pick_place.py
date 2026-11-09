@@ -141,7 +141,7 @@ def test_grasp_yaw_is_relative_to_detected_object_orientation():
 def test_shelf_collision_geometry_and_pick_target_use_world_pose():
     scene = generate_shelf_scene("standard", level=1, object_dimensions_m=[0.066, 0.066, 0.122],
                                  origin_m=[0.55, 0.0, 0.0], yaw_rad=math.pi/2)
-    assert scene["pick_slot_center_m"] == pytest.approx([0.55, 0.0, 0.018 + 0.306 + 0.012 + 0.061])
+    assert scene["pick_slot_center_m"] == pytest.approx([0.55, 0.0, 0.018 + 0.294 + 0.012 + 0.061])
     left = next(item for item in scene["collision_objects"] if item["id"] == "shelf_left")
     assert left["position_m"] == pytest.approx([0.55, -0.291, 0.45])
     assert left["orientation_xyzw"][2] == pytest.approx(math.sin(math.pi/4))

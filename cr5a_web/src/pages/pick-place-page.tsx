@@ -115,7 +115,10 @@ export function PickPlacePage() {
   const bayHeight=(shelf.height-shelf.board*(shelf.levels+1))/shelf.levels;
   const generatedPick={x:shelfPose.x,y:shelfPose.y,z:shelfPose.z+shelf.board+slot*(bayHeight+shelf.board)+clearance+object.dimensions.z/2};
   const activePick=source==="synthetic"?generatedPick:pick;
-  const fit=object.dimensions.x+2*clearance<=bayWidth&&object.dimensions.y+2*clearance<=shelf.depth&&object.dimensions.z+2*clearance<=bayHeight;
+  const shelfRelativeObjectYaw=(objectYaw-shelfPose.yaw)*Math.PI/180;
+  const projectedShelfWidth=Math.abs(Math.cos(shelfRelativeObjectYaw))*object.dimensions.x+Math.abs(Math.sin(shelfRelativeObjectYaw))*object.dimensions.y;
+  const projectedShelfDepth=Math.abs(Math.sin(shelfRelativeObjectYaw))*object.dimensions.x+Math.abs(Math.cos(shelfRelativeObjectYaw))*object.dimensions.y;
+  const fit=projectedShelfWidth+2*clearance<=bayWidth&&projectedShelfDepth+2*clearance<=shelf.depth-shelf.board&&object.dimensions.z+2*clearance<=bayHeight;
   const grasp=useMemo(()=>{const yaw=(gripperAngle+objectYaw)*Math.PI/180;const pitch=approachAngle*Math.PI/180;return {tcp:{x:activePick.x+Math.cos(yaw)*Math.sin(pitch)*tcpOffset,y:activePick.y+Math.sin(yaw)*Math.sin(pitch)*tcpOffset,z:activePick.z+Math.cos(pitch)*tcpOffset},yaw:gripperAngle+objectYaw,approach:approachAngle,distance:approachDistance};},[activePick,object,gripperAngle,objectYaw,approachAngle,approachDistance,tcpOffset]);
   const yawRad=(gripperAngle+objectYaw)*Math.PI/180;
   const relativeJawYawRad=gripperAngle*Math.PI/180;

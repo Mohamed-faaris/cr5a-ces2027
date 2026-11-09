@@ -209,7 +209,8 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
                          object_dimensions_m: list[float] | None = None,
                          platform: dict | None = None,
                          origin_m: list[float] | None = None,
-                         yaw_rad: float = 0.0) -> dict:
+                         yaw_rad: float = 0.0,
+                         object_yaw_rad: float = 0.0) -> dict:
     """Build an open-front rack as independent collision boxes and a safe bay pose."""
     spec = dict(SHELF_PRESETS[shelf]) if isinstance(shelf, str) and shelf in SHELF_PRESETS else dict(shelf) if isinstance(shelf, dict) else None
     if spec is None:
@@ -244,10 +245,13 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
     fit_reasons = []
     if object_dimensions_m is not None:
         dx, dy, dz = _vector(object_dimensions_m, 3, "object_dimensions_m", minimum=0.001)
-        if dx + 2*clearance_m > bay_width:
-            fit, fit_reasons = False, fit_reasons + ["object width exceeds shelf bay with clearance"]
-        if dy + 2*clearance_m > bay_depth:
-            fit, fit_reasons = False, fit_reasons + ["object depth exceeds shelf bay with clearance"]
+        relative_yaw = _finite(object_yaw_rad, "object_yaw_rad") - shelf_yaw
+        projected_width = abs(math.cos(relative_yaw))*dx + abs(math.sin(relative_yaw))*dy
+        projected_depth = abs(math.sin(relative_yaw))*dx + abs(math.cos(relative_yaw))*dy
+        if projected_width + 2*clearance_m > bay_width:
+            fit, fit_reasons = False, fit_reasons + ["object width exceeds shelf bay with clearance at selected yaw"]
+        if projected_depth + 2*clearance_m > bay_depth:
+            fit, fit_reasons = False, fit_reasons + ["object depth exceeds shelf bay with clearance at selected yaw"]
         if dz + 2*clearance_m > bay_height:
             fit, fit_reasons = False, fit_reasons + ["object height exceeds shelf bay with clearance"]
         target_local[2] = bay_floor + clearance_m + dz/2

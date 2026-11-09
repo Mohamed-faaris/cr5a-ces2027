@@ -1877,6 +1877,7 @@ def create_app(backend, config):
             platform=platform,
             origin_m=payload.get("shelf_pose", {}).get("position_m", [0.55, 0.0, 0.0]),
             yaw_rad=payload.get("shelf_pose", {}).get("yaw_rad", 1.57079632679),
+            object_yaw_rad=obj["rpy_rad"][2],
         )
         if not scene_data["fit"]["valid"]:
             raise ValueError("Object does not fit selected shelf bay: " + "; ".join(scene_data["fit"]["reasons"]))
