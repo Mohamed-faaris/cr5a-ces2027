@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import runpy
+import subprocess
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory, get_package_share_path
@@ -61,6 +62,12 @@ def _setup(context):
         )
     runtime_urdf = Path("/tmp/cr5a_pgea_gazebo.urdf")
     runtime_urdf.write_text(robot_description_xml, encoding="utf-8")
+    runtime_sdf = Path("/tmp/cr5a_pgea_gazebo.sdf")
+    converted = subprocess.run(
+        ["gz", "sdf", "-p", str(runtime_urdf)],
+        check=True, capture_output=True, text=True,
+    )
+    runtime_sdf.write_text(converted.stdout, encoding="utf-8")
 
     robot_state_publisher = Node(
         package="robot_state_publisher", executable="robot_state_publisher",
@@ -75,7 +82,7 @@ def _setup(context):
     )
     spawn_robot = Node(
         package="gazebo_ros", executable="spawn_entity.py", name="spawn_pgea_robot",
-        output="screen", arguments=["-file", str(runtime_urdf), "-entity", "cr5_pgea"],
+        output="screen", arguments=["-file", str(runtime_sdf), "-entity", "cr5_pgea"],
     )
 
     load_jsb = ExecuteProcess(
