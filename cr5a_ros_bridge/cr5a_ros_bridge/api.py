@@ -2036,6 +2036,8 @@ def create_app(backend, config):
             return {**prepared, "status": "BLOCKED_GRIPPER_GEOMETRY",
                     "error": f"Object plus clearance exceeds the PGEA envelope for grasp strategy {strategy!r}. Select an appropriate finger/contact strategy or end-effector."}
         obj = prepared["object"]
+        scene_snapshot = await get_scene()
+        base_allowed_collision_matrix = copy.deepcopy(scene_snapshot.allowed_collision_matrix)
         gripper_cfg = config.get("gripper", {})
         try:
             payload_model = calculate_payload_model(
@@ -2056,6 +2058,35 @@ def create_app(backend, config):
         touch_links = payload.get("touch_links", [link_name, "gripper_body", "left_finger", "right_finger"])
         if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
             raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
+
+        def allow_object_contact(goal):
+            matrix = copy.deepcopy(base_allowed_collision_matrix)
+            names = list(matrix.entry_names)
+            rows = [list(entry.enabled) for entry in matrix.entry_values]
+            while len(rows) < len(names):
+                rows.append([False] * len(names))
+            rows = [row[:len(names)] + [False] * max(0, len(names) - len(row)) for row in rows]
+
+            def ensure_name(name):
+                if name not in names:
+                    for row in rows:
+                        row.append(False)
+                    names.append(name)
+                    rows.append([False] * len(names))
+                return names.index(name)
+
+            object_index = ensure_name(object_id)
+            for link_name_item in touch_links:
+                link_index = ensure_name(link_name_item)
+                rows[object_index][link_index] = True
+                rows[link_index][object_index] = True
+            matrix.entry_names = names
+            matrix.entry_values = []
+            for row in rows:
+                entry = AllowedCollisionEntry()
+                entry.enabled = row
+                matrix.entry_values.append(entry)
+            goal.planning_options.planning_scene_diff.allowed_collision_matrix = matrix
 
         def attach_object(goal):
             scene_diff = goal.planning_options.planning_scene_diff
@@ -2113,6 +2144,7 @@ def create_app(backend, config):
             else:
                 object_payload["radius_m"] = obj["dimensions_m"][0] / 2
             scene_diff.world.collision_objects.append(collision_object(object_payload))
+            scene_diff.allowed_collision_matrix = copy.deepcopy(base_allowed_collision_matrix)
 
         plans = []
         start_state = None
@@ -2132,7 +2164,9 @@ def create_app(backend, config):
             if start_state:
                 stage_payload["start_state"] = start_state
             mutator = None
-            if waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
+            if waypoint["name"] == "grasp":
+                mutator = allow_object_contact
+            elif waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
                 mutator = attach_object
             elif waypoint["name"] == "retreat":
                 mutator = detach_and_place
