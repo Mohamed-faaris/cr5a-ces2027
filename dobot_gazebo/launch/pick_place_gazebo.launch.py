@@ -30,6 +30,8 @@ def _setup(context):
     existing_plugins = os.environ.get("GAZEBO_PLUGIN_PATH", "")
     plugin_path = os.pathsep.join(part for part in [existing_plugins, str(gazebo_plugin_dir)] if part)
     plugin_env = SetEnvironmentVariable(name="GAZEBO_PLUGIN_PATH", value=plugin_path)
+    gazebo_port = LaunchConfiguration("gazebo_port").perform(context)
+    master_env = SetEnvironmentVariable(name="GAZEBO_MASTER_URI", value=f"http://127.0.0.1:{gazebo_port}")
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(gazebo_launch)),
         launch_arguments={
@@ -97,7 +99,7 @@ def _setup(context):
     chain_arm = RegisterEventHandler(OnProcessExit(target_action=load_jsb, on_exit=[load_arm]))
     chain_gripper = RegisterEventHandler(OnProcessExit(target_action=load_arm, on_exit=[load_gripper]))
     chain_moveit = RegisterEventHandler(OnProcessExit(target_action=load_gripper, on_exit=[moveit_launch]))
-    return [plugin_env, gazebo, robot_state_publisher, relay, simulation_adapter, spawn_robot,
+    return [plugin_env, master_env, gazebo, robot_state_publisher, relay, simulation_adapter, spawn_robot,
             chain_jsb, chain_arm, chain_gripper, chain_moveit]
 
 
@@ -109,5 +111,6 @@ def generate_launch_description():
                               description="coke, pringles or wood_box"),
         DeclareLaunchArgument("shelf_level", default_value="1"),
         DeclareLaunchArgument("gui", default_value="false", description="Enable Gazebo GUI (requires a working display/GPU)"),
+        DeclareLaunchArgument("gazebo_port", default_value="11346", description="Isolated Gazebo master TCP port"),
         OpaqueFunction(function=_setup),
     ])
