@@ -9,7 +9,40 @@
   },
   "board": {
     "family": "aruco_dict_5x5",
-    "type": "charuco"
+    "type": "charuco",
+    "dictionary": "DICT_5X5_1000",
+    "frame_id": "base_link",
+    "position_m": [
+      -0.28717676036318196,
+      -1.1416197370330627,
+      -0.44607251181397645
+    ],
+    "orientation_xyzw": [
+      -0.020002099467696724,
+      -0.012144934389358705,
+      -0.06721326603349363,
+      0.9974641815397048
+    ],
+    "pose_sample_count": 34,
+    "pose_aggregation": "coordinate-wise median position and sign-aligned quaternion mean",
+    "median_position_deviation_mm": 11.740566727786648,
+    "max_position_deviation_mm": 36.934984047667896,
+    "geometry": {
+      "columns": 24,
+      "rows": 17,
+      "square_size_m": 0.03,
+      "marker_size_m": 0.022,
+      "margin_m": 0.01,
+      "pattern_width_m": 0.72,
+      "pattern_height_m": 0.51,
+      "width_m": 0.74,
+      "height_m": 0.53,
+      "center_offset_m": [
+        0.36,
+        0.255
+      ],
+      "texture_url": "/calibration/charuco-board-24x17.png"
+    }
   },
   "summary": {
     "sample_count": 34,
@@ -6342,6 +6375,8 @@
     }
   ],
   "warnings": [
-    "Generated target poses are preview-only; this import does not run MoveIt IK or collision checks."
+    "35 joint-only plan entries were not plotted; they have no base-frame TCP pose and need FK/MoveIt to visualize.",
+    "Generated target poses are preview-only; this import does not run MoveIt IK or collision checks.",
+    "Calibration board is shown at the median pose reconstructed from captured board detections and the stored hand-eye transform; this is a visual reference, not a ground-truth survey or collision object."
   ]
 }

@@ -6,7 +6,7 @@ import {StatusBadge} from "@/components/status-badge";
 import {deriveRobotStatus,hasActiveError} from "@/lib/status";
 import {useRobotSocket} from "@/lib/socket";
 import {useRobotStore} from "@/store/robot-store";
-import {RobotViewport} from "@/components/robot/robot-viewport";
+import {RobotViewport,type CalibrationBoardPreviewData} from "@/components/robot/robot-viewport";
 import {loadVisualizerViewPreferences,saveVisualizerViewPreferences} from "@/lib/visualizer-view-preferences";
 
 const CAMERA_INFO_TOPIC="/cr5/wrist_camera/color/camera_info";
@@ -15,6 +15,45 @@ type GeneratedPose={
   pose_frame?:"camera"|"tcp";kind?:"sample"|"planned";tcp_position_m?:[number,number,number];joints?:Record<string,number>;
   image_data_url?:string;image_path?:string;reprojection_rms_px?:number;tag_ids?:number[];
 };
+function rotateVectorByQuaternion(vector:[number,number,number],q:[number,number,number,number]):[number,number,number]{
+  const [x,y,z]=vector;const [qx,qy,qz,qw]=q;
+  const tx=2*(qy*z-qz*y),ty=2*(qz*x-qx*z),tz=2*(qx*y-qy*x);
+  return [x+qw*tx+(qy*tz-qz*ty),y+qw*ty+(qz*tx-qx*tz),z+qw*tz+(qx*ty-qy*tx)];
+}
+function calibrationBoardSceneCenter(board:CalibrationBoardPreviewData):[number,number,number]{
+  const localCenter:[number,number,number]=[board.center_offset_m[0],board.center_offset_m[1],0];
+  const rotated=rotateVectorByQuaternion(localCenter,board.orientation_xyzw);
+  const baseCenter:[number,number,number]=[
+    board.position_m[0]+rotated[0],board.position_m[1]+rotated[1],board.position_m[2]+rotated[2]
+  ];
+  // The viewport scene root is rotated -90° around X from ROS coordinates.
+  return [baseCenter[0],baseCenter[2],-baseCenter[1]];
+}
+function parseCalibrationBoard(value:unknown):CalibrationBoardPreviewData|null{
+  if(!value||typeof value!=="object")return null;
+  const board=value as Record<string,unknown>;
+  const geometry=board.geometry&&typeof board.geometry==="object"?board.geometry as Record<string,unknown>:{};
+  const position=board.position_m;
+  const orientation=board.orientation_xyzw;
+  const width=Number(geometry.width_m);
+  const height=Number(geometry.height_m);
+  const center=geometry.center_offset_m;
+  if(!Array.isArray(position)||position.length!==3||!position.every(v=>typeof v==="number"&&Number.isFinite(v))||
+    !Array.isArray(orientation)||orientation.length!==4||!orientation.every(v=>typeof v==="number"&&Number.isFinite(v))||
+    !Number.isFinite(width)||width<=0||!Number.isFinite(height)||height<=0||
+    !Array.isArray(center)||center.length!==2||!center.every(v=>typeof v==="number"&&Number.isFinite(v)))return null;
+  const texture=typeof geometry.texture_url==="string"&&geometry.texture_url.startsWith("/calibration/")
+    ?geometry.texture_url:"/calibration/charuco-board-24x17.png";
+  return {
+    position_m:position as [number,number,number],orientation_xyzw:orientation as [number,number,number,number],
+    frame_id:typeof board.frame_id==="string"?board.frame_id:undefined,
+    width_m:width,height_m:height,center_offset_m:center as [number,number],texture_url:texture,
+    label:typeof geometry.columns==="number"&&typeof geometry.rows==="number"?`ChArUco ${geometry.columns} × ${geometry.rows}`:"Calibration board",
+    pose_sample_count:typeof board.pose_sample_count==="number"?board.pose_sample_count:undefined,
+    median_position_deviation_mm:typeof board.median_position_deviation_mm==="number"?board.median_position_deviation_mm:undefined,
+    max_position_deviation_mm:typeof board.max_position_deviation_mm==="number"?board.max_position_deviation_mm:undefined
+  };
+}
 function parseGeneratedPoses(value:unknown):GeneratedPose[]{
   const rows=Array.isArray(value)?value:(value&&typeof value==="object"&&Array.isArray((value as {poses?:unknown}).poses)?(value as {poses:unknown[]}).poses:[]);
   if(!rows.length)throw new Error("Expected a non-empty array or an object with a poses array.");
@@ -130,6 +169,8 @@ export function CalibrationPage(){
   const [datasetFrames,setDatasetFrames]=useState<{base?:string;tcp?:string;camera?:string}|null>(null);
   const [datasetSource,setDatasetSource]=useState<string|null>(null);
   const [datasetWarnings,setDatasetWarnings]=useState<string[]>([]);
+  const [calibrationBoard,setCalibrationBoard]=useState<CalibrationBoardPreviewData|null>(null);
+  const [showCalibrationBoard,setShowCalibrationBoard]=useState(true);
   const [loadingReference,setLoadingReference]=useState(false);
   const [viewPreferences,setViewPreferences]=useState(loadVisualizerViewPreferences);
   useEffect(()=>{saveVisualizerViewPreferences(viewPreferences);},[viewPreferences]);
@@ -153,6 +194,23 @@ export function CalibrationPage(){
     setDatasetSummary(bundle.summary&&typeof bundle.summary==="object"?bundle.summary as Record<string,unknown>:null);
     setDatasetFrames(bundle.frames&&typeof bundle.frames==="object"?bundle.frames as {base?:string;tcp?:string;camera?:string}:null);
     setDatasetWarnings(Array.isArray(bundle.warnings)?bundle.warnings.filter((v):v is string=>typeof v==="string"):[]);
+    const importedBoard=parseCalibrationBoard(bundle.board);
+    setCalibrationBoard(importedBoard);
+    setShowCalibrationBoard(true);
+    if(importedBoard){
+      const target=calibrationBoardSceneCenter(importedBoard);
+      setViewPreferences(current=>{
+        const offset:[number,number,number]=[
+          current.cameraPosition[0]-current.cameraTarget[0],
+          current.cameraPosition[1]-current.cameraTarget[1],
+          current.cameraPosition[2]-current.cameraTarget[2]
+        ];
+        return {
+          ...current,cameraTarget:target,
+          cameraPosition:[target[0]+offset[0],target[1]+offset[1],target[2]+offset[2]]
+        };
+      });
+    }
     setPoseImportError(null);
   };
 
@@ -203,6 +261,21 @@ export function CalibrationPage(){
       setNotice({tone:"error",message:"Could not save setup: "+(error instanceof Error?error.message:String(error))});
     }
   };
+  const focusCalibrationBoard=()=>{
+    if(!calibrationBoard)return;
+    const target=calibrationBoardSceneCenter(calibrationBoard);
+    setViewPreferences(current=>{
+      const offset:[number,number,number]=[
+        current.cameraPosition[0]-current.cameraTarget[0],
+        current.cameraPosition[1]-current.cameraTarget[1],
+        current.cameraPosition[2]-current.cameraTarget[2]
+      ];
+      return {
+        ...current,cameraTarget:target,
+        cameraPosition:[target[0]+offset[0],target[1]+offset[1],target[2]+offset[2]]
+      };
+    });
+  };
   const loadReferenceDataset=async()=>{
     setLoadingReference(true);
     try{
@@ -234,7 +307,8 @@ export function CalibrationPage(){
         <div className="min-w-0">
           <RobotViewport model={model} scene={scene} plan={plan} loading={modelLoading} error={modelError??sceneError}
             viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
-            objectLabels={viewPreferences.objectLabels} disabledObjects={{}} hiddenObjects={viewPreferences.hiddenObjects} poseMarkers={visiblePoseMarkers}/>
+            objectLabels={viewPreferences.objectLabels} disabledObjects={{}} hiddenObjects={viewPreferences.hiddenObjects}
+            poseMarkers={visiblePoseMarkers} calibrationBoard={showCalibrationBoard?calibrationBoard:null}/>
           <div className="flex flex-wrap items-center gap-4 border-t border-zinc-100 px-3 py-2 text-[10px] text-zinc-500"><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-teal-600"/>Captured sample</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-blue-600"/>Generated plan</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-orange-500"/>Selected pose</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         </div>
         <aside className="space-y-3 border-t border-zinc-100 p-3 xl:border-l xl:border-t-0">
@@ -246,12 +320,14 @@ export function CalibrationPage(){
             <div className="text-[11px] font-semibold text-zinc-800">{datasetSource??"Imported dataset"}</div>
             <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
               <div><div className="text-zinc-400">Samples</div><div className="font-mono font-semibold text-zinc-700">{String(datasetSummary.sample_count??generatedPoses.filter(p=>p.kind!=="planned").length)}</div></div>
+              <div><div className="text-zinc-400">Board preview</div><div className="font-mono font-semibold text-zinc-700">{calibrationBoard?"Loaded":"Pose unavailable"}</div></div>
               <div><div className="text-zinc-400">Planned poses</div><div className="font-mono font-semibold text-zinc-700">{String(datasetSummary.planned_pose_count??generatedPoses.filter(p=>p.kind==="planned").length)}</div></div>
               <div><div className="text-zinc-400">Board RMS</div><div className="font-mono font-semibold text-zinc-700">{typeof datasetSummary.mean_board_reprojection_rms_px==="number"?datasetSummary.mean_board_reprojection_rms_px.toFixed(2)+" px":"—"}</div></div>
               <div><div className="text-zinc-400">Closure translation</div><div className="font-mono font-semibold text-zinc-700">{typeof datasetSummary.translation_rms_mm==="number"?datasetSummary.translation_rms_mm.toFixed(1)+" mm":"—"}</div></div>
               <div><div className="text-zinc-400">Closure rotation</div><div className="font-mono font-semibold text-zinc-700">{typeof datasetSummary.rotation_rms_deg==="number"?datasetSummary.rotation_rms_deg.toFixed(2)+"°":"—"}</div></div>
             </div>
             <div className="mt-2 text-[9px] leading-4 text-zinc-500">Solver: {String(datasetSummary.algorithm??"not recorded")}. Best closure methods: translation {String(datasetSummary.best_translation_rms_algorithm??"—")}, rotation {String(datasetSummary.best_rotation_rms_algorithm??"—")}. These are consistency checks, not ground-truth accuracy.</div>
+            {calibrationBoard&&<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-900">Board pose aggregated from {calibrationBoard.pose_sample_count??"multiple"} detections. Median translation spread: {typeof calibrationBoard.median_position_deviation_mm==="number"?calibrationBoard.median_position_deviation_mm.toFixed(1)+" mm":"—"}; maximum: {typeof calibrationBoard.max_position_deviation_mm==="number"?calibrationBoard.max_position_deviation_mm.toFixed(1)+" mm":"—"}. Visual reference only; not a surveyed pose or MoveIt collision object.</div>}
             {datasetFrames&&<div className="mt-2 border-t border-zinc-200 pt-2 text-[9px] leading-4 text-zinc-500">Frames: {datasetFrames.base??"?"} → {datasetFrames.tcp??"?"} → {datasetFrames.camera??"?"}</div>}
             {baseFrameMismatch&&<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-800">Reference poses use {datasetFrames?.base}; the live MoveIt model uses {model?.base_frame}. The viewport applies /tf_static when available and hides the markers if no transform exists.</div>}
             {cameraFrameMismatch&&<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-800">Imported camera frame differs from live CameraInfo ({liveCameraFrame}). The imported poses are reference data only; verify the camera mounting and frame mapping before reuse.</div>}
@@ -266,11 +342,11 @@ export function CalibrationPage(){
             {selectedPose.tag_ids&&<div className="px-2.5 pb-2 text-[9px] text-zinc-400">{selectedPose.tag_ids.length} detected markers / IDs</div>}
           </div>}
           {datasetWarnings.length>0&&<div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-800">{datasetWarnings.slice(0,3).join(" · ")}{datasetWarnings.length>3?" · +"+(datasetWarnings.length-3)+" more":""}</div>}
-          <div className="flex items-center justify-between gap-2"><button type="button" onClick={()=>setShowAllPoses(true)} disabled={!generatedPoses.length} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Show all</button><button type="button" onClick={()=>setShowAllPoses(false)} disabled={!generatedPoses.length||!selectedPoseId} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(!showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Selected only</button><button type="button" onClick={()=>setShowPoseMarkers(value=>!value)} className="rounded-md border border-zinc-200 p-1.5 text-zinc-600" title={showPoseMarkers?"Hide pose markers":"Show pose markers"}>{showPoseMarkers?<Eye size={13}/>:<EyeOff size={13}/>}</button></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><button type="button" onClick={()=>setShowAllPoses(true)} disabled={!generatedPoses.length} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Show all</button><button type="button" onClick={()=>setShowAllPoses(false)} disabled={!generatedPoses.length||!selectedPoseId} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(!showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Selected only</button><button type="button" onClick={()=>setShowPoseMarkers(value=>!value)} className="rounded-md border border-zinc-200 p-1.5 text-zinc-600" title={showPoseMarkers?"Hide pose markers":"Show pose markers"}>{showPoseMarkers?<Eye size={13}/>:<EyeOff size={13}/> }</button>{calibrationBoard&&<><button type="button" onClick={focusCalibrationBoard} className="rounded-md border border-zinc-200 px-2.5 py-1.5 text-[10px] font-medium text-zinc-600">Focus board</button><button type="button" onClick={()=>setShowCalibrationBoard(value=>!value)} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(showCalibrationBoard?"bg-amber-100 text-amber-900":"border border-zinc-200 text-zinc-600")}>{showCalibrationBoard?"Hide board":"Show board"}</button></>}</div>
           <div className="max-h-64 space-y-1 overflow-y-auto">
             {generatedPoses.length===0?<div className="rounded-md border border-dashed border-zinc-200 px-3 py-5 text-center"><Crosshair size={18} className="mx-auto mb-2 text-zinc-300"/><div className="text-[11px] font-medium text-zinc-600">No pose samples loaded</div><div className="mt-1 text-[10px] leading-4 text-zinc-400">The web page does not generate or capture poses yet. Import a converted dataset bundle to preview reference samples.</div></div>:generatedPoses.map((pose,index)=><button key={pose.id} type="button" onClick={()=>{setSelectedPoseId(pose.id);setShowAllPoses(false);}} className={"w-full rounded-md border px-2.5 py-2 text-left "+(selectedPoseId===pose.id?"border-orange-300 bg-orange-50":"border-zinc-100 hover:bg-zinc-50")}><div className="flex items-center justify-between gap-2"><span className="truncate text-[11px] font-medium text-zinc-800">{index+1}. {pose.label}</span><span className="shrink-0 text-[9px] text-zinc-400">{pose.kind==="planned"?"planned":pose.pose_frame==="camera"?"camera":pose.pose_frame==="tcp"?"TCP":pose.joints?Object.keys(pose.joints).length+" joints":"position"}</span></div><div className="mt-1 font-mono text-[9px] tabular-nums text-zinc-500">[{pose.position_m.map(v=>v.toFixed(3)).join(", ")}] m{typeof pose.reprojection_rms_px==="number"?" · "+pose.reprojection_rms_px.toFixed(2)+" px RMS":""}</div></button>)}
           </div>
-          {generatedPoses.length>0&&<div className="flex items-center justify-between border-t border-zinc-100 pt-2 text-[10px] text-zinc-400"><span>{visiblePoseMarkers.length} / {generatedPoses.length} visible</span><button type="button" onClick={()=>{setGeneratedPoses([]);setSelectedPoseId(null);setShowAllPoses(true);setDatasetSummary(null);setDatasetFrames(null);setDatasetSource(null);setDatasetWarnings([]);}} className="font-medium text-zinc-500 hover:text-red-700">Clear set</button></div>}
+          {generatedPoses.length>0&&<div className="flex items-center justify-between border-t border-zinc-100 pt-2 text-[10px] text-zinc-400"><span>{visiblePoseMarkers.length} / {generatedPoses.length} visible</span><button type="button" onClick={()=>{setGeneratedPoses([]);setSelectedPoseId(null);setShowAllPoses(true);setDatasetSummary(null);setDatasetFrames(null);setDatasetSource(null);setDatasetWarnings([]);setCalibrationBoard(null);setShowCalibrationBoard(true);}} className="font-medium text-zinc-500 hover:text-red-700">Clear set</button></div>}
         </aside>
       </div>
     </section>

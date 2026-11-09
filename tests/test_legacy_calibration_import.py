@@ -9,17 +9,20 @@ from import_legacy_calibration_dataset import convert_dataset
 
 
 class LegacyCalibrationImportTests(unittest.TestCase):
-    def make_dataset(self, root: Path, with_extrinsic: bool = True) -> None:
+    def make_dataset(self, root: Path, with_extrinsic: bool = True, with_board_pose: bool = False) -> None:
         (root / "samples").mkdir(parents=True)
         (root / "poses").mkdir()
         (root / "results").mkdir()
         matrix = [[1, 0, 0, 1.0], [0, 1, 0, 2.0], [0, 0, 1, 3.0], [0, 0, 0, 1]]
+        board_detection = {"reprojection_rms_px": 0.8, "tag_ids": [1, 2, 3], "tag_family": "aruco_dict_5x5", "board_type": "charuco"}
+        if with_board_pose:
+            board_detection["camera_T_board"] = {"matrix": [[1, 0, 0, 0.5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
         sample = {
             "pose_id": 7,
             "frames": {"base": "base_link", "tcp": "Link6", "camera": "d415_color_optical_frame"},
             "image": "images/sample_007.png",
             "base_to_tcp": {"matrix": matrix},
-            "board_detection": {"reprojection_rms_px": 0.8, "tag_ids": [1, 2, 3], "tag_family": "aruco_dict_5x5", "board_type": "charuco"},
+            "board_detection": board_detection,
             "timestamp": {"sec": 123, "nanosec": 456},
         }
         (root / "samples" / "sample_007.json").write_text(json.dumps(sample))
@@ -75,6 +78,30 @@ class LegacyCalibrationImportTests(unittest.TestCase):
             self.assertEqual(bundle["planned_poses"][0]["kind"], "planned")
             self.assertEqual(bundle["summary"]["planned_pose_count"], 1)
             self.assertTrue(any("preview-only" in warning for warning in bundle["warnings"]))
+
+    def test_composes_and_exports_a_base_frame_charuco_board_pose(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_dataset(root, with_board_pose=True)
+            bundle = convert_dataset(root, include_thumbnails=False)
+            board = bundle["board"]
+            self.assertEqual(board["frame_id"], "base_link")
+            self.assertEqual(board["position_m"], [1.6, 2.0, 3.0])
+            self.assertEqual(board["pose_sample_count"], 1)
+            self.assertEqual(board["geometry"]["columns"], 24)
+            self.assertEqual(board["geometry"]["rows"], 17)
+            self.assertAlmostEqual(board["geometry"]["width_m"], 0.74)
+            self.assertAlmostEqual(board["geometry"]["height_m"], 0.53)
+            self.assertTrue(any("visual reference" in warning for warning in bundle["warnings"]))
+
+    def test_board_pose_is_not_guessed_without_calibrated_camera_extrinsic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_dataset(root, with_extrinsic=False, with_board_pose=True)
+            bundle = convert_dataset(root, include_thumbnails=False)
+            self.assertIsNone(bundle["board"]["position_m"])
+            self.assertEqual(bundle["board"]["pose_sample_count"], 0)
+            self.assertTrue(any("pose is unavailable" in warning for warning in bundle["warnings"]))
 
     def test_rejects_missing_sample_directory(self):
         with tempfile.TemporaryDirectory() as temp:

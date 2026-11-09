@@ -134,3 +134,10 @@ For new captures or pose generation, follow the original package README and veri
 the active robot's TCP, MoveIt group, joint order, camera topics and TF tree. Do not
 enable `execute_motion` on hardware until the target poses and safety state have
 been independently reviewed.
+
+
+## Calibration board in the 3D scene
+
+The legacy ChArUco captures store `camera_T_board` for each accepted image. The importer reconstructs each board pose in the dataset base frame only when a calibrated `tcp_T_camera` is available, using `base_T_tcp * tcp_T_camera * camera_T_board`. It aggregates the fixed board pose across accepted detections (coordinate-wise median translation and sign-aligned quaternion mean) and records the number of contributing captures and translation spread. The reference run uses the original 24 × 17 ChArUco board, 30 mm squares, 22 mm markers, and a 10 mm white print margin.
+
+The Calibration page loads the generated board texture at its reconstructed base-frame pose and automatically frames the board while preserving the current camera direction and zoom. A `Focus board` action is also available after the user moves the view. The board texture is loaded under its own Suspense boundary so it does not suspend or flicker the robot scene. It is a visual calibration-target preview, not a MoveIt collision object; no planning-scene state is changed. The viewport applies `/tf_static` when the dataset base differs from the MoveIt model base. If the transform is unavailable, it hides the board and shows a frame warning rather than guessing. The reconstructed board pose is only as accurate as the saved hand-eye transform and per-image detections; it is not a surveyed ground-truth location and must not be used as a motion target.

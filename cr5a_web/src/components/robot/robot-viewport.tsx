@@ -1,6 +1,6 @@
 import {memo,Suspense,useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type SetStateAction} from "react";
 import {Canvas,useFrame} from "@react-three/fiber";
-import {Billboard,Grid,OrbitControls,Text} from "@react-three/drei";
+import {Billboard,Grid,OrbitControls,Text,useTexture} from "@react-three/drei";
 import {ChevronDown,Eye,Grid3X3} from "lucide-react";
 import * as THREE from "three";
 import URDFLoader from "urdf-loader";
@@ -356,13 +356,51 @@ function TrajectoryPreview({
 
 const EMPTY_COMPARISON_PATHS:Array<{key:string;label:string;color:string;plan:MotionPlan}> = [];
 
+export type CalibrationBoardPreviewData={
+  position_m:[number,number,number];
+  orientation_xyzw:[number,number,number,number];
+  frame_id?:string;
+  width_m:number;
+  height_m:number;
+  center_offset_m:[number,number];
+  texture_url:string;
+  label?:string;
+  pose_sample_count?:number;
+  median_position_deviation_mm?:number;
+  max_position_deviation_mm?:number;
+};
+
+function CalibrationBoardPreview({board,frameTransform}:{
+  board:CalibrationBoardPreviewData;
+  frameTransform:{rotation:THREE.Quaternion;translation:THREE.Vector3}|null;
+}) {
+  const texture=useTexture(board.texture_url);
+  texture.colorSpace=THREE.SRGBColorSpace;
+  const position=new THREE.Vector3(...board.position_m);
+  const orientation=new THREE.Quaternion(...board.orientation_xyzw);
+  if(frameTransform){
+    position.applyQuaternion(frameTransform.rotation).add(frameTransform.translation);
+    orientation.premultiply(frameTransform.rotation);
+  }
+  return <group position={position.toArray()} quaternion={orientation}>
+    <mesh position={[board.center_offset_m[0],board.center_offset_m[1],0]} rotation={[Math.PI,0,0]} receiveShadow={false} castShadow={false}>
+      <planeGeometry args={[board.width_m,board.height_m]}/>
+      <meshStandardMaterial map={texture} side={THREE.DoubleSide} roughness={0.95} metalness={0}/>
+    </mesh>
+    <Billboard position={[board.center_offset_m[0],board.center_offset_m[1],0.008]}>
+      <Text fontSize={0.022} color="#1f2937" outlineWidth={0.0015} outlineColor="#ffffff">{board.label??"ChArUco calibration board"}</Text>
+    </Billboard>
+  </group>;
+}
+
 function RobotViewportView({
-  model,scene,plan,comparisonPaths=EMPTY_COMPARISON_PATHS,targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,viewPreferences,onViewPreferencesChange,
+  model,scene,plan,comparisonPaths=EMPTY_COMPARISON_PATHS,targetTcp=null,gripperPositionMm=null,poseMarkers=[],calibrationBoard=null,loading,error,viewPreferences,onViewPreferencesChange,
   objectLabels,disabledObjects,hiddenObjects
 }:{
   model:RobotModel|null;scene:any;
   plan:MotionPlan|null;comparisonPaths?:Array<{key:string;label:string;color:string;plan:MotionPlan}>;
   poseMarkers?:Array<{id:string;label:string;position:[number,number,number];orientation?:[number,number,number,number];frame_id?:string;color?:string;selected?:boolean}>;
+  calibrationBoard?:CalibrationBoardPreviewData|null;
   targetTcp?:{x:number;y:number;z:number;rx:number;ry:number;rz:number}|null;
   gripperPositionMm?:number|null;loading:boolean;error:string|null;
   viewPreferences:VisualizerViewPreferences;
@@ -431,7 +469,7 @@ function RobotViewportView({
   return <div className="robot-viewport relative">
     <div className="absolute left-4 top-4 z-10 flex flex-wrap gap-2">
       <span className="viewport-chip">{model?.group_name??"CR5 GROUP"}</span>
-      <span className="viewport-chip">{renderObjects.length} objects · {poseMarkers.length} poses</span>
+      <span className="viewport-chip">{renderObjects.length} objects · {poseMarkers.length} poses{calibrationBoard?" · 1 board":""}</span>
       {attachedCount>0&&<span className="viewport-chip">{attachedCount} attached</span>}
     </div>
     <div className="absolute right-3 top-3 z-10 flex items-start gap-1.5">
@@ -473,9 +511,9 @@ function RobotViewportView({
       <div className="absolute bottom-10 right-4 z-10 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
         Objects outside {model?.base_frame??"base frame"} are listed but not drawn without TF transforms.
       </div>}
-    {poseMarkers.some((item)=>item.frame_id&&item.frame_id!==model?.base_frame&&!frameTransformFor(item.frame_id))&&
+    {(poseMarkers.some((item)=>item.frame_id&&item.frame_id!==model?.base_frame&&!frameTransformFor(item.frame_id))||Boolean(calibrationBoard?.frame_id&&calibrationBoard.frame_id!==model?.base_frame&&!frameTransformFor(calibrationBoard.frame_id)))&&
       <div className="absolute bottom-10 left-4 z-10 max-w-xs rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
-        Reference poses in {poseMarkers.find(item=>item.frame_id&&item.frame_id!==model?.base_frame&&!frameTransformFor(item.frame_id))?.frame_id} are hidden: no TF to {model?.base_frame??"the scene base"}.
+        Reference poses or calibration board in {poseMarkers.find(item=>item.frame_id&&item.frame_id!==model?.base_frame&&!frameTransformFor(item.frame_id))?.frame_id??calibrationBoard?.frame_id} are hidden: no TF to {model?.base_frame??"the scene base"}.
       </div>}
     {hasTrajectory&&<div className="absolute bottom-3 left-3 right-3 z-20 rounded-lg border border-zinc-200 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
       <div className="mb-1.5 flex items-center justify-between gap-3">
@@ -533,6 +571,9 @@ function RobotViewportView({
             frameTransform={frameTransformFor(object.header?.frame_id)}
             showLabel={showLabels&&objectLabels[object.id]!==false}
             collisionEnabled={activeObjects.some((active)=>active.id===object.id)}/>)}
+          {calibrationBoard&&calibrationBoard.position_m.every(isFiniteNumber)&&calibrationBoard.orientation_xyzw.every(isFiniteNumber)&&
+            (!calibrationBoard.frame_id||calibrationBoard.frame_id===model?.base_frame||Boolean(frameTransformFor(calibrationBoard.frame_id)))&&
+            <Suspense fallback={null}><CalibrationBoardPreview board={calibrationBoard} frameTransform={frameTransformFor(calibrationBoard.frame_id)}/></Suspense>}
           {poseMarkers.filter((item)=>item.position.every(isFiniteNumber)&&(!item.frame_id||item.frame_id===model?.base_frame||Boolean(frameTransformFor(item.frame_id)))).map((item,index)=>{
             const frameTransform=frameTransformFor(item.frame_id);
             const position=new THREE.Vector3(...item.position);
@@ -580,7 +621,7 @@ type RobotViewportProps=Parameters<typeof RobotViewportView>[0];
 function sameRobotViewportProps(a:RobotViewportProps,b:RobotViewportProps){
   return a.model===b.model&&a.scene===b.scene&&a.plan===b.plan&&
     a.comparisonPaths===b.comparisonPaths&&sameTarget(a.targetTcp,b.targetTcp)&&
-    a.gripperPositionMm===b.gripperPositionMm&&a.poseMarkers===b.poseMarkers&&
+    a.gripperPositionMm===b.gripperPositionMm&&a.poseMarkers===b.poseMarkers&&a.calibrationBoard===b.calibrationBoard&&
     a.loading===b.loading&&a.error===b.error&&a.viewPreferences===b.viewPreferences&&
     a.onViewPreferencesChange===b.onViewPreferencesChange&&a.objectLabels===b.objectLabels&&
     a.disabledObjects===b.disabledObjects&&a.hiddenObjects===b.hiddenObjects;

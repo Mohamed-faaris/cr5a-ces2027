@@ -147,6 +147,42 @@ def load_planned_poses(path: Path | None, warnings: list[str]) -> list[dict[str,
     return planned
 
 
+def average_board_pose(transforms: list[list[list[float]]]) -> dict[str, Any] | None:
+    """Aggregate fixed-board poses estimated in the same base frame."""
+    if not transforms:
+        return None
+    positions = [[float(matrix[row][3]) for row in range(3)] for matrix in transforms]
+    position = [
+        sorted(axis)[len(axis) // 2] if len(axis) % 2 else
+        (sorted(axis)[len(axis) // 2 - 1] + sorted(axis)[len(axis) // 2]) / 2
+        for axis in zip(*positions)
+    ]
+    quaternions = [quaternion_from_matrix(matrix) for matrix in transforms]
+    reference = quaternions[0]
+    aligned = [
+        [-v for v in quaternion] if sum(a * b for a, b in zip(reference, quaternion)) < 0 else quaternion
+        for quaternion in quaternions
+    ]
+    averaged = [sum(q[i] for q in aligned) for i in range(4)]
+    norm = math.sqrt(sum(v * v for v in averaged))
+    if norm < 1e-12:
+        raise ValueError("Could not average board orientation")
+    orientation = [value / norm for value in averaged]
+    deviations_mm = sorted(
+        math.sqrt(sum((p[i] - position[i]) ** 2 for i in range(3))) * 1000
+        for p in positions
+    )
+    median_deviation = (deviations_mm[len(deviations_mm) // 2 - 1] + deviations_mm[len(deviations_mm) // 2]) / 2 if len(deviations_mm) % 2 == 0 else deviations_mm[len(deviations_mm) // 2]
+    return {
+        "position_m": position,
+        "orientation_xyzw": orientation,
+        "pose_sample_count": len(transforms),
+        "median_position_deviation_mm": median_deviation,
+        "max_position_deviation_mm": max(deviations_mm),
+        "aggregation": "coordinate-wise median position and sign-aligned quaternion mean",
+    }
+
+
 def image_thumbnail(path: Path, max_width: int, quality: int) -> str:
     import cv2
     import numpy as np
@@ -178,8 +214,11 @@ def convert_dataset(root: Path, include_thumbnails: bool = True,
     sample_files = sorted(samples_dir.glob("sample_*.json"))
     if not sample_files:
         raise ValueError(f"No sample_*.json files found in {samples_dir}")
+    first_sample = read_json(sample_files[0])
+    board_detection = first_sample.get("board_detection") or {}
 
     poses = []
+    board_transforms_base = []
     warnings = []
     joint_names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
     for sample_path in sample_files:
@@ -199,6 +238,16 @@ def convert_dataset(root: Path, include_thumbnails: bool = True,
         positions = joint_plan.get(pose_id)
         joints = dict(zip(joint_names, positions)) if positions and len(positions) == 6 else None
         detection = sample.get("board_detection") or {}
+        camera_board = detection.get("camera_T_board")
+        if pose_frame == "camera" and isinstance(camera_board, dict):
+            rms = detection.get("reprojection_rms_px")
+            if isinstance(rms, (int, float)) and float(rms) > 5.0:
+                warnings.append(f"{sample_path.name}: board pose excluded from scene estimate (reprojection RMS {float(rms):.2f} px > 5 px)")
+            else:
+                try:
+                    board_transforms_base.append(matmul(display_matrix, pose_matrix(camera_board, f"{sample_path.name}.camera_T_board")))
+                except (TypeError, ValueError) as exc:
+                    warnings.append(f"{sample_path.name}: board pose excluded from scene estimate ({exc})")
         image_rel = str(sample.get("image") or "")
         image_path = (root / image_rel).resolve() if image_rel else None
         try:
@@ -234,6 +283,40 @@ def convert_dataset(root: Path, include_thumbnails: bool = True,
 
     plan_path = pose_plan_path.expanduser().resolve() if pose_plan_path else root / "poses" / "calibration_poses.jsonl"
     planned_poses = load_planned_poses(plan_path, warnings)
+    board_pose = average_board_pose(board_transforms_base)
+    board = {
+        "family": board_detection.get("tag_family"),
+        "type": board_detection.get("board_type"),
+        "dictionary": "DICT_5X5_1000" if board_detection.get("tag_family") == "aruco_dict_5x5" else None,
+        "frame_id": str((first_sample.get("frames") or {}).get("base", manifest.get("base_frame", "base_link"))),
+        "position_m": board_pose.get("position_m") if board_pose else None,
+        "orientation_xyzw": board_pose.get("orientation_xyzw") if board_pose else None,
+        "pose_sample_count": board_pose.get("pose_sample_count", 0) if board_pose else 0,
+        "pose_aggregation": board_pose.get("aggregation") if board_pose else None,
+        "median_position_deviation_mm": board_pose.get("median_position_deviation_mm") if board_pose else None,
+        "max_position_deviation_mm": board_pose.get("max_position_deviation_mm") if board_pose else None,
+        "geometry": {
+            "columns": 24,
+            "rows": 17,
+            "square_size_m": 0.030,
+            "marker_size_m": 0.022,
+            "margin_m": 0.010,
+            "pattern_width_m": 0.720,
+            "pattern_height_m": 0.510,
+            "width_m": 0.740,
+            "height_m": 0.530,
+            "center_offset_m": [0.360, 0.255],
+            "texture_url": "/calibration/charuco-board-24x17.png",
+        },
+    }
+    if board_pose:
+        warnings.append(
+            "Calibration board is shown at the median pose reconstructed from captured board detections and the stored hand-eye transform; this is a visual reference, not a ground-truth survey or collision object."
+        )
+    else:
+        warnings.append(
+            "Calibration board pose is unavailable in the base frame. A validated hand-eye transform and per-sample camera_T_board detections are required before the board can be placed in the 3D scene."
+        )
     if planned_poses:
         warnings.append("Generated target poses are preview-only; this import does not run MoveIt IK or collision checks.")
     report_path = root / "results" / "report.json"
@@ -250,8 +333,6 @@ def convert_dataset(root: Path, include_thumbnails: bool = True,
         (row for row in valid_algorithms if isinstance(row.get("rotation_rms_deg"), (int, float))),
         key=lambda row: float(row["rotation_rms_deg"]), default={}
     )
-    first_sample = read_json(sample_files[0])
-    board_detection = first_sample.get("board_detection") or {}
     return {
         "schema_version": 1,
         "source_format": "cr5a_wrist_eye_calibration",
@@ -261,10 +342,7 @@ def convert_dataset(root: Path, include_thumbnails: bool = True,
             "tcp": str((first_sample.get("frames") or {}).get("tcp", manifest.get("tcp_frame", "Link6"))),
             "camera": str((first_sample.get("frames") or {}).get("camera", camera_frames.get("child", "d415_color_optical_frame"))),
         },
-        "board": {
-            "family": board_detection.get("tag_family"),
-            "type": board_detection.get("board_type"),
-        },
+        "board": board,
         "summary": {
             "sample_count": len(poses),
             "planned_pose_count": len(planned_poses),
