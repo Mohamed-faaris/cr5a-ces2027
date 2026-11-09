@@ -5,13 +5,13 @@ windows:
     panes:
       - shell_command:
           - cd /root/cr5a_ws
-          - export ROS_DOMAIN_ID=83
+          - export ROS_DOMAIN_ID=91
           - source /opt/ros/humble/setup.bash
           - source install/setup.bash
-          - ros2 launch dobot_gazebo pick_place_gazebo.launch.py shelf_profile:=standard object_kind:=coke shelf_level:=1 gui:=false gazebo_port:=11346
+          - ros2 launch dobot_gazebo pick_place_gazebo.launch.py shelf_profile:=standard object_kind:=coke shelf_level:=1 gui:=false gazebo_port:=11347
       - shell_command:
           - cd /root/cr5a_ws
-          - export ROS_DOMAIN_ID=83
+          - export ROS_DOMAIN_ID=91
           - source /opt/ros/humble/setup.bash
           - source install/setup.bash
           - watch -n 2 'ros2 control list_controllers -c /controller_manager 2>/dev/null; echo; ros2 action list 2>/dev/null'
@@ -19,7 +19,7 @@ windows:
     panes:
       - shell_command:
           - cd /root/cr5a_ws
-          - export ROS_DOMAIN_ID=83
+          - export ROS_DOMAIN_ID=91
           - source /opt/ros/humble/setup.bash
           - source install/setup.bash
           - ros2 launch cr5a_ros_bridge bridge.launch.py simulation:=true
@@ -32,7 +32,7 @@ windows:
     panes:
       - shell_command:
           - cd /root/cr5a_ws
-          - export ROS_DOMAIN_ID=83
+          - export ROS_DOMAIN_ID=91
           - source /opt/ros/humble/setup.bash
           - source install/setup.bash
           - watch -n 2 'ros2 node list; echo; ros2 service list | grep -E "SetPayload|RobotMode|apply_planning_scene|get_planning_scene|controller_manager"'
@@ -40,6 +40,6 @@ windows:
     panes:
       - shell_command:
           - cd /root/cr5a_ws
-          - export ROS_DOMAIN_ID=83
+          - export ROS_DOMAIN_ID=91
           - source /opt/ros/humble/setup.bash
           - source install/setup.bash
