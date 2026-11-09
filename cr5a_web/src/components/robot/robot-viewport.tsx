@@ -360,7 +360,7 @@ export function RobotViewport({
 }:{
   model:RobotModel|null;jointState:JointStateMessage|null;scene:any;
   plan:MotionPlan|null;comparisonPaths?:Array<{key:string;label:string;color:string;plan:MotionPlan}>;
-  poseMarkers?:Array<{id:string;label:string;position:[number,number,number];color?:string;selected?:boolean}>;
+  poseMarkers?:Array<{id:string;label:string;position:[number,number,number];orientation?:[number,number,number,number];frame_id?:string;color?:string;selected?:boolean}>;
   targetTcp?:{x:number;y:number;z:number;rx:number;ry:number;rz:number}|null;
   gripperPositionMm?:number|null;loading:boolean;error:string|null;
   viewPreferences:VisualizerViewPreferences;
@@ -471,6 +471,10 @@ export function RobotViewport({
       <div className="absolute bottom-10 right-4 z-10 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
         Objects outside {model?.base_frame??"base frame"} are listed but not drawn without TF transforms.
       </div>}
+    {poseMarkers.some((item)=>item.frame_id&&item.frame_id!==model?.base_frame&&!frameTransformFor(item.frame_id))&&
+      <div className="absolute bottom-10 left-4 z-10 max-w-xs rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-800">
+        Reference poses in {poseMarkers.find(item=>item.frame_id&&item.frame_id!==model?.base_frame&&!frameTransformFor(item.frame_id))?.frame_id} are hidden: no TF to {model?.base_frame??"the scene base"}.
+      </div>}
     {hasTrajectory&&<div className="absolute bottom-3 left-3 right-3 z-20 rounded-lg border border-zinc-200 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
       <div className="mb-1.5 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
@@ -527,10 +531,20 @@ export function RobotViewport({
             frameTransform={frameTransformFor(object.header?.frame_id)}
             showLabel={showLabels&&objectLabels[object.id]!==false}
             collisionEnabled={activeObjects.some((active)=>active.id===object.id)}/>)}
-          {poseMarkers.filter((item)=>item.position.every(isFiniteNumber)).map((item,index)=><group key={item.id} position={item.position}>
-            <mesh renderOrder={35}><sphereGeometry args={[item.selected?0.018:0.012,16,12]}/><meshStandardMaterial color={item.color??(item.selected?"#f97316":"#0d9488")} emissive={item.color??(item.selected?"#c2410c":"#0f766e")} emissiveIntensity={0.35}/></mesh>
-            <Billboard position={[0,0,0.035]}><Text fontSize={0.018} color={item.color??"#0f766e"} outlineWidth={0.0015} outlineColor="#ffffff">{item.label||("POSE "+(index+1))}</Text></Billboard>
-          </group>)}
+          {poseMarkers.filter((item)=>item.position.every(isFiniteNumber)&&(!item.frame_id||item.frame_id===model?.base_frame||Boolean(frameTransformFor(item.frame_id)))).map((item,index)=>{
+            const frameTransform=frameTransformFor(item.frame_id);
+            const position=new THREE.Vector3(...item.position);
+            const orientation=item.orientation?new THREE.Quaternion(...item.orientation):undefined;
+            if(frameTransform){
+              position.applyQuaternion(frameTransform.rotation).add(frameTransform.translation);
+              orientation?.premultiply(frameTransform.rotation);
+            }
+            return <group key={item.id} position={position.toArray()} quaternion={orientation}>
+              {item.orientation&&<axesHelper args={[0.065]}/> }
+              <mesh renderOrder={35}><sphereGeometry args={[item.selected?0.018:0.012,16,12]}/><meshStandardMaterial color={item.color??(item.selected?"#f97316":"#0d9488")} emissive={item.color??(item.selected?"#c2410c":"#0f766e")} emissiveIntensity={0.35}/></mesh>
+              <Billboard position={[0,0,0.035]}><Text fontSize={0.018} color={item.selected?"#c2410c":item.color??"#0f766e"} outlineWidth={0.0015} outlineColor="#ffffff">{item.label||("POSE "+(index+1))}</Text></Billboard>
+            </group>;
+          })}
 
           {showPath&&robot&&model&&comparisonPaths.length>0
             ?comparisonPaths.map((item)=><TrajectoryPreview key={item.key} robot={robot} model={model} plan={item.plan} rootRef={rootRef} color={item.color}/>)

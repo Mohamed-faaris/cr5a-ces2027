@@ -49,6 +49,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 - The bridge supplies `urdf`, `mesh_prefix`, and `mesh_base_url`. The viewer replaces the URDF mesh prefix with the supplied mesh base URL before loading. Do not substitute workstation-specific mesh paths.
 - The viewer displays geometry in metres and rotates its scene root by -90° around X. Preserve this coordinate conversion when changing model or scene transforms.
 - Collision objects are drawn in `model.base_frame`. For other frames, the viewer resolves a direct parent/child transform from `/tf_static` and applies it before rendering; unsupported frame relationships remain in the scene response but are not drawn.
+- Calibration pose markers also carry their source `frame_id`; apply the same `/tf_static` conversion before rendering and hide them if the source frame cannot be resolved. Keep captured observations separate from generated Cartesian targets; imported targets are preview-only and must not trigger planning or execution.
 - The current scene renderer handles BOX, SPHERE, and CYLINDER primitives only. Other primitive types are not visualized.
 - Trajectory preview temporarily changes the loaded URDF's joint values to sample end-effector positions, then restores the live joint values. Preserve that restoration when modifying the preview.
 ## Direct Dobot movement
