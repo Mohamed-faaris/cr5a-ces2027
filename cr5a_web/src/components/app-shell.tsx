@@ -1,5 +1,5 @@
 import {NavLink} from "react-router-dom";
-import {Activity,Bot,Box,Scan} from "lucide-react";
+import {Activity,Bot,Box,Scan,Package} from "lucide-react";
 import type {ReactNode} from "react";
 import {StatusBadge} from "./status-badge";
 import {deriveRobotStatus} from "@/lib/status";
@@ -24,7 +24,8 @@ export function AppShell({children}:{children:ReactNode}) {
   const navItems=[
     {to:"/diagnostics",label:"Diagnostics",icon:Activity},
     {to:"/visualizer",label:"Visualizer",icon:Box},
-    {to:"/calibration",label:"Calibration",icon:Scan}
+    {to:"/calibration",label:"Calibration",icon:Scan},
+    {to:"/pick-place",label:"Pick & Place",icon:Package}
   ];
   return (
     <div className="min-h-screen bg-zinc-50 text-zinc-950">
