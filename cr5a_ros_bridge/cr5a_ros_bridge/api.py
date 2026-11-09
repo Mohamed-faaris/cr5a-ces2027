@@ -28,7 +28,7 @@ from .pick_place import (
     SHELF_PRESETS, build_task_waypoints, calculate_payload_model,
     evaluate_gripper_fit, generate_grasp_candidates, generate_shelf_scene,
     normalize_object, quaternion_from_rpy,
-    pose_relative_to, pose_compose,
+    pose_relative_to, pose_compose, rotate_vector,
 )
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
@@ -1868,11 +1868,17 @@ def create_app(backend, config):
         obj = normalize_object(payload.get("object", {}))
         frame_id = str(payload.get("frame_id", obj["frame_id"]))
         shelf_spec = payload.get("shelf", "standard")
+        place_destination = str(payload.get("place_destination", "platform"))
+        if place_destination not in ("platform", "shelf"):
+            raise ValueError("place_destination must be 'platform' or 'shelf'")
         platform = payload.get("platform", {"position_m": [0.45, 0.0, 0.0], "dimensions_m": [0.30, 0.24, 0.02]})
+        if place_destination == "shelf":
+            platform = None
         clearance = float(payload.get("clearance_m", 0.012))
         level = payload.get("level", 0)
         scene_data = generate_shelf_scene(
             shelf_spec, frame_id=frame_id, level=level,
+            place_level=payload.get("place_level", level),
             clearance_m=clearance, object_dimensions_m=obj["dimensions_m"],
             platform=platform,
             origin_m=payload.get("shelf_pose", {}).get("position_m", [0.55, 0.0, 0.0]),
@@ -1881,17 +1887,77 @@ def create_app(backend, config):
         )
         if not scene_data["fit"]["valid"]:
             raise ValueError("Object does not fit selected shelf bay: " + "; ".join(scene_data["fit"]["reasons"]))
+        pick_source = str(payload.get("pick_source", "shelf"))
+        if pick_source not in ("shelf", "free"):
+            raise ValueError("pick_source must be 'shelf' or 'free'")
+        object_relative_yaw = obj["rpy_rad"][2] - scene_data["shelf"]["yaw_rad"]
+        object_half_front_depth = (
+            abs(math.sin(object_relative_yaw)) * obj["dimensions_m"][0]
+            + abs(math.cos(object_relative_yaw)) * obj["dimensions_m"][1]
+        ) / 2.0
+        shelf_front_inward = rotate_vector(
+            quaternion_from_rpy(0.0, 0.0, scene_data["shelf"]["yaw_rad"]), [0.0, -1.0, 0.0]
+        )
+        source_corridor_distance = (
+            scene_data["shelf"]["depth_m"] / 2.0
+            + object_half_front_depth + clearance + 0.020
+        )
+        configured_approach = float(payload.get("approach_distance_m", 0.08))
+        pick_approach_distance = max(configured_approach, source_corridor_distance) if pick_source == "shelf" else configured_approach
         grasp = generate_grasp_candidates(
             obj,
             gripper_yaw_deg=payload.get("gripper_yaw_deg"),
             approach_angle_deg=payload.get("approach_angle_deg", 0.0),
-            approach_distance_m=payload.get("approach_distance_m", 0.08),
+            approach_distance_m=pick_approach_distance,
             tcp_offset_m=payload.get("tcp_offset_m", [0.0, 0.0, 0.0]),
         )[0]
+        if pick_source == "shelf":
+            alignment = sum(grasp["approach_vector"][i] * shelf_front_inward[i] for i in range(3))
+            if alignment < math.cos(math.radians(35.0)):
+                raise ValueError(
+                    "Shelf pick approach must exit through the open front; align gripper yaw/approach with the shelf opening"
+                )
+        place_destination = str(payload.get("place_destination", "platform"))
+        if place_destination not in ("platform", "shelf"):
+            raise ValueError("place_destination must be 'platform' or 'shelf'")
+        if place_destination == "shelf":
+            place_surface = scene_data["shelf_place_surface_center_m"]
+            shelf_yaw = scene_data["shelf"]["yaw_rad"]
+            shelf_front_inward = rotate_vector(
+                quaternion_from_rpy(0.0, 0.0, shelf_yaw), [0.0, -1.0, 0.0]
+            )
+            approach = grasp["approach_vector"]
+            alignment = sum(approach[i] * shelf_front_inward[i] for i in range(3))
+            if alignment < math.cos(math.radians(35.0)):
+                raise ValueError(
+                    "Shelf placement approach must enter through the open front; rotate the gripper yaw/approach to align with the shelf opening"
+                )
+            relative_yaw = obj["rpy_rad"][2] - shelf_yaw
+            projected_half_depth = (
+                abs(math.sin(relative_yaw)) * obj["dimensions_m"][0]
+                + abs(math.cos(relative_yaw)) * obj["dimensions_m"][1]
+            ) / 2.0
+            shelf_front_clearance = (
+                scene_data["shelf"]["depth_m"] / 2.0
+                + projected_half_depth + clearance + 0.020
+            )
+            place_approach_distance = max(
+                float(payload.get("approach_distance_m", 0.08)), shelf_front_clearance
+            )
+        else:
+            place_surface = scene_data["platform_place_surface_center_m"]
+            place_approach_distance = float(payload.get("place_approach_distance_m", payload.get("approach_distance_m", 0.08)))
         waypoints = build_task_waypoints(
-            obj, grasp, scene_data["place_surface_center_m"],
+            obj, grasp, place_surface,
             lift_distance_m=payload.get("lift_distance_m", 0.10),
+            place_approach_distance_m=place_approach_distance,
+            withdrawal_distance_m=(pick_approach_distance if pick_source == "shelf" else configured_approach),
         )
+        scene_data["pick_source"] = pick_source
+        scene_data["pick_approach_distance_m"] = pick_approach_distance
+        scene_data["place_destination"] = place_destination
+        scene_data["selected_place_surface_center_m"] = place_surface
+        scene_data["place_approach_distance_m"] = place_approach_distance
         return obj, scene_data, grasp, waypoints, frame_id
 
     async def prepare_pick_place_scene(payload: dict):
@@ -1934,7 +2000,9 @@ def create_app(backend, config):
                 "object": obj, "shelf": scene_data["shelf"],
                 "fit": scene_data["fit"], "grasp": grasp,
                 "waypoints": waypoints,
-                "place_surface_center_m": scene_data["place_surface_center_m"],
+                "place_destination": scene_data["place_destination"],
+                "place_surface_center_m": scene_data["selected_place_surface_center_m"],
+                "place_approach_distance_m": scene_data["place_approach_distance_m"],
                 "gripper_nominal_total_stroke_m": float(config.get("gripper", {}).get("nominal_total_stroke_m", 0.040)),
                 "gripper_finger_mesh_span_m": float(config.get("gripper", {}).get("finger_mesh_span_m", 0.045)),
                 "gripper_wrap_envelope_m": float(config.get("gripper", {}).get("wrap_envelope_m", 0.085)),
@@ -2031,7 +2099,7 @@ def create_app(backend, config):
             attached.object.operation = CollisionObject.REMOVE
             scene_diff.robot_state.attached_collision_objects.append(attached)
             scene_diff.robot_state.is_diff = True
-            place = waypoints[4]
+            place = next(item for item in waypoints if item["name"] == "place")
             object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
             relative = pose_relative_to(
                 waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
@@ -2075,7 +2143,7 @@ def create_app(backend, config):
             mutator = None
             if waypoint["name"] == "grasp":
                 mutator = allow_object_contact
-            elif waypoint["name"] in ("lift", "preplace", "place"):
+            elif waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
                 mutator = attach_object
             elif waypoint["name"] == "retreat":
                 mutator = detach_and_place
