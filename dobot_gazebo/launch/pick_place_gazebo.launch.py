@@ -25,21 +25,20 @@ def _setup(context):
     generate_world = runpy.run_path(str(generator))["generate_world"]
     generate_world(profile, object_kind, world_path, level=level)
 
-    gazebo_ros = get_package_share_directory("gazebo_ros")
-    gazebo_launch = Path(gazebo_ros) / "launch" / "gazebo.launch.py"
     gazebo_plugin_dir = Path(get_package_share_directory("gazebo_ros2_control")).parent.parent / "lib"
-    existing_plugins = [part for part in os.environ.get("GAZEBO_PLUGIN_PATH", "").split(os.pathsep) if part]
-    plugin_path = os.pathsep.join(dict.fromkeys([str(gazebo_plugin_dir), *existing_plugins]))
-    plugin_env = SetEnvironmentVariable(name="GAZEBO_PLUGIN_PATH", value=plugin_path)
     gazebo_port = LaunchConfiguration("gazebo_port").perform(context)
-    master_env = SetEnvironmentVariable(name="GAZEBO_MASTER_URI", value=f"http://127.0.0.1:{gazebo_port}")
-    gazebo = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(str(gazebo_launch)),
-        launch_arguments={
-            "world": str(world_path),
-            "verbose": "true",
-            "gui": LaunchConfiguration("gui"),
-        }.items(),
+    master_uri = f"http://127.0.0.1:{gazebo_port}"
+    gazebo_env = {
+        "GAZEBO_PLUGIN_PATH": str(gazebo_plugin_dir),
+        "GAZEBO_MASTER_URI": master_uri,
+        "GAZEBO_MODEL_PATH": os.environ.get("GAZEBO_MODEL_PATH", "/usr/share/gazebo-11/models"),
+    }
+    gazebo = ExecuteProcess(
+        cmd=["gzserver", "--verbose", str(world_path),
+             "-s", "libgazebo_ros_init.so",
+             "-s", "libgazebo_ros_factory.so",
+             "-s", "libgazebo_ros_force_system.so"],
+        output="screen", additional_env=gazebo_env,
     )
 
     urdf_path = get_package_share_path("dobot_rviz") / "urdf" / "cr5_pgea.urdf"
@@ -123,7 +122,7 @@ def _setup(context):
     chain_arm = RegisterEventHandler(OnProcessExit(target_action=load_jsb, on_exit=[load_arm]))
     chain_gripper = RegisterEventHandler(OnProcessExit(target_action=load_arm, on_exit=[load_gripper]))
     chain_moveit = RegisterEventHandler(OnProcessExit(target_action=load_gripper, on_exit=[moveit_launch]))
-    return [plugin_env, master_env, robot_state_publisher, relay, simulation_adapter, delayed_gazebo,
+    return [robot_state_publisher, relay, simulation_adapter, delayed_gazebo,
             delayed_jsb, chain_arm, chain_gripper, chain_moveit]
 
 
