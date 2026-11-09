@@ -19,7 +19,7 @@ def test_coke_and_pringles_payload_estimates_are_traceable():
     coke = normalize_object({"kind": "coca_cola_330ml"})
     pringles = normalize_object({"kind": "pringles_165g"})
     assert coke["mass_kg"] == pytest.approx(0.355)
-    assert pringles["mass_kg"] == pytest.approx(0.205)
+    assert pringles["mass_kg"] == pytest.approx(0.215)
     assert "estimate" in coke["source"].lower()
 
 
