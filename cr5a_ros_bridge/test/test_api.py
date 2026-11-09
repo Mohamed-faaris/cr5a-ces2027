@@ -1169,7 +1169,10 @@ def test_set_payload_command_validates_and_forwards_controller_load():
             "load": 1.955, "x": -86.6, "y": 0.0, "z": -109.6,
         })
         assert response.status_code == 200
-        assert backend.robot_calls == [("SetPayload", {"load": 1.955, "x": -86.6, "y": 0.0, "z": -109.6})]
+        assert backend.robot_calls == [
+            ("RobotMode", {}),
+            ("SetPayload", {"load": 1.955, "x": -86.6, "y": 0.0, "z": -109.6}),
+        ]
 
 
 def test_set_payload_rejects_load_above_cr5_rating():
