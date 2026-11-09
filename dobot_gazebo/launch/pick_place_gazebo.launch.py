@@ -31,7 +31,10 @@ def _setup(context):
     gazebo_env = {
         "GAZEBO_PLUGIN_PATH": str(gazebo_plugin_dir),
         "GAZEBO_MASTER_URI": master_uri,
-        "GAZEBO_MODEL_PATH": os.environ.get("GAZEBO_MODEL_PATH", "/usr/share/gazebo-11/models"),
+        "GAZEBO_MODEL_PATH": os.pathsep.join([
+            str(get_package_share_path("dobot_rviz").parent),
+            os.environ.get("GAZEBO_MODEL_PATH", "/usr/share/gazebo-11/models"),
+        ]),
     }
     gazebo = ExecuteProcess(
         cmd=["gzserver", "--verbose", str(world_path),
