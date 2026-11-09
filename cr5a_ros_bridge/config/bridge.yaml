@@ -63,6 +63,14 @@ robot:
   allow_error_clear: false
 
 gripper:
+  # CAD-based estimate for the custom long fingers in cr5_pgea_moveit.urdf.
+  # 40 mm nominal actuator stroke + 45 mm finger mesh span = 85 mm envelope.
+  nominal_total_stroke_m: 0.040
+  finger_mesh_span_m: 0.045
+  wrap_envelope_m: 0.085
+  tool_mass_kg: 1.60
+  # Tool COM relative to tcp; verify Tool0 alignment and mounted hardware.
+  tool_com_tcp_m: [-0.086625, 0.0, -0.1095625]
   # User-edited profiles persist outside the repository. Override the default
   # ~/.config/cr5a_ros_bridge/gripper_profiles.yaml with
   # CR5A_GRIPPER_PROFILES_FILE (mount that path in containers).

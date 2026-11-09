@@ -3,7 +3,7 @@ import pytest
 
 from cr5a_ros_bridge.pick_place import (
     SHELF_PRESETS, build_task_waypoints, calculate_payload_model, estimate_payload_mass,
-    generate_grasp_candidates, generate_shelf_scene, normalize_object,
+    evaluate_gripper_fit, generate_grasp_candidates, generate_shelf_scene, normalize_object,
 )
 
 
@@ -108,3 +108,40 @@ def test_all_shelf_profiles_fit_coke_pringles_and_wood_box():
             for level in range(SHELF_PRESETS[profile]["levels"]):
                 scene = generate_shelf_scene(profile, level=level, object_dimensions_m=dimensions)
                 assert scene["fit"]["valid"] is True, (profile, level, dimensions, scene["fit"])
+
+
+def test_custom_pgea_finger_wrap_envelope_accepts_coke_and_pringles():
+    coke = evaluate_gripper_fit([0.066, 0.066, 0.122], strategy="pgea_finger_wrap")
+    pringles = evaluate_gripper_fit([0.075, 0.075, 0.240], strategy="pgea_finger_wrap")
+    assert coke["valid"] is True
+    assert pringles["valid"] is True
+    assert coke["nominal_total_stroke_m"] == pytest.approx(0.040)
+    assert pringles["estimated_wrap_envelope_m"] == pytest.approx(0.085)
+
+
+def test_parallel_jaw_does_not_inherit_extended_finger_envelope():
+    result = evaluate_gripper_fit([0.066, 0.066, 0.122], strategy="parallel_jaw")
+    assert result["valid"] is False
+
+
+def test_finger_wrap_envelope_still_checks_clearance_and_orientation():
+    too_wide = evaluate_gripper_fit([0.080, 0.080, 0.120], strategy="pgea_finger_wrap")
+    rotated_box = evaluate_gripper_fit([0.070, 0.020, 0.120], strategy="parallel_jaw", gripper_yaw_deg=90)
+    assert too_wide["valid"] is False
+    assert rotated_box["projected_object_width_m"] == pytest.approx(0.020)
+
+
+def test_grasp_yaw_is_relative_to_detected_object_orientation():
+    obj = normalize_object({"kind": "coca_cola_330ml", "yaw_deg": 35})
+    grasp = generate_grasp_candidates(obj, gripper_yaw_deg=20)[0]
+    assert grasp["gripper_yaw_relative_deg"] == pytest.approx(20)
+    assert grasp["gripper_yaw_deg"] == pytest.approx(55)
+
+
+def test_shelf_collision_geometry_and_pick_target_use_world_pose():
+    scene = generate_shelf_scene("standard", level=1, object_dimensions_m=[0.066, 0.066, 0.122],
+                                 origin_m=[0.55, 0.0, 0.0], yaw_rad=math.pi/2)
+    assert scene["pick_slot_center_m"] == pytest.approx([0.55, 0.0, 0.018 + 0.306 + 0.012 + 0.061])
+    left = next(item for item in scene["collision_objects"] if item["id"] == "shelf_left")
+    assert left["position_m"] == pytest.approx([0.55, -0.291, 0.45])
+    assert left["orientation_xyzw"][2] == pytest.approx(math.sin(math.pi/4))

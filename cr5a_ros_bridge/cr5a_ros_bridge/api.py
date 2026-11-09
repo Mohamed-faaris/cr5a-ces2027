@@ -25,8 +25,9 @@ from .gripper_profiles import (
 )
 from .direct_motion import (JOINT_NAMES, joint_path_samples, movj_target, movl_path_samples, movl_target)
 from .pick_place import (
-    SHELF_PRESETS, build_task_waypoints, generate_grasp_candidates,
-    generate_shelf_scene, normalize_object, quaternion_from_rpy,
+    SHELF_PRESETS, build_task_waypoints, calculate_payload_model,
+    evaluate_gripper_fit, generate_grasp_candidates, generate_shelf_scene,
+    normalize_object, quaternion_from_rpy,
     pose_relative_to, pose_compose,
 )
 from rclpy.parameter import Parameter
@@ -1874,6 +1875,8 @@ def create_app(backend, config):
             shelf_spec, frame_id=frame_id, level=level,
             clearance_m=clearance, object_dimensions_m=obj["dimensions_m"],
             platform=platform,
+            origin_m=payload.get("shelf_pose", {}).get("position_m", [0.55, 0.0, 0.0]),
+            yaw_rad=payload.get("shelf_pose", {}).get("yaw_rad", 1.57079632679),
         )
         if not scene_data["fit"]["valid"]:
             raise ValueError("Object does not fit selected shelf bay: " + "; ".join(scene_data["fit"]["reasons"]))
@@ -1931,21 +1934,52 @@ def create_app(backend, config):
                 "fit": scene_data["fit"], "grasp": grasp,
                 "waypoints": waypoints,
                 "place_surface_center_m": scene_data["place_surface_center_m"],
-                "gripper_nominal_opening_m": 0.04,
+                "gripper_nominal_total_stroke_m": float(config.get("gripper", {}).get("nominal_total_stroke_m", 0.040)),
+                "gripper_finger_mesh_span_m": float(config.get("gripper", {}).get("finger_mesh_span_m", 0.045)),
+                "gripper_wrap_envelope_m": float(config.get("gripper", {}).get("wrap_envelope_m", 0.085)),
                 "grasp_strategy": payload.get("grasp_strategy", "parallel_jaw"),
-                "gripper_width_feasible": (
-                    obj["kind"] == "coca_cola_330ml" and payload.get("grasp_strategy") == "pgea_hex_pocket"
-                ) or max(obj["dimensions_m"][0:2]) + float(payload.get("gripper_clearance_m", 0.006)) <= 0.04,
+                "gripper_fit": evaluate_gripper_fit(
+                    obj["dimensions_m"],
+                    strategy=payload.get("grasp_strategy", "parallel_jaw"),
+                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0) - math.degrees(obj["rpy_rad"][2]),
+                    clearance_m=payload.get("gripper_clearance_m", 0.006),
+                    nominal_stroke_m=config.get("gripper", {}).get("nominal_total_stroke_m", 0.040),
+                    finger_mesh_span_m=config.get("gripper", {}).get("finger_mesh_span_m", 0.045),
+                    wrap_envelope_m=config.get("gripper", {}).get("wrap_envelope_m", 0.085),
+                ),
+                "gripper_width_feasible": evaluate_gripper_fit(
+                    obj["dimensions_m"],
+                    strategy=payload.get("grasp_strategy", "parallel_jaw"),
+                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0) - math.degrees(obj["rpy_rad"][2]),
+                    clearance_m=payload.get("gripper_clearance_m", 0.006),
+                    nominal_stroke_m=config.get("gripper", {}).get("nominal_total_stroke_m", 0.040),
+                    finger_mesh_span_m=config.get("gripper", {}).get("finger_mesh_span_m", 0.045),
+                    wrap_envelope_m=config.get("gripper", {}).get("wrap_envelope_m", 0.085),
+                )["valid"],
             }
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     async def plan_pick_place_task(payload: dict):
         prepared = await prepare_pick_place_scene(payload)
-        if not prepared["gripper_width_feasible"] and payload.get("allow_infeasible_gripper", False) is not True:
-            return {**prepared, "status": "BLOCKED_GRIPPER_WIDTH",
-                    "error": "Object exceeds the configured PGEA 40 mm nominal opening; change end-effector or provide a validated grasp configuration."}
+        if not prepared["gripper_width_feasible"]:
+            strategy = prepared.get("grasp_strategy", "parallel_jaw")
+            return {**prepared, "status": "BLOCKED_GRIPPER_GEOMETRY",
+                    "error": f"Object plus clearance exceeds the PGEA envelope for grasp strategy {strategy!r}. Select an appropriate finger/contact strategy or end-effector."}
         obj = prepared["object"]
+        gripper_cfg = config.get("gripper", {})
+        try:
+            payload_model = calculate_payload_model(
+                obj["mass_kg"],
+                tool_mass_kg=payload.get("tool_mass_kg", gripper_cfg.get("tool_mass_kg", 1.6)),
+                object_com_m=payload.get("object_com_m", [0.0, 0.0, 0.0]),
+                tool_com_m=payload.get("tool_com_m", gripper_cfg.get("tool_com_tcp_m", [0.0, 0.0, 0.0])),
+                base_velocity_scaling=payload.get("max_velocity_scaling", 0.15),
+                base_acceleration_scaling=payload.get("max_acceleration_scaling", 0.15),
+                max_payload_kg=payload.get("max_payload_kg", config.get("robot", {}).get("max_payload_kg", 5.0)),
+            )
+        except ValueError as exc:
+            return {**prepared, "status": "BLOCKED_PAYLOAD_LIMIT", "error": str(exc)}
         waypoints = prepared["waypoints"]
         frame_id = prepared["frame_id"]
         link_name = config.get("moveit", {}).get("pick_place_tcp_link", "tcp")
@@ -2030,8 +2064,8 @@ def create_app(backend, config):
                     "position_tolerance_m": payload.get("position_tolerance_m", 0.003),
                     "orientation_tolerance_rad": payload.get("orientation_tolerance_rad", 0.03)},
                 "allowed_planning_time": payload.get("allowed_planning_time", 5.0),
-                "max_velocity_scaling": payload.get("max_velocity_scaling", 0.15),
-                "max_acceleration_scaling": payload.get("max_acceleration_scaling", 0.15),
+                "max_velocity_scaling": payload_model["max_velocity_scaling"],
+                "max_acceleration_scaling": payload_model["max_acceleration_scaling"],
                 "pipeline_id": payload.get("pipeline_id", "ompl"),
                 "planner_id": payload.get("planner_id", ""),
             }
@@ -2048,16 +2082,19 @@ def create_app(backend, config):
             plans.append({"name": waypoint["name"], **result})
             if result.get("status") != "SUCCEEDED":
                 return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
+                        "payload_model": payload_model,
                         "failed_stage": waypoint["name"], "error_code": result.get("error_code")}
             trajectory = result.get("trajectory") or {}
             joint = trajectory.get("joint_trajectory") or {}
             points = joint.get("points") or []
             if not points:
                 return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
+                        "payload_model": payload_model,
                         "failed_stage": waypoint["name"], "error": "MoveIt returned no joint trajectory points"}
             start_state = {"joint_names": joint.get("joint_names", []),
                            "positions_rad": points[-1].get("positions", [])}
         return {**prepared, "status": "PLANNED", "plans": plans,
+                "payload_model": payload_model,
                 "planning_time_total": sum(float(item.get("planning_time") or 0.0) for item in plans)}
 
     @app.post("/api/v1/motion-plans")

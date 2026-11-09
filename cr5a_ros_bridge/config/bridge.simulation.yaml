@@ -64,6 +64,12 @@ robot:
   allow_error_clear: true
 
 gripper:
+  # Estimated custom PGEA finger envelope from current CAD mesh dimensions.
+  nominal_total_stroke_m: 0.040
+  finger_mesh_span_m: 0.045
+  wrap_envelope_m: 0.085
+  tool_mass_kg: 1.60
+  tool_com_tcp_m: [-0.086625, 0.0, -0.1095625]
   allow_commands: true
   action_name: /gripper_action_controller/gripper_cmd
   status_service: /pgea_gripper/get_status

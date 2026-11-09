@@ -23,9 +23,14 @@ The `/pick-place` route is a reusable task workspace. It accepts synthetic prese
 
 These are estimates, not measured product masses. Replace with scale measurements before configuring a real robot payload.
 
-## Current gripper limitation
+## PGEA extended-finger grasp model
 
-The configured PGEA-100-40-W has 20 mm travel per finger (40 mm nominal total stroke). The 66 mm Coke can and 75 mm Pringles tube exceed this opening. The UI must not claim those objects are graspable with the current gripper. Use a different gripper or a separately validated grasp/contact design before allowing execution.
+The nominal PGEA-100-40-W mechanism stroke is 40 mm total. That is not the full contact envelope of the custom fingers in `dobot_rviz/urdf/cr5_pgea_moveit.urdf`: each finger mesh has a 45 mm lateral CAD span. The planner therefore exposes two distinct strategies:
+
+- `parallel_jaw`: 40 mm nominal total stroke, minus the selected clearance.
+- `pgea_finger_wrap`: preliminary 85 mm geometry envelope (40 mm stroke + 45 mm custom finger span), with 6 mm default object clearance.
+
+The 66 mm Coke can and 75 mm Pringles tube both pass the preliminary `pgea_finger_wrap` envelope check. This matches the operator's reported ability to grasp both with the modified fingers. The 85 mm envelope is a CAD-derived planning allowance, not a DH-Robotics rated grasp width. MoveIt checks robot/environment path collisions, but the grasp-stage object/finger contact pair is intentionally permitted; it does not prove normal force, friction, retention or resistance to slipping. Gazebo contact simulation and guarded physical validation are still required before motion execution.
 
 ## Vision adapter shape
 
@@ -48,8 +53,8 @@ A detection's frame must be transformed into `model.base_frame` before using it 
 
 ## Controller payload integration
 
-The task planner sends the estimated object mass with the task. The Dobot controller's `SetPayload(load,x,y,z)` command is separate from MoveIt geometric planning: `load` is in kg and the centre-of-mass offsets are in mm. The UI requires an explicit confirmation before calling the bridge `set-payload` command; the bridge keeps this disabled when `robot.allow_commands` is false and rejects loads above the configured CR5 5 kg limit. [Dobot SetPayload reference](https://github.com/Dobot-Edu/Dobot_CRtrainer/blob/main/scripts/dobot_api.py).
+The task planner combines the object mass with the tool assembly mass and COM, then applies a bounded timing derating to each MoveIt waypoint's velocity/acceleration scaling. This is a conservative timing heuristic, not a dynamics or torque model. The Dobot controller's `SetPayload(load,x,y,z)` command is separate: `load` is in kg and the eccentric COM offsets are in mm in the controller's default tool frame. The UI requires explicit operator confirmation before calling `set-payload`; the bridge keeps robot commands disabled by default and rejects loads above the configured CR5 5 kg limit. [Dobot SetPayload reference](https://github.com/Dobot-Edu/Dobot_CRtrainer/blob/main/scripts/dobot_api.py) and [Dobot load parameter guidance](https://docs.trossenrobotics.com/dobot_cr_cobots_docs/dobotstudiopro/settings/load_parameters.html).
 
 The current PGEA URDF sums to 1.60 kg for the tool assembly (0.30 kg extension plate + 0.40 kg connector + 0.60 kg gripper body + 0.15 kg per finger). DH-Robotics publishes 0.60 kg for the PGEA-100-40 assembly, so the URDF may double-count finger mass. The UI exposes the tool-mass override and requires the operator to verify the mounted assembly and controller Tool0 frame before applying a payload. The initial COM estimate is derived from the URDF assuming controller Tool0 matches the `tcp` link; it must be checked against the actual controller tool definition. [PGEA specifications](https://www.dobot-robots.com/ecosystem/accessories/dh-robotics-pgea-servo-gripper.html).
 
-The `tcp` link is the intended centre of the custom fork hex-pocket seat in the current PGEA URDF. The Coke-can grasp strategy uses this seat; its collision fit still needs simulation verification. The generic parallel-jaw strategy uses the 40 mm nominal opening check.
+The `tcp` link is the intended grasp target frame in the current PGEA URDF. Both cylindrical presets default to `pgea_finger_wrap`; boxes and custom objects default to `parallel_jaw`. The tool COM preset is transformed from current URDF inertial origins into the `tcp` frame, but the user must verify the robot's active Tool0 against that frame before applying the physical `SetPayload` command. The URDF mass sum (1.60 kg) remains an editable estimate because the gripper manufacturer's 0.60 kg product mass may already include the fingers.
