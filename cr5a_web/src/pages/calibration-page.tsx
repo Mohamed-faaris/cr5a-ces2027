@@ -10,7 +10,11 @@ import {RobotViewport} from "@/components/robot/robot-viewport";
 import {loadVisualizerViewPreferences,saveVisualizerViewPreferences} from "@/lib/visualizer-view-preferences";
 
 const CAMERA_INFO_TOPIC="/cr5/wrist_camera/color/camera_info";
-type GeneratedPose={id:string;label:string;position_m:[number,number,number];joints?:Record<string,number>};
+type GeneratedPose={
+  id:string;label:string;position_m:[number,number,number];orientation_xyzw?:[number,number,number,number];
+  pose_frame?:"camera"|"tcp";kind?:"sample"|"planned";tcp_position_m?:[number,number,number];joints?:Record<string,number>;
+  image_data_url?:string;image_path?:string;reprojection_rms_px?:number;tag_ids?:number[];
+};
 function parseGeneratedPoses(value:unknown):GeneratedPose[]{
   const rows=Array.isArray(value)?value:(value&&typeof value==="object"&&Array.isArray((value as {poses?:unknown}).poses)?(value as {poses:unknown[]}).poses:[]);
   if(!rows.length)throw new Error("Expected a non-empty array or an object with a poses array.");
@@ -19,7 +23,21 @@ function parseGeneratedPoses(value:unknown):GeneratedPose[]{
     const item=row as Record<string,unknown>;
     const p=item.position_m;
     if(!Array.isArray(p)||p.length!==3||!p.every(v=>typeof v==="number"&&Number.isFinite(v)))throw new Error("Pose "+(index+1)+" needs position_m: [x, y, z] in metres.");
-    return {id:String(item.id??("pose-"+(index+1))),label:String(item.label??("Pose "+(index+1))),position_m:p as [number,number,number],joints:item.joints&&typeof item.joints==="object"?item.joints as Record<string,number>:undefined};
+    const q=item.orientation_xyzw;
+    if(q!==undefined&&(!Array.isArray(q)||q.length!==4||!q.every(v=>typeof v==="number"&&Number.isFinite(v))))throw new Error("Pose "+(index+1)+" orientation_xyzw must be a finite [x, y, z, w] quaternion.");
+    const joints=item.joints&&typeof item.joints==="object"?item.joints as Record<string,number>:undefined;
+    const image=item.image_data_url;
+    return {
+      id:String(item.id??("pose-"+(index+1))),label:String(item.label??("Pose "+(index+1))),
+      position_m:p as [number,number,number],orientation_xyzw:q as [number,number,number,number]|undefined,
+      pose_frame:item.pose_frame==="camera"?"camera":item.pose_frame==="tcp"?"tcp":undefined,
+      kind:item.kind==="planned"?"planned":"sample",
+      tcp_position_m:Array.isArray(item.tcp_position_m)&&item.tcp_position_m.length===3?item.tcp_position_m as [number,number,number]:undefined,
+      joints,image_data_url:typeof image==="string"&&image.startsWith("data:image/")?image:undefined,
+      image_path:typeof item.image_path==="string"?item.image_path:undefined,
+      reprojection_rms_px:typeof item.reprojection_rms_px==="number"&&Number.isFinite(item.reprojection_rms_px)?item.reprojection_rms_px:undefined,
+      tag_ids:Array.isArray(item.tag_ids)?item.tag_ids.filter((v):v is number=>typeof v==="number"&&Number.isFinite(v)):undefined
+    };
   });
 }
 const SETTINGS_KEY="cr5a.calibration.settings.v1";
@@ -32,10 +50,10 @@ type Settings={
   settleVelocity:number; maxReprojection:number; sessionPath:string;
 };
 const defaults:Settings={
-  target:"apriltag",tagFamily:"tag36h11",dictionary:"DICT_5X5_100",
-  tagSize:40,rows:5,columns:5,spacing:10,cornersX:9,cornersY:6,
-  squareSize:24,gridFamily:"aruco",samples:25,candidates:60,
-  velocity:0.1,acceleration:0.1,settleVelocity:0.01,maxReprojection:0.8,
+  target:"gridboard",tagFamily:"tag36h11",dictionary:"DICT_5X5_1000",
+  tagSize:22,rows:17,columns:24,spacing:10,cornersX:9,cornersY:6,
+  squareSize:30,gridFamily:"charuco",samples:25,candidates:60,
+  velocity:0.1,acceleration:0.1,settleVelocity:0.01,maxReprojection:5.0,
   sessionPath:"~/cr5a_data/calibration/session001"
 };
 function loadSettings():Settings{
@@ -108,16 +126,46 @@ export function CalibrationPage(){
   const [showAllPoses,setShowAllPoses]=useState(true);
   const [showPoseMarkers,setShowPoseMarkers]=useState(true);
   const [poseImportError,setPoseImportError]=useState<string|null>(null);
+  const [datasetSummary,setDatasetSummary]=useState<Record<string,unknown>|null>(null);
+  const [datasetFrames,setDatasetFrames]=useState<{base?:string;tcp?:string;camera?:string}|null>(null);
+  const [datasetSource,setDatasetSource]=useState<string|null>(null);
+  const [datasetWarnings,setDatasetWarnings]=useState<string[]>([]);
+  const [loadingReference,setLoadingReference]=useState(false);
   const [viewPreferences,setViewPreferences]=useState(loadVisualizerViewPreferences);
   useEffect(()=>{saveVisualizerViewPreferences(viewPreferences);},[viewPreferences]);
-  const visiblePoseMarkers=showPoseMarkers?generatedPoses.filter(p=>showAllPoses||p.id===selectedPoseId).map(p=>({id:p.id,label:p.label,position:p.position_m,selected:p.id===selectedPoseId})):[];
+  const selectedPose=generatedPoses.find(p=>p.id===selectedPoseId)??generatedPoses[0]??null;
+  const visiblePoseMarkers=showPoseMarkers?generatedPoses.filter(p=>showAllPoses||p.id===selectedPoseId).map(p=>({
+    id:p.id,label:p.label,position:p.position_m,orientation:p.orientation_xyzw,frame_id:datasetFrames?.base,color:p.id!==selectedPoseId&&p.kind==="planned"?"#2563eb":undefined,selected:p.id===selectedPoseId
+  })):[];
+
+  const applyDatasetBundle=(raw:unknown)=>{
+    const bundle=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Record<string,unknown>:{};
+    const sampleRows=Array.isArray(raw)?raw:Array.isArray(bundle.poses)?bundle.poses:[];
+    const parsed=sampleRows.length?parseGeneratedPoses(sampleRows):[];
+    const plannedRows=Array.isArray(bundle.planned_poses)?bundle.planned_poses:[];
+    const planned=plannedRows.length?parseGeneratedPoses({poses:plannedRows}).map(p=>({...p,kind:"planned" as const})):[];
+    const combined=[...parsed.map(p=>({...p,kind:"sample" as const})),...planned];
+    if(!combined.length)throw new Error("No captured samples or Cartesian planned poses were found in this JSON.");
+    setGeneratedPoses(combined);
+    setSelectedPoseId(combined.find(p=>p.kind==="sample")?.id??combined[0]?.id??null);
+    setShowAllPoses(true);
+    setDatasetSource(typeof bundle.source_dataset==="string"?bundle.source_dataset:"Imported pose set");
+    setDatasetSummary(bundle.summary&&typeof bundle.summary==="object"?bundle.summary as Record<string,unknown>:null);
+    setDatasetFrames(bundle.frames&&typeof bundle.frames==="object"?bundle.frames as {base?:string;tcp?:string;camera?:string}:null);
+    setDatasetWarnings(Array.isArray(bundle.warnings)?bundle.warnings.filter((v):v is string=>typeof v==="string"):[]);
+    setPoseImportError(null);
+  };
 
   useEffect(()=>subscribeChannels(["topic:"+CAMERA_INFO_TOPIC]),[subscribeChannels]);
 
   const cameraInfo=(cameraMessage?.data??null) as Record<string,unknown>|null;
+  const cameraHeader=cameraInfo?.header as {frame_id?:string}|undefined;
+  const liveCameraFrame=String(cameraHeader?.frame_id??"");
   const width=Number(cameraInfo?.width??0);
   const height=Number(cameraInfo?.height??0);
   const cameraReady=Boolean(cameraInfo&&width>0&&height>0);
+  const cameraFrameMismatch=Boolean(datasetFrames?.camera&&liveCameraFrame&&datasetFrames.camera!==liveCameraFrame);
+  const baseFrameMismatch=Boolean(datasetFrames?.base&&model?.base_frame&&datasetFrames.base!==model.base_frame);
   const robotConnected=robotStatus?.is_connected===true;
   const robotStatusView=useMemo(()=>deriveRobotStatus({
     bridgeState,connected:robotStatus?.is_connected,enabled:robotStatus?.is_enable,
@@ -155,6 +203,18 @@ export function CalibrationPage(){
       setNotice({tone:"error",message:"Could not save setup: "+(error instanceof Error?error.message:String(error))});
     }
   };
+  const loadReferenceDataset=async()=>{
+    setLoadingReference(true);
+    try{
+      const response=await fetch("/calibration/reference-dataset-002.json");
+      if(!response.ok)throw new Error("Reference dataset request failed ("+response.status+").");
+      applyDatasetBundle(await response.json());
+    }catch(error){
+      setPoseImportError(error instanceof Error?error.message:String(error));
+    }finally{
+      setLoadingReference(false);
+    }
+  };
 
   return <div className="space-y-6">
     <div className="flex flex-wrap items-end justify-between gap-3">
@@ -166,26 +226,51 @@ export function CalibrationPage(){
       </div>
     </div>
     {notice&&<div className={notice.tone==="error"?"notice notice-error":notice.tone==="success"?"notice notice-success":"notice"}>{notice.message}</div>}
-    <div className="notice border-amber-200 bg-amber-50 text-amber-900"><div className="flex items-start gap-2"><Info size={15} className="mt-0.5 shrink-0"/><div><div className="text-xs font-semibold">Calibration engine not implemented yet</div><p className="mt-1 text-xs leading-5 text-amber-800">This page provides target setup, live readiness and saved browser configuration. Live image transport, target detection, collision insertion, automatic viewpoint generation, synchronized capture, solving and activation still require the ROS calibration backend. Start is intentionally disabled until those operations exist.</p></div></div></div>
+    <div className="notice border-amber-200 bg-amber-50 text-amber-900"><div className="flex items-start gap-2"><Info size={15} className="mt-0.5 shrink-0"/><div><div className="text-xs font-semibold">Reference dataset preview · live calibration backend pending</div><p className="mt-1 text-xs leading-5 text-amber-800">This page can preview converted datasets and pose/image samples. The existing ROS 2 capture, viewpoint-generation, MoveIt planning, validation and hand-eye solver workflows remain separate CLI tools; this page does not execute robot motion or apply a calibration transform.</p></div></div></div>
 
     <section className="panel overflow-hidden">
-      <div className="panel-header"><div className="flex items-center gap-2"><Crosshair size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D calibration workspace</span><span className="text-xs text-zinc-400">{generatedPoses.length} generated poses</span></div><span className="text-[10px] text-zinc-400">{model?.base_frame??"dummy_link"}</span></div>
+      <div className="panel-header"><div className="flex items-center gap-2"><Crosshair size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D calibration workspace</span><span className="text-xs text-zinc-400">{generatedPoses.length} pose samples</span></div><span className="text-[10px] text-zinc-400">{model?.base_frame??"dummy_link"}</span></div>
       <div className="grid items-start xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="min-w-0">
           <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} loading={modelLoading} error={modelError??sceneError}
             viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
             objectLabels={viewPreferences.objectLabels} disabledObjects={{}} hiddenObjects={viewPreferences.hiddenObjects} poseMarkers={visiblePoseMarkers}/>
-          <div className="flex flex-wrap items-center gap-4 border-t border-zinc-100 px-3 py-2 text-[10px] text-zinc-500"><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-teal-600"/>Generated viewpoint</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-orange-500"/>Selected viewpoint</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+          <div className="flex flex-wrap items-center gap-4 border-t border-zinc-100 px-3 py-2 text-[10px] text-zinc-500"><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-teal-600"/>Captured sample</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-blue-600"/>Generated plan</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-orange-500"/>Selected pose</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         </div>
         <aside className="space-y-3 border-t border-zinc-100 p-3 xl:border-l xl:border-t-0">
-          <div><div className="text-xs font-semibold text-zinc-800">Generated viewpoints</div><p className="mt-1 text-[10px] leading-4 text-zinc-500">Import a generated pose set to inspect every target position in the robot base frame. Positions must be in metres.</p></div>
-          <label className="flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50"><Upload size={13}/> Import pose JSON<input type="file" accept=".json,application/json" className="hidden" onChange={async event=>{const file=event.target.files?.[0];if(!file)return;try{const parsed=parseGeneratedPoses(JSON.parse(await file.text()));setGeneratedPoses(parsed);setSelectedPoseId(parsed[0]?.id??null);setShowAllPoses(true);setPoseImportError(null);}catch(error){setPoseImportError(error instanceof Error?error.message:String(error));}finally{event.target.value="";}}}/></label>
+          <div><div className="text-xs font-semibold text-zinc-800">Reference samples and viewpoints</div><p className="mt-1 text-[10px] leading-4 text-zinc-500">Import a converted legacy dataset to inspect its camera/TCP poses, orientations and captured D415 frames in the robot base frame.</p></div>
+          <button type="button" onClick={loadReferenceDataset} disabled={loadingReference} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border border-zinc-900 bg-zinc-900 px-3 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-60">{loadingReference?<RefreshCw size={13} className="animate-spin"/>:<Eye size={13}/>} {loadingReference?"Loading reference dataset…":"Load bundled reference run 002 · 34 images + 6 targets"}</button>
+          <label className="flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50"><Upload size={13}/> Import another dataset / pose JSON<input type="file" accept=".json,application/json" className="hidden" onChange={async event=>{const file=event.target.files?.[0];if(!file)return;try{applyDatasetBundle(JSON.parse(await file.text()));}catch(error){setPoseImportError(error instanceof Error?error.message:String(error));}finally{event.target.value="";}}}/></label>
           {poseImportError&&<div className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-[10px] text-red-700">{poseImportError}</div>}
+          {datasetSummary&&<div className="rounded-md border border-zinc-200 bg-zinc-50 p-2.5">
+            <div className="text-[11px] font-semibold text-zinc-800">{datasetSource??"Imported dataset"}</div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
+              <div><div className="text-zinc-400">Samples</div><div className="font-mono font-semibold text-zinc-700">{String(datasetSummary.sample_count??generatedPoses.filter(p=>p.kind!=="planned").length)}</div></div>
+              <div><div className="text-zinc-400">Planned poses</div><div className="font-mono font-semibold text-zinc-700">{String(datasetSummary.planned_pose_count??generatedPoses.filter(p=>p.kind==="planned").length)}</div></div>
+              <div><div className="text-zinc-400">Board RMS</div><div className="font-mono font-semibold text-zinc-700">{typeof datasetSummary.mean_board_reprojection_rms_px==="number"?datasetSummary.mean_board_reprojection_rms_px.toFixed(2)+" px":"—"}</div></div>
+              <div><div className="text-zinc-400">Closure translation</div><div className="font-mono font-semibold text-zinc-700">{typeof datasetSummary.translation_rms_mm==="number"?datasetSummary.translation_rms_mm.toFixed(1)+" mm":"—"}</div></div>
+              <div><div className="text-zinc-400">Closure rotation</div><div className="font-mono font-semibold text-zinc-700">{typeof datasetSummary.rotation_rms_deg==="number"?datasetSummary.rotation_rms_deg.toFixed(2)+"°":"—"}</div></div>
+            </div>
+            <div className="mt-2 text-[9px] leading-4 text-zinc-500">Solver: {String(datasetSummary.algorithm??"not recorded")}. Best closure methods: translation {String(datasetSummary.best_translation_rms_algorithm??"—")}, rotation {String(datasetSummary.best_rotation_rms_algorithm??"—")}. These are consistency checks, not ground-truth accuracy.</div>
+            {datasetFrames&&<div className="mt-2 border-t border-zinc-200 pt-2 text-[9px] leading-4 text-zinc-500">Frames: {datasetFrames.base??"?"} → {datasetFrames.tcp??"?"} → {datasetFrames.camera??"?"}</div>}
+            {baseFrameMismatch&&<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-800">Reference poses use {datasetFrames?.base}; the live MoveIt model uses {model?.base_frame}. The viewport applies /tf_static when available and hides the markers if no transform exists.</div>}
+            {cameraFrameMismatch&&<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-800">Imported camera frame differs from live CameraInfo ({liveCameraFrame}). The imported poses are reference data only; verify the camera mounting and frame mapping before reuse.</div>}
+          </div>}
+          {selectedPose&&<div className="overflow-hidden rounded-md border border-zinc-200">
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-2"><span className="text-[10px] font-semibold text-zinc-700">{selectedPose.kind==="planned"?"Generated target pose":"Captured camera frame"}</span><span className="text-[9px] text-zinc-400">{selectedPose.label}</span></div>
+            {selectedPose.image_data_url?<img src={selectedPose.image_data_url} alt={"D415 capture "+selectedPose.label} className="block aspect-video w-full bg-zinc-950 object-contain"/>:<div className="flex aspect-video items-center justify-center bg-zinc-950 px-3 text-center text-[10px] text-zinc-500">{selectedPose.image_path??(selectedPose.kind==="planned"?"Planned TCP target pose — no captured image":"No embedded image thumbnail")}</div>}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-2 text-[9px] text-zinc-500">
+              <span>{selectedPose.pose_frame==="camera"?"Camera optical pose":selectedPose.pose_frame==="tcp"?"TCP pose":"Imported pose"}</span>
+              <span>{typeof selectedPose.reprojection_rms_px==="number"?"Board RMS "+selectedPose.reprojection_rms_px.toFixed(2)+" px":"No detection RMS"}</span>
+            </div>
+            {selectedPose.tag_ids&&<div className="px-2.5 pb-2 text-[9px] text-zinc-400">{selectedPose.tag_ids.length} detected markers / IDs</div>}
+          </div>}
+          {datasetWarnings.length>0&&<div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-[9px] leading-4 text-amber-800">{datasetWarnings.slice(0,3).join(" · ")}{datasetWarnings.length>3?" · +"+(datasetWarnings.length-3)+" more":""}</div>}
           <div className="flex items-center justify-between gap-2"><button type="button" onClick={()=>setShowAllPoses(true)} disabled={!generatedPoses.length} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Show all</button><button type="button" onClick={()=>setShowAllPoses(false)} disabled={!generatedPoses.length||!selectedPoseId} className={"rounded-md px-2.5 py-1.5 text-[10px] font-medium "+(!showAllPoses?"bg-zinc-900 text-white":"border border-zinc-200 text-zinc-600 disabled:opacity-40")}>Selected only</button><button type="button" onClick={()=>setShowPoseMarkers(value=>!value)} className="rounded-md border border-zinc-200 p-1.5 text-zinc-600" title={showPoseMarkers?"Hide pose markers":"Show pose markers"}>{showPoseMarkers?<Eye size={13}/>:<EyeOff size={13}/>}</button></div>
           <div className="max-h-64 space-y-1 overflow-y-auto">
-            {generatedPoses.length===0?<div className="rounded-md border border-dashed border-zinc-200 px-3 py-5 text-center"><Crosshair size={18} className="mx-auto mb-2 text-zinc-300"/><div className="text-[11px] font-medium text-zinc-600">No generated poses loaded</div><div className="mt-1 text-[10px] leading-4 text-zinc-400">The viewpoint-generation backend is not implemented yet. Import a pose JSON file to preview a generated set.</div></div>:generatedPoses.map((pose,index)=><button key={pose.id} type="button" onClick={()=>{setSelectedPoseId(pose.id);setShowAllPoses(false);}} className={"w-full rounded-md border px-2.5 py-2 text-left "+(selectedPoseId===pose.id?"border-orange-300 bg-orange-50":"border-zinc-100 hover:bg-zinc-50")}><div className="flex items-center justify-between gap-2"><span className="truncate text-[11px] font-medium text-zinc-800">{index+1}. {pose.label}</span><span className="shrink-0 text-[9px] text-zinc-400">{pose.joints?Object.keys(pose.joints).length+" joints":"position only"}</span></div><div className="mt-1 font-mono text-[9px] tabular-nums text-zinc-500">[{pose.position_m.map(v=>v.toFixed(3)).join(", ")}] m</div></button>)}
+            {generatedPoses.length===0?<div className="rounded-md border border-dashed border-zinc-200 px-3 py-5 text-center"><Crosshair size={18} className="mx-auto mb-2 text-zinc-300"/><div className="text-[11px] font-medium text-zinc-600">No pose samples loaded</div><div className="mt-1 text-[10px] leading-4 text-zinc-400">The web page does not generate or capture poses yet. Import a converted dataset bundle to preview reference samples.</div></div>:generatedPoses.map((pose,index)=><button key={pose.id} type="button" onClick={()=>{setSelectedPoseId(pose.id);setShowAllPoses(false);}} className={"w-full rounded-md border px-2.5 py-2 text-left "+(selectedPoseId===pose.id?"border-orange-300 bg-orange-50":"border-zinc-100 hover:bg-zinc-50")}><div className="flex items-center justify-between gap-2"><span className="truncate text-[11px] font-medium text-zinc-800">{index+1}. {pose.label}</span><span className="shrink-0 text-[9px] text-zinc-400">{pose.kind==="planned"?"planned":pose.pose_frame==="camera"?"camera":pose.pose_frame==="tcp"?"TCP":pose.joints?Object.keys(pose.joints).length+" joints":"position"}</span></div><div className="mt-1 font-mono text-[9px] tabular-nums text-zinc-500">[{pose.position_m.map(v=>v.toFixed(3)).join(", ")}] m{typeof pose.reprojection_rms_px==="number"?" · "+pose.reprojection_rms_px.toFixed(2)+" px RMS":""}</div></button>)}
           </div>
-          {generatedPoses.length>0&&<div className="flex items-center justify-between border-t border-zinc-100 pt-2 text-[10px] text-zinc-400"><span>{visiblePoseMarkers.length} / {generatedPoses.length} visible</span><button type="button" onClick={()=>{setGeneratedPoses([]);setSelectedPoseId(null);setShowAllPoses(true);}} className="font-medium text-zinc-500 hover:text-red-700">Clear set</button></div>}
+          {generatedPoses.length>0&&<div className="flex items-center justify-between border-t border-zinc-100 pt-2 text-[10px] text-zinc-400"><span>{visiblePoseMarkers.length} / {generatedPoses.length} visible</span><button type="button" onClick={()=>{setGeneratedPoses([]);setSelectedPoseId(null);setShowAllPoses(true);setDatasetSummary(null);setDatasetFrames(null);setDatasetSource(null);setDatasetWarnings([]);}} className="font-medium text-zinc-500 hover:text-red-700">Clear set</button></div>}
         </aside>
       </div>
     </section>
@@ -250,19 +335,24 @@ export function CalibrationPage(){
             {settings.target==="gridboard"&&<Section title="Grid board geometry" description="Select the board family and its printed layout.">
               <div className="grid gap-3 sm:grid-cols-2">
                 <SelectField label="Board family" value={settings.gridFamily} options={["aruco","apriltag","charuco"]} onChange={value=>update("gridFamily",value as Settings["gridFamily"])}/>
-                {settings.gridFamily==="charuco"&&<SelectField label="Dictionary" value={settings.dictionary} options={["DICT_4X4_50","DICT_5X5_100","DICT_6X6_250"]} onChange={value=>update("dictionary",value)}/>}
-                <Field label={settings.gridFamily==="charuco"?"Squares X":"Rows"} value={settings.rows} min={2} max={30} onChange={value=>update("rows",value)}/>
-                <Field label={settings.gridFamily==="charuco"?"Squares Y":"Columns"} value={settings.columns} min={2} max={30} onChange={value=>update("columns",value)}/>
-                <Field label={settings.gridFamily==="charuco"?"Square size":"Marker size"} value={settings.squareSize} unit="mm" step={0.5} onChange={value=>update("squareSize",value)}/>
-                <Field label="Marker spacing / size" value={settings.spacing} unit="mm" step={0.5} onChange={value=>update("spacing",value)}/>
+                {settings.gridFamily==="charuco"&&<SelectField label="Dictionary" value={settings.dictionary} options={["DICT_4X4_50","DICT_5X5_100","DICT_5X5_1000","DICT_6X6_250"]} onChange={value=>update("dictionary",value)}/>}
+                <Field label={settings.gridFamily==="charuco"?"Squares X":"Rows"} value={settings.gridFamily==="charuco"?settings.columns:settings.rows} min={2} max={30} onChange={value=>update(settings.gridFamily==="charuco"?"columns":"rows",value)}/>
+                <Field label={settings.gridFamily==="charuco"?"Squares Y":"Columns"} value={settings.gridFamily==="charuco"?settings.rows:settings.columns} min={2} max={30} onChange={value=>update(settings.gridFamily==="charuco"?"rows":"columns",value)}/>
+                {settings.gridFamily==="charuco"?<>
+                  <Field label="Square size" value={settings.squareSize} unit="mm" step={0.5} onChange={value=>update("squareSize",value)}/>
+                  <Field label="Marker size" value={settings.tagSize} unit="mm" step={0.5} onChange={value=>update("tagSize",value)}/>
+                </>:<>
+                  <Field label="Marker size" value={settings.tagSize} unit="mm" step={0.5} onChange={value=>update("tagSize",value)}/>
+                  <Field label="Marker pitch" value={settings.spacing} unit="mm" step={0.5} onChange={value=>update("spacing",value)}/>
+                </>}
               </div>
             </Section>}
-            <div className="mt-4 rounded-md bg-zinc-50 px-3 py-2.5 text-[11px] leading-5 text-zinc-500">The board must have known physical dimensions. It will be detected from one complete frame before its collision geometry is added to MoveIt.</div>
+            <div className="mt-4 rounded-md bg-zinc-50 px-3 py-2.5 text-[11px] leading-5 text-zinc-500">The board must have known physical dimensions. The legacy workflow detects the board, estimates its pose, then uses it to generate camera viewpoints and validate candidate poses.</div>
           </div>
         </section>
 
         <section className="panel">
-          <div className="panel-header"><div><div className="text-sm font-semibold">Automatic viewpoint collection</div><div className="mt-0.5 text-xs text-zinc-500">Generate diverse poses automatically; no manual pose list.</div></div><Sparkles size={16} className="text-zinc-400"/></div>
+          <div className="panel-header"><div><div className="text-sm font-semibold">Viewpoint generation settings</div><div className="mt-0.5 text-xs text-zinc-500">Matches the reference ROS generator parameters; execution stays in the existing CLI workflow.</div></div><Sparkles size={16} className="text-zinc-400"/></div>
           <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Accepted samples" value={settings.samples} min={8} max={100} onChange={value=>update("samples",value)}/>
             <Field label="Candidate limit" value={settings.candidates} min={10} max={300} onChange={value=>update("candidates",value)}/>
