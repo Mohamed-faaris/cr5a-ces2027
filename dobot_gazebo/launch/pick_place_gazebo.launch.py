@@ -53,6 +53,14 @@ def _setup(context):
     )
     if replacements != 1:
         raise RuntimeError("PGEA URDF is missing the gazebo_ros2_control parameters element")
+    if "<robot_param>" not in robot_description_xml:
+        robot_description_xml = robot_description_xml.replace(
+            "<robot_param_node>",
+            "<robot_param>robot_description</robot_param><robot_param_node>",
+            1,
+        )
+    runtime_urdf = Path("/tmp/cr5a_pgea_gazebo.urdf")
+    runtime_urdf.write_text(robot_description_xml, encoding="utf-8")
 
     robot_state_publisher = Node(
         package="robot_state_publisher", executable="robot_state_publisher",
@@ -67,7 +75,7 @@ def _setup(context):
     )
     spawn_robot = Node(
         package="gazebo_ros", executable="spawn_entity.py", name="spawn_pgea_robot",
-        output="screen", arguments=["-topic", "robot_description", "-entity", "cr5_pgea"],
+        output="screen", arguments=["-file", str(runtime_urdf), "-entity", "cr5_pgea"],
     )
 
     load_jsb = ExecuteProcess(
