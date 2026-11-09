@@ -1,141 +1,144 @@
-import { useMemo, useState } from "react";
-import { Box, ChevronDown, ClipboardCopy, Layers3, Package, RotateCcw, Ruler, ScanLine, ShieldCheck, Target } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { useRobotStore } from "@/store/robot-store";
-import { useRobotSocket } from "@/lib/socket";
+import {useMemo,useState} from "react";
+import {ArrowDownToLine,ArrowUpFromLine,Box,CheckCircle2,ClipboardPaste,Layers3,Play,RefreshCw,Settings2} from "lucide-react";
+import {Button} from "@/components/ui/button";
+import {useRobotSocket} from "@/lib/socket";
+import {useRobotStore} from "@/store/robot-store";
 
-type ObjectKind = "coke" | "pringles" | "wood_box" | "custom";
-type InputSource = "synthetic" | "vision" | "manual";
-type Dimensions = { x: number; y: number; z: number };
-type Workpiece = { kind: ObjectKind; label: string; shape: "cylinder" | "box" | "sphere"; dimensions: Dimensions; massKg: number; massSource: string; densityKgM3?: number };
+type Vec3={x:number;y:number;z:number};
+type ObjectKind="coca_cola_can"|"pringles_can"|"wood_box";
+type InputSource="synthetic"|"vision";
+type SceneItem={id:string;shape:"box"|"cylinder";position_m:[number,number,number];dimensions_m?:[number,number,number];height_m?:number;radius_m?:number;role:string};
 
-const OBJECTS: Record<Exclude<ObjectKind,"custom">,Workpiece> = {
-  coke: { kind:"coke", label:"Coca-Cola can · 330 ml", shape:"cylinder", dimensions:{x:66,y:66,z:122}, massKg:0.355, massSource:"Estimated filled 330 ml can: ~342 g beverage + ~13 g can" },
-  pringles: { kind:"pringles", label:"Pringles tube · 165 g", shape:"cylinder", dimensions:{x:75,y:75,z:240}, massKg:0.215, massSource:"165 g contents + approximately 50 g empty tube / lid" },
-  wood_box: { kind:"wood_box", label:"Wooden box · configurable", shape:"box", dimensions:{x:120,y:90,z:80}, massKg:0.5616, massSource:"Estimated from 120×90×80 mm solid volume × 650 kg/m³", densityKgM3:650 },
+const OBJECTS:Record<ObjectKind,{label:string;shape:"cylinder"|"box";dimensions:[number,number,number];massKg:number;massBasis:string;graspWidth:number}>={
+  coca_cola_can:{label:"Coca-Cola 330 ml can",shape:"cylinder",dimensions:[0.066,0.066,0.122],massKg:0.343,massBasis:"330 g drink + 13 g empty can (estimate)",graspWidth:0.066},
+  pringles_can:{label:"Pringles 165 g tube",shape:"cylinder",dimensions:[0.076,0.076,0.255],massKg:0.212,massBasis:"165 g contents + approx. 47 g tube/lid (estimate)",graspWidth:0.076},
+  wood_box:{label:"Wood box",shape:"box",dimensions:[0.080,0.060,0.120],massKg:0.0,massBasis:"Calculated from pine density × volume",graspWidth:0.060}
 };
-
-const SHELVES = [
-  { id:"compact", label:"Compact", width:420, height:620, depth:300, levels:2, board:18 },
-  { id:"standard", label:"Standard", width:600, height:900, depth:400, levels:3, board:18 },
-  { id:"wide", label:"Wide", width:900, height:1200, depth:450, levels:4, board:20 },
-  { id:"deep", label:"Deep storage", width:700, height:1000, depth:600, levels:3, board:22 },
-] as const;
-
-const number = (value: number, digits=1) => Number.isFinite(value) ? value.toFixed(digits) : "—";
-
-function Field({ label, value, unit, min=0, max=2000, step=1, onChange, disabled=false }: {label:string;value:number;unit:string;min?:number;max?:number;step?:number;onChange:(value:number)=>void;disabled?:boolean}) {
-  return <label className="block min-w-0"><span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{label}</span><span className="flex h-9 items-center rounded-md border border-zinc-200 bg-white"><input className="min-w-0 flex-1 bg-transparent px-2.5 font-mono text-sm outline-none" type="number" min={min} max={max} step={step} value={value} disabled={disabled} onChange={e=>onChange(Number(e.target.value))}/><span className="px-2 text-[10px] text-zinc-400">{unit}</span></span></label>;
+const SHELF_PRESETS={compact:{label:"Compact",width:0.42,depth:0.32,height:0.38},standard:{label:"Standard",width:0.60,depth:0.42,height:0.50},wide:{label:"Wide",width:0.80,depth:0.55,height:0.60}} as const;
+const num=(v:number)=>Number(v.toFixed(3));
+const quatFromRpy=(roll:number,pitch:number,yaw:number):[number,number,number,number]=>{
+  const r=roll*Math.PI/360,p=pitch*Math.PI/360,y=yaw*Math.PI/360;
+  const cr=Math.cos(r),sr=Math.sin(r),cp=Math.cos(p),sp=Math.sin(p),cy=Math.cos(y),sy=Math.sin(y);
+  return [sr*cp*cy-cr*sp*sy,cr*sp*cy+sr*cp*sy,cr*cp*sy-sr*sp*cy,cr*cp*cy+sr*sp*sy];
+};
+function Field({label,value,onChange,step="0.01",unit}:{label:string;value:number;onChange:(v:number)=>void;step?:string;unit?:string}){
+  return <label className="block min-w-0"><span className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-zinc-500">{label}</span><div className="flex h-9 items-center rounded-md border border-zinc-200 bg-white"><input type="number" step={step} value={value} onChange={e=>onChange(Number(e.target.value))} className="min-w-0 flex-1 bg-transparent px-2.5 font-mono text-sm outline-none"/><span className="px-2 text-[10px] text-zinc-400">{unit}</span></div></label>;
 }
 
-function ShelfPreview({ shelf, object, slot, clearance, platform, approach }: {shelf:typeof SHELVES[number];object:Workpiece;slot:number;clearance:number;platform:{x:number;y:number;z:number};approach:number}) {
-  const scale = 430 / shelf.width;
-  const wall = shelf.board * scale;
-  const w = shelf.width * scale;
-  const h = shelf.height * scale;
-  const floorY = 268;
-  const shelfTop = floorY - h;
-  const bayH = (h - wall * (shelf.levels + 1)) / shelf.levels;
-  const bayW = w - wall * 2;
-  const itemW = Math.min(bayW * .64, Math.max(20, object.dimensions.x * scale));
-  const itemH = Math.min(bayH * .7, Math.max(18, object.dimensions.z * scale));
-  const itemX = 24 + wall + (bayW-itemW)/2;
-  const itemY = floorY - wall - slot * (bayH + wall) - itemH;
-  const innerX = 24 + wall;
-  const fit = object.dimensions.x + 2*clearance <= shelf.width - 2*shelf.board && object.dimensions.z + 2*clearance <= (shelf.height - shelf.board*(shelf.levels+1))/shelf.levels;
-  const destX = 510 + Math.min(100, platform.x * .12);
-  const destY = floorY - Math.min(105, platform.z * .25);
-  return <svg viewBox="0 0 680 310" className="h-full w-full" role="img" aria-label="Side view of generated shelf, selected object and destination platform">
-    <defs><pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#e4e4e7" strokeWidth=".7"/></pattern></defs>
-    <rect width="680" height="310" fill="url(#grid)"/>
-    <path d={`M ${innerX} ${shelfTop} V ${floorY} M ${innerX+bayW} ${shelfTop} V ${floorY} M ${innerX} ${shelfTop} H ${innerX+bayW}`} stroke="#52525b" strokeWidth={wall*1.5} fill="none"/>
-    {Array.from({length:shelf.levels+1},(_,i)=>{const y=floorY-wall-i*(bayH+wall);return <rect key={i} x={innerX-wall} y={y} width={bayW+wall*2} height={wall} fill="#a1a1aa" stroke="#71717a" strokeWidth="1"/>;})}
-    <rect x={itemX} y={itemY} width={itemW} height={itemH} rx={object.shape==="cylinder"?itemW/2:2} fill="#ef4444" stroke="#991b1b" strokeWidth="1.5"/>
-    <path d={`M ${itemX+itemW/2} ${itemY-15} V ${itemY-3}`} stroke="#2563eb" strokeWidth="2"/><path d={`M ${itemX+itemW/2-5} ${itemY-9} L ${itemX+itemW/2} ${itemY-3} L ${itemX+itemW/2+5} ${itemY-9}`} fill="none" stroke="#2563eb" strokeWidth="2"/>
-    <text x={innerX} y={shelfTop-10} fontSize="10" fill="#52525b">SHELF · {shelf.width} × {shelf.height} × {shelf.depth} mm</text>
-    <text x={innerX+bayW/2} y={itemY+itemH+13} fontSize="9" fill="#52525b" textAnchor="middle">Pick slot {slot+1}</text>
-    <rect x="495" y={floorY-9} width="150" height="9" fill="#71717a"/><rect x="520" y={destY} width="92" height={Math.max(15,itemH*.72)} rx="3" fill="#0ea5e9" fillOpacity=".85" stroke="#0369a1"/>
-    <path d={`M ${itemX+itemW/2} ${itemY-18} C 350 65, 440 80, ${destX+46} ${destY-22}`} fill="none" stroke="#2563eb" strokeWidth="2" strokeDasharray="5 4"/>
-    <text x="570" y={floorY+17} textAnchor="middle" fontSize="10" fill="#52525b">PLACE PLATFORM</text>
-    <text x="570" y={floorY+30} textAnchor="middle" fontSize="9" fill="#71717a">{platform.x} × {platform.y} mm</text>
-    <text x="24" y="298" fontSize="9" fill={fit?"#15803d":"#b91c1c"}>{fit?"DIMENSION CHECK: FITS WITH CURRENT CLEARANCE":"DIMENSION CHECK: OBJECT DOES NOT FIT THIS BAY"}</text>
-    <text x="656" y="298" fontSize="9" fill="#71717a" textAnchor="end">Approach {approach}°</text>
-  </svg>;
-}
-
-export function PickPlacePage() {
-  const model = useRobotStore(s=>s.model);
-  const bridgeState = useRobotStore(s=>s.bridgeState);
-  const simulation = useRobotStore(s=>s.simulation);
-  const [source,setSource]=useState<InputSource>("synthetic");
-  const [objectKind,setObjectKind]=useState<ObjectKind>("coke");
-  const [custom,setCustom]=useState<Workpiece>({kind:"custom",label:"Custom object",shape:"box",dimensions:{x:100,y:80,z:80},massKg:.5,massSource:"User supplied"});
-  const [shelfId,setShelfId]=useState<string>("standard");
-  const [slot,setSlot]=useState(1);
-  const [clearance,setClearance]=useState(12);
-  const [gripperAngle,setGripperAngle]=useState(0);
-  const [approachAngle,setApproachAngle]=useState(0);
-  const [approachDistance,setApproachDistance]=useState(80);
-  const [tcpOffset,setTcpOffset]=useState(0);
-  const [platform,setPlatform]=useState({x:300,y:240,z:20});
-  const [pick,setPick]=useState({x:0,y:0,z:400});
-  const [density,setDensity]=useState(650);
-  const [planState,setPlanState]=useState<"idle"|"ready"|"blocked">("idle");
-  const [planResult,setPlanResult]=useState<any>(null);
-  const [allowInfeasibleGripper,setAllowInfeasibleGripper]=useState(false);
+export function PickPlacePage(){
   const {request}=useRobotSocket();
-  const [visionJson,setVisionJson]=useState('{\n  "frame_id": "dummy_link",\n  "objects": [{ "id": "vision_object_1", "class": "can", "shape": "cylinder", "centroid_m": [0.30, 0.00, 0.10], "dimensions_m": [0.066, 0.066, 0.122], "yaw_deg": 0, "mass_kg": 0.355 }]\n}');
-  const shelf=SHELVES.find(item=>item.id===shelfId)??SHELVES[1];
-  const object=objectKind==="custom"?custom:OBJECTS[objectKind];
-  const massKg=objectKind==="wood_box"?object.dimensions.x*object.dimensions.y*object.dimensions.z/1e9*density:object.massKg;
-  const generatedPick={x:0,y:0,z:shelf.board+slot*(bayHeight+shelf.board)+clearance+object.dimensions.z/2};
-  const activePick=source==="synthetic"?generatedPick:pick;
-  const bayWidth=shelf.width-2*shelf.board;
-  const bayHeight=(shelf.height-shelf.board*(shelf.levels+1))/shelf.levels;
-  const fit=object.dimensions.x+2*clearance<=bayWidth&&object.dimensions.y+2*clearance<=shelf.depth&&object.dimensions.z+2*clearance<=bayHeight;
-  const grasp=useMemo(()=>({tcp:{x:activePick.x,y:activePick.y,z:activePick.z+tcpOffset},yaw:gripperAngle,approach:approachAngle,distance:approachDistance}),[pick,object,gripperAngle,approachAngle,approachDistance,tcpOffset]);
-  const checks=[{label:"Object fits selected shelf bay",ok:fit,detail:`Bay ${bayWidth} × ${shelf.depth} × ${Math.round(bayHeight)} mm`},{label:"Approach clearance",ok:approachDistance>=Math.max(40,object.dimensions.z*.25),detail:`${approachDistance} mm approach distance`},{label:"Gripper width",ok:object.dimensions.x<=40,detail:`${object.dimensions.x} mm object width; configured PGEA-100-40-W opening stroke is 40 mm`},{label:"Robot model available",ok:!!model,detail:model?`${model.group_name} · ${model.base_frame} → ${model.end_effector_link}`:"Waiting for bridge model"}];
-  const allValid=checks.filter(item=>item.label!=="Gripper width").every(item=>item.ok);
-  const runPlan=async()=>{
-    if(!model||!allValid)return;
-    setPlanState("idle");setPlanResult({status:"PLANNING"});
-    const kind=objectKind==="coke"?"coca_cola_330ml":objectKind==="pringles"?"pringles_165g":objectKind==="wood_box"?"wood_box":"custom";
-    const objectPayload:Record<string,unknown>={
-      id:"pick_place_object",kind,label:object.label,shape:object.shape,
-      dimensions_m:[object.dimensions.x,object.dimensions.y,object.dimensions.z].map(v=>v/1000),
-      centroid_m:[activePick.x,activePick.y,activePick.z].map(v=>v/1000),rpy_rad:[0,0,0],
-      density_kg_m3:density,
-    };
-    if(objectKind!=="wood_box")objectPayload.mass_kg=massKg;
+  const model=useRobotStore(s=>s.model);
+  const bridgeState=useRobotStore(s=>s.bridgeState);
+  const jointState=useRobotStore(s=>s.joints);
+  const [source,setSource]=useState<InputSource>("synthetic");
+  const [objectKind,setObjectKind]=useState<ObjectKind>("coca_cola_can");
+  const [shelfPreset,setShelfPreset]=useState<keyof typeof SHELF_PRESETS>("standard");
+  const [shelf,setShelf]=useState({width:0.60,depth:0.42,height:0.50,wall:0.012,clearance:0.012});
+  const [platform,setPlatform]=useState({x:0.55,y:0.0,z:0.025,width:0.30,depth:0.24,height:0.05});
+  const [object,setObject]=useState({x:0.0,y:0.0,z:0.085,yaw:0});
+  const [woodDensity,setWoodDensity]=useState(510);
+  const [massOverride,setMassOverride]=useState<number|null>(null);
+  const [grasp,setGrasp]=useState({yaw:0,approachPitch:0,approachRoll:0,approachDistance:0.10,liftDistance:0.10,prePlaceDistance:0.08,gripperClearance:0.006});
+  const [gripperMaxOpening,setGripperMaxOpening]=useState(0.040);
+  const [visionJson,setVisionJson]=useState("");
+  const [sceneIds,setSceneIds]=useState<string[]>([]);
+  const [busy,setBusy]=useState<string|null>(null);
+  const [notice,setNotice]=useState<{kind:"success"|"error"|"info";message:string}|null>(null);
+  const [lastPlan,setLastPlan]=useState<any>(null);
+  const selected=OBJECTS[objectKind];
+  const objectDims=selected.dimensions;
+  const objectMass=massOverride??(objectKind==="wood_box"?objectDims[0]*objectDims[1]*objectDims[2]*woodDensity:selected.massKg);
+  const graspWidth=selected.graspWidth;
+  const gripFits=graspWidth+grasp.gripperClearance<=gripperMaxOpening;
+  const frame=model?.base_frame??"dummy_link";
+  const shelfInner={width:shelf.width-2*shelf.wall,depth:shelf.depth-shelf.wall,height:shelf.height-shelf.wall};
+  const objectFits=shelfInner.width>=objectDims[0]+2*shelf.clearance&&shelfInner.depth>=objectDims[1]+shelf.clearance&&shelfInner.height>=objectDims[2]+shelf.clearance;
+  const payloadForce=objectMass*9.80665;
+  const payloadTorque=payloadForce*0.10;
+  const items=useMemo<SceneItem[]>(()=>{
+    const w=shelf.width,d=shelf.depth,h=shelf.height,t=shelf.wall;
+    const ox=-w/2,oy=-d/2;
+    const base:SceneItem[]=[
+      {id:"pp_shelf_floor",shape:"box",position_m:[ox+w/2,oy+d/2,-t/2],dimensions_m:[w,d,t],role:"shelf"},
+      {id:"pp_shelf_left",shape:"box",position_m:[ox+t/2,oy+d/2,h/2],dimensions_m:[t,d,h],role:"shelf"},
+      {id:"pp_shelf_right",shape:"box",position_m:[ox+w-t/2,oy+d/2,h/2],dimensions_m:[t,d,h],role:"shelf"},
+      {id:"pp_shelf_back",shape:"box",position_m:[ox+w/2,oy+d-t/2,h/2],dimensions_m:[w,t,h],role:"shelf"},
+      {id:"pp_platform",shape:"box",position_m:[platform.x,platform.y,platform.z-platform.height/2],dimensions_m:[platform.width,platform.depth,platform.height],role:"platform"}
+    ];
+    const obj:SceneItem=selected.shape==="cylinder"
+      ?{id:"pp_pick_object",shape:"cylinder",position_m:[object.x,object.y,object.z],height_m:objectDims[2],radius_m:objectDims[0]/2,role:"object"}
+      :{id:"pp_pick_object",shape:"box",position_m:[object.x,object.y,object.z],dimensions_m:[...objectDims],role:"object"};
+    return [...base,obj];
+  },[shelf,platform,object,selected,objectDims]);
+  const applyScene=async()=>{
+    if(source==="vision"){
+      try{const parsed=JSON.parse(visionJson);if(!Array.isArray(parsed.objects)||parsed.objects.length===0)throw new Error("Expected {objects:[...]}");}
+      catch(e){setNotice({kind:"error",message:e instanceof Error?e.message:"Invalid vision JSON"});return;}
+      setNotice({kind:"info",message:"Vision JSON parsed. Vision-to-scene normalization is being implemented in the next planner phase."});return;
+    }
+    setBusy("scene");setNotice(null);
     try{
-      const result=await request("pick_place.plan",{
-        frame_id:model.base_frame,group_name:model.group_name,object:objectPayload,
-        shelf:{width_m:shelf.width/1000,height_m:shelf.height/1000,depth_m:shelf.depth/1000,levels:shelf.levels,board_m:shelf.board/1000},
-        level:slot,clearance_m:clearance/1000,
-        platform:{id:"place_platform",position_m:[platform.x,platform.y,platform.z].map(v=>v/1000),dimensions_m:[0.3,0.24,0.02]},
-        gripper_yaw_deg:gripperAngle,approach_angle_deg:approachAngle,
-        approach_distance_m:approachDistance/1000,tcp_offset_m:[0,0,tcpOffset/1000],
-        lift_distance_m:0.1,allow_infeasible_gripper:allowInfeasibleGripper,allowed_planning_time:5,max_velocity_scaling:0.15,max_acceleration_scaling:0.15,
-      });
-      setPlanResult(result);setPlanState(result.status==="PLANNED"?"ready":"blocked");
-    }catch(error){setPlanResult({status:"FAILED",error:error instanceof Error?error.message:String(error)});setPlanState("blocked");}
+      const created:string[]=[];
+      for(const item of items){
+        const payload:any={id:item.id,shape:item.shape,frame_id:frame,position_m:item.position_m,orientation_xyzw:[0,0,0,1]};
+        if(item.shape==="box")payload.dimensions_m=item.dimensions_m;
+        else {payload.height_m=item.height_m;payload.radius_m=item.radius_m;}
+        const result=await request("scene.add",payload);
+        if(result?.id)created.push(result.id);
+      }
+      setSceneIds(created);setNotice({kind:"success",message:`Added ${created.length} generated collision objects to MoveIt (${frame}).`});
+    }catch(e){setNotice({kind:"error",message:e instanceof Error?e.message:String(e)});}
+    finally{setBusy(null);}
   };
-  const parseVision=()=>{try{const data=JSON.parse(visionJson);const first=data.objects?.[0];if(!first)throw new Error("No objects in vision payload");const dims=first.dimensions_m??[.1,.1,.1];const shape=first.shape==="cylinder"?"cylinder":"box";setCustom({kind:"custom",label:first.class??first.id??"Vision object",shape,dimensions:{x:dims[0]*1000,y:dims[1]*1000,z:dims[2]*1000},massKg:Number(first.mass_kg??.5),massSource:"Vision payload / estimated"});setObjectKind("custom");if(Array.isArray(first.centroid_m))setPick({x:first.centroid_m[0]*1000,y:first.centroid_m[1]*1000,z:first.centroid_m[2]*1000});setSource("vision");setPlanState("idle");}catch(error){window.alert(error instanceof Error?error.message:"Invalid vision payload");}};
-  const copyGrasp=()=>{void navigator.clipboard?.writeText(JSON.stringify({frame_id:model?.base_frame??"dummy_link",link_name:model?.end_effector_link??"Link6",tcp_target_m:[grasp.tcp.x/1000,grasp.tcp.y/1000,grasp.tcp.z/1000],gripper_yaw_deg:grasp.yaw,approach_angle_deg:grasp.approach,approach_distance_m:grasp.distance/1000,object_mass_kg:massKg,object_dimensions_m:[object.dimensions.x,object.dimensions.y,object.dimensions.z].map(v=>v/1000)},null,2)).catch(()=>{});};
+  const removeGeneratedScene=async()=>{
+    if(!sceneIds.length)return;setBusy("remove");
+    try{for(const id of sceneIds)await request("scene.remove",{id});setSceneIds([]);setLastPlan(null);setNotice({kind:"success",message:"Generated scene objects removed."});}
+    catch(e){setNotice({kind:"error",message:e instanceof Error?e.message:String(e)});}finally{setBusy(null);}
+  };
+  const planPose=async(label:string,position:[number,number,number],rpy:[number,number,number])=>{
+    if(bridgeState!=="connected"||!model){setNotice({kind:"error",message:"Bridge and MoveIt robot model must be connected before planning."});return;}
+    if(!jointState?.position?.length){setNotice({kind:"error",message:"Current joint telemetry is required for planning."});return;}
+    setBusy("plan");setNotice(null);
+    try{
+      const result=await request("motion.plan",{group_name:model.group_name,target:{type:"pose",frame_id:frame,link_name:model.end_effector_link,position_m:position,orientation_xyzw:quatFromRpy(...rpy),position_tolerance_m:0.003,orientation_tolerance_rad:0.03},allowed_planning_time:8,max_velocity_scaling:0.12,max_acceleration_scaling:0.12});
+      setLastPlan(result);setNotice({kind:result.status==="SUCCEEDED"?"success":"error",message:`${label}: ${result.status??"UNKNOWN"}${result.error_code!==undefined?` (MoveIt ${result.error_code})`:""}.`});
+    }catch(e){setNotice({kind:"error",message:e instanceof Error?e.message:String(e)});}finally{setBusy(null);}
+  };
+  const planGrasp=()=>{
+    const approachYaw=object.yaw+grasp.yaw;
+    const q=quatFromRpy(grasp.approachRoll,grasp.approachPitch,approachYaw);
+    const [qx,qy,qz,qw]=q;
+    const direction=[2*(qx*qz+qw*qy),2*(qy*qz-qw*qx),1-2*(qx*qx+qy*qy)];
+    const target:[number,number,number]=[object.x,object.y,object.z];
+    const pre:[number,number,number]=[target[0]-direction[0]*grasp.approachDistance,target[1]-direction[1]*grasp.approachDistance,target[2]-direction[2]*grasp.approachDistance];
+    return planPose("Pre-grasp approach",pre,[grasp.approachRoll,grasp.approachPitch,approachYaw]);
+  };
+  const planPlace=()=>{
+    const x=platform.x,y=platform.y,z=platform.z+platform.height/2+objectDims[2]/2+shelf.clearance;
+    return planPose("Place target",[x,y,z],[0,0,grasp.yaw]);
+  };
+  const loadPreset=(key:keyof typeof SHELF_PRESETS)=>{setShelfPreset(key);const p=SHELF_PRESETS[key];setShelf(v=>({...v,width:p.width,depth:p.depth,height:p.height}));};
+  const loadVision=()=>{try{const parsed=JSON.parse(visionJson);const first=parsed.objects?.[0];if(!first)throw new Error("No objects found");const p=first.centroid_m??first.position_m;if(!Array.isArray(p)||p.length!==3)throw new Error("First object needs centroid_m or position_m [x,y,z]");setObject(v=>({...v,x:p[0],y:p[1],z:p[2],yaw:first.yaw_deg??0}));setNotice({kind:"success",message:"First vision detection loaded into the object target fields."});}catch(e){setNotice({kind:"error",message:e instanceof Error?e.message:String(e)});}};
+
   return <div className="space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><div className="eyebrow">MOTION WORKSPACE / TASK PLANNING</div><h1 className="page-title">Pick & place planner</h1><p className="mt-1 max-w-2xl text-sm text-zinc-500">Configure objects, synthesize shelf scenes, derive grasp targets and validate placement clearances before planning.</p></div><div className="flex items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${simulation?"bg-amber-50 text-amber-700":"bg-zinc-100 text-zinc-600"}`}>{simulation?"SIMULATION":"PLAN ONLY"}</span><span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[10px] text-zinc-600">{bridgeState}</span></div></div>
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="space-y-4 min-w-0">
-        <section className="panel overflow-hidden"><div className="panel-header"><div className="flex items-center gap-2"><Layers3 size={16}/><div><div className="text-sm font-semibold">Scene preview</div><div className="text-[11px] text-zinc-500">Generated geometry · side elevation · not a collision validation result</div></div></div><Button size="sm" variant="outline" onClick={()=>{setShelfId("standard");setSlot(1);setPlanState("idle");}}><RotateCcw size={13}/> Reset scene</Button></div><div className="h-[310px] p-3"><ShelfPreview shelf={shelf} object={object} slot={slot} clearance={clearance} platform={platform} approach={approachAngle}/></div><div className="grid grid-cols-2 gap-3 border-t border-zinc-100 px-5 py-3 text-xs sm:grid-cols-4"><div><div className="text-zinc-400">Selected object</div><div className="mt-1 font-medium">{object.label}</div></div><div><div className="text-zinc-400">Estimated payload</div><div className="mt-1 font-mono font-semibold">{number(massKg*1000,0)} g</div></div><div><div className="text-zinc-400">Shelf bay</div><div className="mt-1 font-mono">{Math.round(bayWidth)} × {Math.round(bayHeight)} mm</div></div><div><div className="text-zinc-400">Fit status</div><div className={`mt-1 font-semibold ${fit?"text-emerald-700":"text-red-700"}`}>{fit?"Fits with clearance":"Does not fit"}</div></div></div></section>
-        <section className="panel"><div className="panel-header"><div className="flex items-center gap-2"><Package size={16}/><span className="text-sm font-semibold">Object & input source</span></div><div className="flex gap-1 rounded-lg bg-zinc-100 p-1">{(["synthetic","vision","manual"] as const).map(v=><button key={v} onClick={()=>setSource(v)} className={`rounded-md px-2.5 py-1 text-[10px] font-medium capitalize ${source===v?"bg-white shadow-sm":"text-zinc-500"}`}>{v}</button>)}</div></div><div className="space-y-4 p-5"><div className="grid gap-3 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Object preset</span><select value={objectKind} onChange={e=>{setObjectKind(e.target.value as ObjectKind);setPlanState("idle");}} className="h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm"><option value="coke">Coca-Cola can · 330 ml</option><option value="pringles">Pringles tube · 165 g</option><option value="wood_box">Wooden box · density model</option><option value="custom">Custom / vision object</option></select></label><div className="rounded-lg bg-zinc-50 px-3 py-2"><div className="text-[10px] uppercase tracking-wider text-zinc-400">Mass model</div><div className="mt-1 font-mono text-sm font-semibold">{number(massKg,3)} kg</div><div className="text-[10px] text-zinc-500">{object.massSource}</div></div></div>
-        {objectKind==="custom"||objectKind==="wood_box"?<div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Field label="Length" value={object.dimensions.x} unit="mm" onChange={v=>{setCustom(o=>({...o,dimensions:{...o.dimensions,x:v},massKg:v*o.dimensions.y*o.dimensions.z/1e9*density}));if(objectKind==="wood_box")setObjectKind("custom");}}/><Field label="Width" value={object.dimensions.y} unit="mm" onChange={v=>{setCustom(o=>({...o,dimensions:{...o.dimensions,y:v},massKg:o.dimensions.x*v*o.dimensions.z/1e9*density}));if(objectKind==="wood_box")setObjectKind("custom");}}/><Field label="Height" value={object.dimensions.z} unit="mm" onChange={v=>{setCustom(o=>({...o,dimensions:{...o.dimensions,z:v},massKg:o.dimensions.x*o.dimensions.y*v/1e9*density}));if(objectKind==="wood_box")setObjectKind("custom");}}/><Field label="Wood density" value={density} unit="kg/m³" min={100} max={1400} onChange={v=>{setDensity(v);setCustom(o=>({...o,massKg:o.dimensions.x*o.dimensions.y*o.dimensions.z/1e9*v}));}}/></div>:<div className="grid grid-cols-3 gap-3"><div className="rounded-md border border-zinc-100 p-3"><div className="text-[10px] text-zinc-400">Diameter / X</div><div className="mt-1 font-mono text-sm">{object.dimensions.x} mm</div></div><div className="rounded-md border border-zinc-100 p-3"><div className="text-[10px] text-zinc-400">Depth / Y</div><div className="mt-1 font-mono text-sm">{object.dimensions.y} mm</div></div><div className="rounded-md border border-zinc-100 p-3"><div className="text-[10px] text-zinc-400">Height / Z</div><div className="mt-1 font-mono text-sm">{object.dimensions.z} mm</div></div></div>}
-        {source==="vision"?<div className="space-y-2"><textarea value={visionJson} onChange={e=>setVisionJson(e.target.value)} rows={5} className="w-full rounded-md border border-zinc-200 p-3 font-mono text-xs"/><Button size="sm" onClick={parseVision}><ScanLine size={13}/> Load vision detection</Button><p className="text-[10px] text-zinc-500">Adapter contract: frame_id, objects[].id/class/shape/centroid_m/dimensions_m/yaw_deg/mass_kg. Vision data is parsed into the same normalized workpiece model as synthetic inputs.</p></div>:null}</div></section>
-        <section className="panel"><div className="panel-header"><div className="flex items-center gap-2"><Ruler size={16}/><span className="text-sm font-semibold">Shelf & placement geometry</span></div><span className="text-[10px] text-zinc-400">All dimensions in mm</span></div><div className="grid gap-4 p-5 md:grid-cols-2"><div className="space-y-3"><label className="block"><span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Shelf profile</span><select value={shelfId} onChange={e=>{setShelfId(e.target.value);setPlanState("idle");}} className="h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm">{SHELVES.map(s=><option key={s.id} value={s.id}>{s.label} · {s.width} × {s.height} × {s.depth}</option>)}</select></label><div className="grid grid-cols-2 gap-3"><Field label="Shelf width" value={shelf.width} unit="mm" onChange={()=>{}} disabled/><Field label="Shelf depth" value={shelf.depth} unit="mm" onChange={()=>{}} disabled/><Field label="Levels" value={shelf.levels} unit="bays" onChange={()=>{}} disabled/><Field label="Board thickness" value={shelf.board} unit="mm" onChange={()=>{}} disabled/></div><label className="block"><span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Target shelf level · {slot+1}</span><input className="range-control w-full" type="range" min={0} max={shelf.levels-1} value={slot} onChange={e=>setSlot(Number(e.target.value))}/></label></div><div className="space-y-3"><div className="text-xs font-semibold">Placement platform</div><div className="grid grid-cols-2 gap-3"><Field label="Platform X" value={platform.x} unit="mm" onChange={v=>setPlatform(p=>({...p,x:v}))}/><Field label="Platform Y" value={platform.y} unit="mm" onChange={v=>setPlatform(p=>({...p,y:v}))}/><Field label="Platform Z" value={platform.z} unit="mm" onChange={v=>setPlatform(p=>({...p,z:v}))}/><Field label="Clearance margin" value={clearance} unit="mm" min={0} max={100} onChange={setClearance}/></div><p className="text-[10px] leading-relaxed text-zinc-500">Shelf profile dimensions generate an open-front rack with multiple bays. Platform pose is a separate placement target; the shelf is not assumed to be the place destination.</p></div></div></section>
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><div className="eyebrow">Manipulation workbench / experimental</div><h1 className="page-title">Pick & Place Planner</h1><p className="mt-1 text-sm text-zinc-500">Generate test scenes, derive grasp poses and plan collision-aware object transfers.</p></div><div className="flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs"><span className={`h-2 w-2 rounded-full ${bridgeState==="connected"?"bg-emerald-500":"bg-zinc-300"}`}/>{bridgeState==="connected"?"Bridge connected":"Bridge disconnected"}<span className="border-l border-zinc-200 pl-2 text-zinc-400">Frame: {frame}</span></div></div>
+    {notice&&<div className={`notice ${notice.kind==="success"?"notice-success":notice.kind==="error"?"notice-error":""}`}>{notice.message}</div>}
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,0.85fr)]">
+      <section className="panel overflow-hidden"><div className="panel-header"><div><div className="eyebrow">01 / Input source</div><h2 className="mt-1 text-sm font-semibold">Scene and object input</h2></div><div className="flex rounded-md bg-zinc-100 p-1"><button onClick={()=>setSource("synthetic")} className={`rounded px-3 py-1.5 text-xs ${source==="synthetic"?"bg-white shadow-sm":"text-zinc-500"}`}>Synthetic</button><button onClick={()=>setSource("vision")} className={`rounded px-3 py-1.5 text-xs ${source==="vision"?"bg-white shadow-sm":"text-zinc-500"}`}>Vision JSON</button></div></div>
+        <div className="space-y-5 p-5">{source==="synthetic"?<>
+          <div><label className="mb-2 block text-xs font-medium text-zinc-600">Object to pick</label><div className="grid gap-2 sm:grid-cols-3">{(Object.keys(OBJECTS) as ObjectKind[]).map(key=><button key={key} onClick={()=>{setObjectKind(key);setMassOverride(null);}} className={`rounded-lg border p-3 text-left ${objectKind===key?"border-zinc-900 bg-zinc-50":"border-zinc-200 hover:border-zinc-400"}`}><div className="mb-2 flex h-8 w-8 items-center justify-center rounded-md bg-zinc-100"><Box size={17}/></div><div className="text-xs font-semibold">{OBJECTS[key].label}</div><div className="mt-1 text-[10px] text-zinc-500">{OBJECTS[key].shape} · {(OBJECTS[key].dimensions[2]*1000).toFixed(0)} mm high</div></button>)}</div></div>
+          <div className="grid gap-3 sm:grid-cols-2"><div><label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-zinc-500">Shelf preset</label><select value={shelfPreset} onChange={e=>loadPreset(e.target.value as keyof typeof SHELF_PRESETS)} className="h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm">{Object.entries(SHELF_PRESETS).map(([k,v])=><option key={k} value={k}>{v.label} · {Math.round(v.width*1000)} × {Math.round(v.depth*1000)} × {Math.round(v.height*1000)} mm</option>)}</select></div><div><label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-zinc-500">Wood density</label><div className="flex h-9 items-center rounded-md border border-zinc-200"><input type="number" value={woodDensity} onChange={e=>setWoodDensity(Number(e.target.value))} className="w-full bg-transparent px-2 text-sm"/><span className="px-2 text-[10px] text-zinc-400">kg/m³</span></div></div></div>
+          <div><div className="mb-2 flex items-center justify-between"><span className="text-xs font-semibold">Shelf interior</span><span className="text-[10px] text-zinc-400">millimetres</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-3"><Field label="Width" value={shelf.width*1000} unit="mm" onChange={v=>setShelf(s=>({...s,width:v/1000}))}/><Field label="Depth" value={shelf.depth*1000} unit="mm" onChange={v=>setShelf(s=>({...s,depth:v/1000}))}/><Field label="Height" value={shelf.height*1000} unit="mm" onChange={v=>setShelf(s=>({...s,height:v/1000}))}/><Field label="Wall thickness" value={shelf.wall*1000} unit="mm" onChange={v=>setShelf(s=>({...s,wall:v/1000}))}/><Field label="Placement clearance" value={shelf.clearance*1000} unit="mm" onChange={v=>setShelf(s=>({...s,clearance:v/1000}))}/></div></div>
+          <div><div className="mb-2 text-xs font-semibold">Object centroid in base frame</div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Field label="X" value={object.x*1000} unit="mm" onChange={v=>setObject(o=>({...o,x:v/1000}))}/><Field label="Y" value={object.y*1000} unit="mm" onChange={v=>setObject(o=>({...o,y:v/1000}))}/><Field label="Z" value={object.z*1000} unit="mm" onChange={v=>setObject(o=>({...o,z:v/1000}))}/><Field label="Object yaw" value={object.yaw} unit="deg" step="1" onChange={v=>setObject(o=>({...o,yaw:v}))}/></div></div>
+        </>:<div className="space-y-3"><p className="text-xs leading-5 text-zinc-500">Paste normalized detections from the vision module. Accepted object fields: <code>centroid_m</code> or <code>position_m</code>, optional <code>dimensions_m</code>, <code>yaw_deg</code>, and <code>class_name</code>.</p><textarea value={visionJson} onChange={e=>setVisionJson(e.target.value)} rows={9} placeholder={'{"frame_id":"dummy_link","objects":[{"class_name":"can","centroid_m":[0.4,0.0,0.2],"dimensions_m":[0.066,0.066,0.122],"yaw_deg":0}]}'} className="w-full rounded-md border border-zinc-200 p-3 font-mono text-xs outline-none focus:border-zinc-500"/><div className="flex gap-2"><Button variant="outline" size="sm" onClick={loadVision}><ClipboardPaste size={13}/>Load first detection</Button><span className="self-center text-[10px] text-zinc-400">Adapter contract: frame-aware metres and radians/degrees</span></div></div>}
+          <div className="flex flex-wrap gap-2 border-t border-zinc-100 pt-4"><Button onClick={applyScene} disabled={busy!==null||source!=="synthetic"}><Layers3 size={14}/>{busy==="scene"?"Applying…":"Generate MoveIt scene"}</Button><Button variant="outline" onClick={removeGeneratedScene} disabled={busy!==null||!sceneIds.length}><RefreshCw size={13}/>Remove generated scene</Button><span className="self-center text-[10px] text-zinc-400">{sceneIds.length?`${sceneIds.length} generated objects tracked`:"Scene is not yet applied"}</span></div>
+        </div></section>
+      <div className="space-y-4">
+        <section className="panel"><div className="panel-header"><div><div className="eyebrow">02 / Payload model</div><h2 className="mt-1 text-sm font-semibold">Mass and gripper feasibility</h2></div><Settings2 size={16} className="text-zinc-400"/></div><div className="space-y-3 p-5"><div className="flex items-end justify-between"><div><div className="text-[10px] uppercase tracking-wider text-zinc-400">Estimated object mass</div><div className="mt-1 font-mono text-2xl font-semibold">{(massOverride??objectMass).toFixed(3)} <span className="text-xs font-normal text-zinc-400">kg</span></div></div><div className="text-right text-[10px] text-zinc-400">{(payloadForce).toFixed(2)} N<br/>static weight</div></div><div className="text-[10px] leading-4 text-zinc-500">{selected.massBasis}{objectKind==="wood_box"?` · ${woodDensity} kg/m³`:""}</div><Field label="Mass override" value={massOverride??objectMass} unit="kg" step="0.001" onChange={v=>setMassOverride(v)}/><button onClick={()=>setMassOverride(null)} className="text-[10px] text-zinc-500 underline">Use estimated mass</button><div className="grid grid-cols-2 gap-2 border-t border-zinc-100 pt-3"><div><div className="text-[10px] text-zinc-400">Payload force</div><div className="font-mono text-sm">{payloadForce.toFixed(2)} N</div></div><div><div className="text-[10px] text-zinc-400">Moment @ 100 mm</div><div className="font-mono text-sm">{payloadTorque.toFixed(3)} Nm</div></div></div><Field label="Configured max opening" value={gripperMaxOpening*1000} unit="mm" onChange={v=>setGripperMaxOpening(v/1000)}/><div className={`rounded-md border p-3 text-xs ${gripFits?"border-emerald-200 bg-emerald-50 text-emerald-800":"border-amber-200 bg-amber-50 text-amber-900"}`}><div className="font-semibold">{gripFits?"Nominal jaw clearance fits":"Grasp width exceeds PGEA opening"}</div><div className="mt-1 text-[10px] leading-4">Object width {graspWidth*1000} mm + clearance {grasp.gripperClearance*1000} mm; configured opening {gripperMaxOpening*1000} mm. PGEA-100-40-W has 40 mm nominal total travel; override only for alternate tooling, not the physical gripper.</div></div></div></section>
+        <section className="panel"><div className="panel-header"><div><div className="eyebrow">03 / Grasp parameters</div><h2 className="mt-1 text-sm font-semibold">TCP and approach geometry</h2></div><ArrowUpFromLine size={16} className="text-zinc-400"/></div><div className="grid grid-cols-2 gap-3 p-5"><Field label="Gripper yaw" value={grasp.yaw} unit="deg" step="1" onChange={v=>setGrasp(g=>({...g,yaw:v}))}/><Field label="Approach pitch" value={grasp.approachPitch} unit="deg" step="1" onChange={v=>setGrasp(g=>({...g,approachPitch:v}))}/><Field label="Approach roll" value={grasp.approachRoll} unit="deg" step="1" onChange={v=>setGrasp(g=>({...g,approachRoll:v}))}/><Field label="Approach distance" value={grasp.approachDistance*1000} unit="mm" onChange={v=>setGrasp(g=>({...g,approachDistance:v/1000}))}/><Field label="Lift distance" value={grasp.liftDistance*1000} unit="mm" onChange={v=>setGrasp(g=>({...g,liftDistance:v/1000}))}/><Field label="Jaw clearance" value={grasp.gripperClearance*1000} unit="mm" onChange={v=>setGrasp(g=>({...g,gripperClearance:v/1000}))}/><div className="col-span-2 flex flex-wrap gap-2 pt-1"><Button size="sm" onClick={planGrasp} disabled={busy!==null}><Play size={13}/>Plan pre-grasp</Button><Button size="sm" variant="outline" onClick={planPlace} disabled={busy!==null}><ArrowDownToLine size={13}/>Plan place target</Button></div><p className="col-span-2 text-[10px] leading-4 text-zinc-400">Centroid is the grasp TCP target. Pre-grasp is offset opposite the rotated TCP approach axis. Plan is preview-only; no motion is executed.</p></div></section>
       </div>
-      <aside className="space-y-4"><section className="panel"><div className="panel-header"><div className="flex items-center gap-2"><Target size={16}/><span className="text-sm font-semibold">Grasp generation</span></div><span className="rounded bg-zinc-100 px-2 py-1 text-[9px] font-semibold text-zinc-500">TCP TARGET</span></div><div className="space-y-4 p-5"><div className="text-[10px] uppercase tracking-wider text-zinc-400">Object centroid · base frame</div><div className="grid grid-cols-3 gap-2">{(["x","y","z"] as const).map(axis=><Field key={axis} label={axis.toUpperCase()} value={pick[axis]} unit="mm" onChange={v=>{setPick(p=>({...p,[axis]:v}));setSource("manual");}}/>)}</div><div className="grid grid-cols-2 gap-3"><Field label="Gripper yaw" value={gripperAngle} unit="deg" min={-180} max={180} onChange={setGripperAngle}/><Field label="Approach tilt" value={approachAngle} unit="deg" min={-90} max={90} onChange={setApproachAngle}/><Field label="Approach distance" value={approachDistance} unit="mm" min={20} max={250} onChange={setApproachDistance}/><Field label="TCP Z offset" value={tcpOffset} unit="mm" min={-100} max={100} onChange={setTcpOffset}/></div><div className="rounded-lg bg-zinc-950 p-3 text-white"><div className="text-[9px] uppercase tracking-wider text-zinc-400">Derived grasp TCP · {model?.end_effector_link??"Link6"}</div><div className="mt-2 grid grid-cols-3 gap-2 font-mono text-xs">{Object.entries(grasp.tcp).map(([k,v])=><div key={k}><div className="text-zinc-500">{k.toUpperCase()}</div><div>{number(v)} mm</div></div>)}</div><div className="mt-2 flex justify-between border-t border-zinc-700 pt-2 text-[10px] text-zinc-400"><span>Yaw {grasp.yaw}° · Approach {grasp.approach}°</span><span>{grasp.distance} mm</span></div><Button size="sm" variant="secondary" className="mt-3 w-full" onClick={copyGrasp}><ClipboardCopy size={13}/> Copy grasp target JSON</Button></div></div></section>
-      <section className="panel"><div className="panel-header"><div className="flex items-center gap-2"><ShieldCheck size={16}/><span className="text-sm font-semibold">Pre-plan validation</span></div><span className="text-[10px] text-zinc-400">{checks.filter(c=>c.ok).length}/{checks.length}</span></div><div className="space-y-3 p-4">{checks.map(c=><div key={c.label} className="flex items-start gap-2"><span className={`mt-0.5 h-2 w-2 rounded-full ${c.ok?"bg-emerald-500":c.label==="Gripper width"?"bg-amber-500":"bg-red-500"}`}/><div className="min-w-0"><div className="text-xs font-medium">{c.label}</div><div className="text-[10px] text-zinc-500">{c.detail}</div></div></div>)}<div className="rounded-md bg-amber-50 p-3 text-[10px] leading-relaxed text-amber-800">Payload mass is carried with the task, but MoveIt geometric planning does not calculate torque, gravity compensation or controller payload limits. The bridge also blocks objects wider than the configured PGEA opening.</div><label className="flex items-start gap-2 text-[10px] text-amber-800"><input type="checkbox" checked={allowInfeasibleGripper} onChange={e=>setAllowInfeasibleGripper(e.target.checked)} className="mt-0.5"/><span>Allow geometric-only planning despite the gripper width mismatch. This never enables execution or claims the object can be physically grasped.</span></label><Button className="w-full" disabled={!allValid||!model||planResult?.status==="PLANNING"} onClick={runPlan}><Target size={14}/> {planResult?.status==="PLANNING"?"Planning task…":planState==="ready"?"Re-plan task":"Generate MoveIt pick & place plan"}</Button>
-        {planResult?<div className="space-y-2 rounded-md border border-zinc-200 p-3"><div className="flex items-center justify-between"><span className="text-[10px] font-semibold uppercase tracking-wider">MoveIt task result</span><span className={`rounded px-2 py-1 text-[9px] font-semibold ${planResult.status==="PLANNED"?"bg-emerald-50 text-emerald-700":planResult.status==="PLANNING"?"bg-blue-50 text-blue-700":"bg-red-50 text-red-700"}`}>{planResult.status}</span></div>{planResult.error?<p className="text-[10px] text-red-700">{planResult.error}</p>:null}{planResult.failed_stage?<p className="text-[10px] text-red-700">Failed at: {planResult.failed_stage} · MoveIt error {planResult.error_code??"—"}</p>:null}{Array.isArray(planResult.plans)?planResult.plans.map((stage:any)=><div key={stage.name} className="flex justify-between text-[10px]"><span className="capitalize">{stage.name}</span><span className={stage.status==="SUCCEEDED"?"text-emerald-700":"text-red-700"}>{stage.status} {stage.planning_time?`· ${number(stage.planning_time,2)} s`:""}</span></div>):null}{planResult.planning_time_total!==undefined?<div className="border-t border-zinc-100 pt-2 text-[10px]">Total planning time <b>{number(planResult.planning_time_total,2)} s</b></div>:null}</div>:null}</div></section>
-      <section className="rounded-xl border border-zinc-200 bg-zinc-50 p-4"><div className="text-xs font-semibold">Mass assumptions</div><p className="mt-2 text-[10px] leading-relaxed text-zinc-500">Coke: 355 g full-can estimate. Pringles: 205 g (165 g contents + approximately 50 g packaging). Wood box: volume × editable density, default 650 kg/m³. Replace estimates with scale measurements before robot payload configuration.</p><div className="mt-2 text-[10px] text-zinc-400">PGEA gripper opening is limited to approximately 40 mm total stroke. Cylindrical object diameter presets exceed that range; grasp feasibility requires a validated side-grasp/contact strategy, not a simple width check.</div></section></aside>
     </div>
+    <div className="grid gap-4 md:grid-cols-3"><div className="panel p-4"><div className="eyebrow">Shelf placement check</div><div className={`mt-2 text-sm font-semibold ${objectFits?"text-emerald-700":"text-amber-700"}`}>{objectFits?"Object fits shelf opening":"Object does not fit shelf opening"}</div><div className="mt-1 text-[10px] text-zinc-500">Interior {Math.round(shelfInner.width*1000)} × {Math.round(shelfInner.depth*1000)} × {Math.round(shelfInner.height*1000)} mm; object {objectDims.map(v=>Math.round(v*1000)).join(" × ")} mm</div></div><div className="panel p-4"><div className="eyebrow">MoveIt state</div><div className="mt-2 text-sm font-semibold">{lastPlan?.status??"No plan requested"}</div><div className="mt-1 text-[10px] text-zinc-500">{lastPlan?.plan_id??"Plan-only requests use the active MoveIt group and planning scene."}</div></div><div className="panel p-4"><div className="eyebrow">Current robot model</div><div className="mt-2 text-sm font-semibold">{model?.group_name??"Waiting for model"}</div><div className="mt-1 text-[10px] text-zinc-500">TCP {model?.end_effector_link??"—"} · base {frame}</div></div></div>
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] leading-5 text-amber-900"><strong>Payload safety:</strong> MoveIt’s geometric collision planner does not natively consume arbitrary attached-object mass as a dynamics/load parameter. This UI calculates static force and a reference moment; the later integration phase must apply conservative velocity/acceleration scaling and keep the robot controller’s payload/load configuration separate. Never assume the displayed mass has configured Dobot gravity compensation.</div>
   </div>;
 }
