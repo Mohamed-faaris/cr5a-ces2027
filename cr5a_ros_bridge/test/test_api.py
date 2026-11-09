@@ -30,10 +30,12 @@ class FakeBackend:
             response = RobotMode.Response()
             response.res = 0
             response.robot_return = "5"
-            return response
-        response = SetPayload.Response()
-        response.res = 0
-        return response
+        else:
+            response = SetPayload.Response()
+            response.res = 0
+        future = Future()
+        future.set_result(response)
+        return future
 
     def graph(self):
         return {
