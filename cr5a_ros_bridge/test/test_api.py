@@ -29,7 +29,7 @@ class FakeBackend:
         if name == "RobotMode":
             response = RobotMode.Response()
             response.res = 0
-            response.robot_return = 5
+            response.robot_return = "5"
             return response
         response = SetPayload.Response()
         response.res = 0
