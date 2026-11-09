@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory, get_package_share_path
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, ExecuteProcess, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, ExecuteProcess, SetEnvironmentVariable, TimerAction
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -73,6 +73,14 @@ def _setup(context):
         f"filename='{gazebo_control_plugin}'",
     )
     runtime_sdf.write_text(sdf_xml, encoding="utf-8")
+    import xml.etree.ElementTree as ET
+    world_tree = ET.parse(world_path)
+    robot_tree = ET.parse(runtime_sdf)
+    robot_model = robot_tree.getroot().find("model")
+    if robot_model is None:
+        raise RuntimeError("Converted PGEA SDF does not contain a model element")
+    world_tree.getroot().find("world").append(robot_model)
+    world_tree.write(world_path, encoding="unicode", xml_declaration=True)
 
     robot_state_publisher = Node(
         package="robot_state_publisher", executable="robot_state_publisher",
@@ -85,11 +93,6 @@ def _setup(context):
         name="joint_state_relay", output="screen", arguments=[str(urdf_path)],
         parameters=[{"use_sim_time": True}],
     )
-    spawn_robot = Node(
-        package="gazebo_ros", executable="spawn_entity.py", name="spawn_pgea_robot",
-        output="screen", arguments=["-file", str(runtime_sdf), "-entity", "cr5_pgea"],
-    )
-
     load_jsb = ExecuteProcess(
         cmd=["ros2", "control", "load_controller", "--set-state", "active", "joint_state_broadcaster"],
         output="screen",
@@ -115,12 +118,13 @@ def _setup(context):
         }],
     )
 
-    chain_jsb = RegisterEventHandler(OnProcessExit(target_action=spawn_robot, on_exit=[load_jsb]))
+    delayed_gazebo = TimerAction(period=2.0, actions=[gazebo])
+    delayed_jsb = TimerAction(period=7.0, actions=[load_jsb])
     chain_arm = RegisterEventHandler(OnProcessExit(target_action=load_jsb, on_exit=[load_arm]))
     chain_gripper = RegisterEventHandler(OnProcessExit(target_action=load_arm, on_exit=[load_gripper]))
     chain_moveit = RegisterEventHandler(OnProcessExit(target_action=load_gripper, on_exit=[moveit_launch]))
-    return [plugin_env, master_env, gazebo, robot_state_publisher, relay, simulation_adapter, spawn_robot,
-            chain_jsb, chain_arm, chain_gripper, chain_moveit]
+    return [plugin_env, master_env, robot_state_publisher, relay, simulation_adapter, delayed_gazebo,
+            delayed_jsb, chain_arm, chain_gripper, chain_moveit]
 
 
 def generate_launch_description():
