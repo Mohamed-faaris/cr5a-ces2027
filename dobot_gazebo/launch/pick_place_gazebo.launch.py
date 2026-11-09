@@ -28,8 +28,8 @@ def _setup(context):
     gazebo_ros = get_package_share_directory("gazebo_ros")
     gazebo_launch = Path(gazebo_ros) / "launch" / "gazebo.launch.py"
     gazebo_plugin_dir = Path(get_package_share_directory("gazebo_ros2_control")).parent.parent / "lib"
-    existing_plugins = os.environ.get("GAZEBO_PLUGIN_PATH", "")
-    plugin_path = os.pathsep.join(part for part in [existing_plugins, str(gazebo_plugin_dir)] if part)
+    existing_plugins = [part for part in os.environ.get("GAZEBO_PLUGIN_PATH", "").split(os.pathsep) if part]
+    plugin_path = os.pathsep.join(dict.fromkeys([str(gazebo_plugin_dir), *existing_plugins]))
     plugin_env = SetEnvironmentVariable(name="GAZEBO_PLUGIN_PATH", value=plugin_path)
     gazebo_port = LaunchConfiguration("gazebo_port").perform(context)
     master_env = SetEnvironmentVariable(name="GAZEBO_MASTER_URI", value=f"http://127.0.0.1:{gazebo_port}")
