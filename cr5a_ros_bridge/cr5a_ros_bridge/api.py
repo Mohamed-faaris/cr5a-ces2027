@@ -27,6 +27,7 @@ from .direct_motion import (JOINT_NAMES, joint_path_samples, movj_target, movl_p
 from .pick_place import (
     SHELF_PRESETS, build_task_waypoints, generate_grasp_candidates,
     generate_shelf_scene, normalize_object, quaternion_from_rpy,
+    pose_relative_to, pose_compose,
 )
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
@@ -1945,9 +1946,14 @@ def create_app(backend, config):
             attached = AttachedCollisionObject()
             attached.link_name = link_name
             attached.touch_links = touch_links
+            object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            relative = pose_relative_to(
+                waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
+                obj["centroid_m"], object_orientation,
+            )
             attached.object = collision_object({
                 "id": object_id, "shape": obj["shape"], "frame_id": link_name,
-                "position_m": [0.0, 0.0, 0.0], "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                "position_m": relative["position_m"], "orientation_xyzw": relative["orientation_xyzw"],
                 **({"dimensions_m": obj["dimensions_m"]} if obj["shape"] == "box" else
                    {"height_m": obj["dimensions_m"][2], "radius_m": max(obj["dimensions_m"][0:2]) / 2} if obj["shape"] == "cylinder" else
                    {"radius_m": obj["dimensions_m"][0] / 2}),
@@ -1965,11 +1971,19 @@ def create_app(backend, config):
             scene_diff.robot_state.attached_collision_objects.append(attached)
             scene_diff.robot_state.is_diff = True
             place = waypoints[4]
-            pose = obj["rpy_rad"]
+            object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            relative = pose_relative_to(
+                waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
+                obj["centroid_m"], object_orientation,
+            )
+            world_pose = pose_compose(
+                place["position_m"], place["orientation_xyzw"],
+                relative["position_m"], relative["orientation_xyzw"],
+            )
             object_payload = {
                 "id": object_id, "shape": obj["shape"], "frame_id": frame_id,
-                "position_m": place["position_m"],
-                "orientation_xyzw": quaternion_from_rpy(*pose),
+                "position_m": world_pose["position_m"],
+                "orientation_xyzw": world_pose["orientation_xyzw"],
             }
             if obj["shape"] == "box":
                 object_payload["dimensions_m"] = obj["dimensions_m"]

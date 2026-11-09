@@ -202,8 +202,8 @@ def build_task_waypoints(obj: dict, grasp: dict, place_surface_center_m: list[fl
     lift = _finite(lift_distance_m, "lift_distance_m", minimum=0.02)
     x, y, z = _vector(place_surface_center_m, 3, "place_surface_center_m")
     object_height = obj["dimensions_m"][2]
-    place_tcp = [x, y, z + object_height/2]
-    preplace_tcp = [x, y, z + object_height/2 + grasp["approach_distance_m"]]
+    place_tcp = [x, y, z + object_height/2 + 0.002]
+    preplace_tcp = [x, y, z + object_height/2 + grasp["approach_distance_m"] + 0.002]
     grasp_tcp = grasp["tcp_target_m"]
     pregrasp = grasp["pregrasp_target_m"]
     return [
@@ -214,3 +214,38 @@ def build_task_waypoints(obj: dict, grasp: dict, place_surface_center_m: list[fl
         {"name": "place", "position_m": place_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": True},
         {"name": "retreat", "position_m": [x, y, place_tcp[2] + grasp["approach_distance_m"]], "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": False},
     ]
+
+
+def quaternion_multiply(a: list[float], b: list[float]) -> list[float]:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw*bx + ax*bw + ay*bz - az*by,
+            aw*by - ax*bz + ay*bw + az*bx,
+            aw*bz + ax*by - ay*bx + az*bw,
+            aw*bw - ax*bx - ay*by - az*bz]
+
+
+def rotate_vector(quaternion: list[float], vector: list[float]) -> list[float]:
+    x, y, z, w = quaternion
+    vx, vy, vz = vector
+    tx, ty, tz = 2*(y*vz-z*vy), 2*(z*vx-x*vz), 2*(x*vy-y*vx)
+    return [vx + w*tx + y*tz-z*ty,
+            vy + w*ty + z*tx-x*tz,
+            vz + w*tz + x*ty-y*tx]
+
+
+def pose_relative_to(parent_position: list[float], parent_orientation: list[float],
+                     child_position: list[float], child_orientation: list[float]) -> dict:
+    """Express child pose in parent frame; quaternion order is xyzw."""
+    inverse = [-parent_orientation[0], -parent_orientation[1], -parent_orientation[2], parent_orientation[3]]
+    delta = [child_position[i] - parent_position[i] for i in range(3)]
+    return {"position_m": rotate_vector(inverse, delta),
+            "orientation_xyzw": quaternion_multiply(inverse, child_orientation)}
+
+
+def pose_compose(parent_position: list[float], parent_orientation: list[float],
+                 relative_position: list[float], relative_orientation: list[float]) -> dict:
+    """Compose a relative child pose into the world frame."""
+    rotated = rotate_vector(parent_orientation, relative_position)
+    return {"position_m": [parent_position[i] + rotated[i] for i in range(3)],
+            "orientation_xyzw": quaternion_multiply(parent_orientation, relative_orientation)}
