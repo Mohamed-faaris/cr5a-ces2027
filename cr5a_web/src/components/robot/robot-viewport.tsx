@@ -1,10 +1,10 @@
-import {Suspense,useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type SetStateAction} from "react";
+import {memo,Suspense,useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type SetStateAction} from "react";
 import {Canvas,useFrame} from "@react-three/fiber";
 import {Billboard,Grid,OrbitControls,Text} from "@react-three/drei";
 import {ChevronDown,Eye,Grid3X3} from "lucide-react";
 import * as THREE from "three";
 import URDFLoader from "urdf-loader";
-import type {CollisionObject,JointStateMessage,MotionPlan,RobotModel} from "@/lib/types";
+import type {CollisionObject,MotionPlan,RobotModel} from "@/lib/types";
 import {rpyDegreesToQuaternion} from "@/lib/utils";
 import type {VisualizerViewPreferences} from "@/lib/visualizer-view-preferences";
 import {useRobotSocket} from "@/lib/socket";
@@ -24,10 +24,9 @@ type StickSegment={
 };
 
 function RobotModelNode({
-  model,jointState,onLoaded,showRods,showMeshes,showGripperMeshes,previewPositions,gripperPositionMm
+  model,onLoaded,showRods,showMeshes,showGripperMeshes,previewPositions,gripperPositionMm
 }:{
   model:RobotModel;
-  jointState:JointStateMessage|null;
   onLoaded:(robot:RobotObject|null,error?:string)=>void;
   showRods:boolean;
   showMeshes:boolean;
@@ -117,8 +116,9 @@ function RobotModelNode({
     if(previewPositions){
       Object.assign(values,previewPositions);
     }else{
-      (jointState?.name??[]).forEach((name,index)=>{
-        const value=jointState?.position?.[index];
+      const liveJointState=useRobotStore.getState().joints;
+      (liveJointState?.name??[]).forEach((name,index)=>{
+        const value=liveJointState?.position?.[index];
         if(Number.isFinite(value))values[name]=value as number;
       });
     }
@@ -354,11 +354,13 @@ function TrajectoryPreview({
   return line?<primitive object={line}/>:null;
 }
 
-export function RobotViewport({
-  model,jointState,scene,plan,comparisonPaths=[],targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,viewPreferences,onViewPreferencesChange,
+const EMPTY_COMPARISON_PATHS:Array<{key:string;label:string;color:string;plan:MotionPlan}> = [];
+
+function RobotViewportView({
+  model,scene,plan,comparisonPaths=EMPTY_COMPARISON_PATHS,targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,viewPreferences,onViewPreferencesChange,
   objectLabels,disabledObjects,hiddenObjects
 }:{
-  model:RobotModel|null;jointState:JointStateMessage|null;scene:any;
+  model:RobotModel|null;scene:any;
   plan:MotionPlan|null;comparisonPaths?:Array<{key:string;label:string;color:string;plan:MotionPlan}>;
   poseMarkers?:Array<{id:string;label:string;position:[number,number,number];orientation?:[number,number,number,number];frame_id?:string;color?:string;selected?:boolean}>;
   targetTcp?:{x:number;y:number;z:number;rx:number;ry:number;rz:number}|null;
@@ -461,8 +463,8 @@ export function RobotViewport({
         </div>
       </details>
     </div>
-    {loading&&<div className="absolute inset-0 z-20 flex items-center justify-center bg-white/85 text-sm text-zinc-500">Loading robot description…</div>}
-    {!loading&&!model&&<div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 px-6 text-center">
+    {loading&&!robot&&<div className="absolute left-1/2 top-14 z-20 -translate-x-1/2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 text-[11px] text-zinc-500 shadow-sm">Loading robot description…</div>}
+    {!loading&&!model&&!robot&&<div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 px-6 text-center">
       <div className="text-sm font-medium text-zinc-800">Robot model unavailable</div>
       <div className="max-w-sm text-xs text-zinc-500">{error??"Start robot_state_publisher and confirm robot_description is available."}</div>
     </div>}
@@ -499,14 +501,14 @@ export function RobotViewport({
         <span>Start · 0.00 s</span><span>{trajectoryPoints.length} points</span><span>End · {totalTime.toFixed(2)} s</span>
       </div>
     </div>}
-    <Canvas shadows camera={{position:viewPreferences.cameraPosition,fov:42,near:0.01,far:100}} dpr={[1,1.75]} gl={{antialias:true,alpha:false}}>
+    <Canvas shadows camera={{position:viewPreferences.cameraPosition,fov:42,near:0.01,far:100}} dpr={[1,1.35]} gl={{antialias:true,alpha:false,powerPreference:"high-performance"}}>
       <color attach="background" args={["#fafafa"]}/>
       <ambientLight intensity={1.1}/>
       <directionalLight position={[2,4,2]} intensity={2.1} castShadow/>
       <directionalLight position={[-2,2,-3]} intensity={0.65}/>
       <Suspense fallback={null}>
         <group ref={rootRef} rotation={[-Math.PI/2,0,0]}>
-          {model&&<RobotModelNode model={model} jointState={jointState} onLoaded={onLoaded}
+          {model&&<RobotModelNode model={model} onLoaded={onLoaded}
             showRods={showRods} showMeshes={showMeshes} showGripperMeshes={showGripperMeshes}
             previewPositions={previewPositions} gripperPositionMm={gripperPositionMm}/>}
           <TcpFrame robot={robot} linkName={model?.pgea_urdf?"tcp":model?.end_effector_link??""} visible={showTcp}/>
@@ -567,3 +569,20 @@ export function RobotViewport({
     </div>
   </div>;
 }
+
+
+function sameTarget(a:RobotViewportProps["targetTcp"],b:RobotViewportProps["targetTcp"]){
+  if(a===b)return true;
+  if(!a||!b)return false;
+  return a.x===b.x&&a.y===b.y&&a.z===b.z&&a.rx===b.rx&&a.ry===b.ry&&a.rz===b.rz;
+}
+type RobotViewportProps=Parameters<typeof RobotViewportView>[0];
+function sameRobotViewportProps(a:RobotViewportProps,b:RobotViewportProps){
+  return a.model===b.model&&a.scene===b.scene&&a.plan===b.plan&&
+    a.comparisonPaths===b.comparisonPaths&&sameTarget(a.targetTcp,b.targetTcp)&&
+    a.gripperPositionMm===b.gripperPositionMm&&a.poseMarkers===b.poseMarkers&&
+    a.loading===b.loading&&a.error===b.error&&a.viewPreferences===b.viewPreferences&&
+    a.onViewPreferencesChange===b.onViewPreferencesChange&&a.objectLabels===b.objectLabels&&
+    a.disabledObjects===b.disabledObjects&&a.hiddenObjects===b.hiddenObjects;
+}
+export const RobotViewport=memo(RobotViewportView,sameRobotViewportProps);

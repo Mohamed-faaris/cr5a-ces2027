@@ -680,7 +680,7 @@ export function VisualizerPage(){
           <div className="flex items-center gap-2"><Box size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D scene</span><span className="text-xs text-zinc-400">{worldObjects.length} world · {attachedObjects.length} attached</span></div>
           <span className="text-[11px] text-zinc-400">{model?.base_frame??"dummy_link"}</span>
         </div>
-        <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} comparisonPaths={comparisonPaths} targetTcp={tcpTarget}
+        <RobotViewport model={model} scene={scene} plan={plan} comparisonPaths={comparisonPaths} targetTcp={tcpTarget}
           gripperPositionMm={gripper.positionMm} loading={modelLoading} error={modelError??sceneError}
           viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
           objectLabels={objectLabels} disabledObjects={disabledObjects} hiddenObjects={hiddenObjects}/>

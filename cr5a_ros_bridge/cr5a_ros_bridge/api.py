@@ -2684,6 +2684,40 @@ def create_app(backend, config):
             await apply_scene(scene)
             return {"removed_world_objects": len(scene.world.collision_objects)}
 
+        if method == "scene.load_defaults":
+            """Idempotently restore the three standard CR5 workspace obstacles."""
+            base_frame = str(config.get("moveit", {}).get("base_frame", "dummy_link"))
+            frame_id = str(params.get("frame_id") or base_frame)
+            if frame_id != base_frame:
+                raise HTTPException(status_code=422, detail=f"Default obstacles must use the configured MoveIt base frame ({base_frame})")
+            current = await get_scene()
+            existing_ids = {item.id for item in current.world.collision_objects}
+            definitions = (
+                ("ground_plane", [0.0, 0.0, -0.7679], [10.0, 10.0, 0.05]),
+                ("base_pedestal", [0.0, 0.0, -0.37645], [0.15, 0.15, 0.7329]),
+                ("Box_0", [0.0, 0.15, 0.05], [0.0405395, 0.0405395, 0.0405395]),
+            )
+            missing = [
+                collision_object({
+                    "id": object_id, "shape": "box", "frame_id": frame_id,
+                    "position_m": position, "dimensions_m": dimensions,
+                })
+                for object_id, position, dimensions in definitions
+                if object_id not in existing_ids
+            ]
+            if missing:
+                diff = PlanningScene()
+                diff.is_diff = True
+                diff.world.collision_objects.extend(missing)
+                await apply_scene(diff)
+            loaded_ids = [item.id for item in missing]
+            return {
+                "status": "LOADED", "frame_id": frame_id,
+                "loaded": loaded_ids,
+                "already_present": [name for name, _, _ in definitions if name in existing_ids],
+                "object_ids": [name for name, _, _ in definitions],
+            }
+
         if method == "pick_place.prepare":
             return await prepare_pick_place_scene(params)
 

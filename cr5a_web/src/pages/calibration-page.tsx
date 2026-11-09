@@ -232,7 +232,7 @@ export function CalibrationPage(){
       <div className="panel-header"><div className="flex items-center gap-2"><Crosshair size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D calibration workspace</span><span className="text-xs text-zinc-400">{generatedPoses.length} pose samples</span></div><span className="text-[10px] text-zinc-400">{model?.base_frame??"dummy_link"}</span></div>
       <div className="grid items-start xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="min-w-0">
-          <RobotViewport model={model} jointState={joints} scene={scene} plan={plan} loading={modelLoading} error={modelError??sceneError}
+          <RobotViewport model={model} scene={scene} plan={plan} loading={modelLoading} error={modelError??sceneError}
             viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
             objectLabels={viewPreferences.objectLabels} disabledObjects={{}} hiddenObjects={viewPreferences.hiddenObjects} poseMarkers={visiblePoseMarkers}/>
           <div className="flex flex-wrap items-center gap-4 border-t border-zinc-100 px-3 py-2 text-[10px] text-zinc-500"><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-teal-600"/>Captured sample</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-blue-600"/>Generated plan</span><span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full bg-orange-500"/>Selected pose</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
