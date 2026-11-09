@@ -722,6 +722,8 @@ def create_app(backend, config):
                 detail="Unsupported command. Emergency stop is deliberately not exposed through this network API.",
             )
         command_payload = normalize_robot_command_payload(command, payload)
+        if command == "set-payload":
+            await require_connected_arm()
         result = await _await_ros(backend.robot_service(service_name, command_payload))
         data = _dict(result)
         backend.emit("robot.state", {"command": command, "response": data})
@@ -2496,6 +2498,8 @@ def create_app(backend, config):
                     detail="Unsupported command. Emergency stop is not exposed through this network API.",
                 )
             command_payload = normalize_robot_command_payload(command, params.get("payload", {}))
+            if command == "set-payload":
+                await require_connected_arm()
             result = await _await_ros(
                 backend.robot_service(service_name, command_payload)
             )

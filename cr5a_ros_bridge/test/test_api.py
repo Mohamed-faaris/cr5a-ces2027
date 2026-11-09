@@ -13,7 +13,7 @@ from rcl_interfaces.srv import GetParameters
 
 from cr5a_ros_bridge.api import create_app
 from cr5a_ros_bridge.ros_backend import BridgeNode
-from dobot_msgs_v4.srv import SetPayload
+from dobot_msgs_v4.srv import SetPayload, RobotMode
 
 
 class FakeBackend:
@@ -26,6 +26,11 @@ class FakeBackend:
     def robot_service(self, name, payload=None):
         self.robot_calls = getattr(self, "robot_calls", [])
         self.robot_calls.append((name, payload or {}))
+        if name == "RobotMode":
+            response = RobotMode.Response()
+            response.res = 0
+            response.robot_return = 5
+            return response
         response = SetPayload.Response()
         response.res = 0
         return response
@@ -1149,10 +1154,12 @@ def test_direct_movement_enabled_at_startup_requires_idle_recovery():
 
 def test_set_payload_command_validates_and_forwards_controller_load():
     backend = FakeBackend()
+    from datetime import datetime, timezone
+    backend.topic_snapshot = lambda topic: {"data": {"is_connected": True}, "timestamp": datetime.now(timezone.utc).isoformat()}
     config = {
         "auth": {"enabled": False},
         "ros": {"topic_publish_enabled": False, "generic_service_calls_enabled": False},
-        "robot": {"allow_commands": True, "max_payload_kg": 5.0},
+        "robot": {"allow_commands": True, "max_payload_kg": 5.0, "status_topic": "/status"},
         "moveit": {"allow_execution": False},
     }
     with TestClient(create_app(backend, config)) as client:
