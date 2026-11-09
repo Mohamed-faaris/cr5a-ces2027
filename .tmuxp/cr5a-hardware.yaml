@@ -21,7 +21,7 @@ windows:
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-hardware-driver bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
       - shell_command:
-          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh moveit bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch cr5_moveit dobot_moveit.launch.py"'
+          - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh moveit bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec ros2 launch dobot_moveit dobot_moveit.launch.py"'
       - shell_command:
           - bash -lc 'bash src/cr5a-ces2027/.tmuxp/log-pane.sh shell-moveit bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && exec bash -i"'
       - shell_command:
