@@ -1,0 +1,28 @@
+session_name: cr5a-pick-place-gazebo
+windows:
+  - window_name: gazebo-moveit
+    layout: even-horizontal
+    panes:
+      - shell_command:
+          - cd /root/cr5a_ws
+          - source /opt/ros/humble/setup.bash
+          - source install/setup.bash
+          - ros2 launch dobot_gazebo pick_place_gazebo.launch.py shelf_profile:=standard object_kind:=coke shelf_level:=1
+      - shell_command:
+          - cd /root/cr5a_ws
+          - source /opt/ros/humble/setup.bash
+          - source install/setup.bash
+          - watch -n 2 'ros2 control list_controllers 2>/dev/null; echo; ros2 action list 2>/dev/null'
+  - window_name: monitor
+    panes:
+      - shell_command:
+          - cd /root/cr5a_ws
+          - source /opt/ros/humble/setup.bash
+          - source install/setup.bash
+          - watch -n 2 'ros2 node list; echo; ros2 service list | grep -E "SetPayload|RobotMode|apply_planning_scene|get_planning_scene"'
+  - window_name: shell
+    panes:
+      - shell_command:
+          - cd /root/cr5a_ws
+          - source /opt/ros/humble/setup.bash
+          - source install/setup.bash

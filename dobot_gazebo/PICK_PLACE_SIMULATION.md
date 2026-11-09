@@ -14,3 +14,12 @@ Supported shelf profiles: `compact`, `standard`, `wide`, `deep`. Supported dynam
 The launch file uses the custom PGEA URDF and resolves the `gazebo_ros2_control` parameter file from the installed `cr5_moveit` package. It starts the joint-state broadcaster, arm trajectory controller, gripper action controller, simulation telemetry adapter, MoveIt and RViz. The physical controller's `SetPayload` service is simulated by `dobot_simulation`; this does not prove the real robot's payload or tool-frame calibration.
 
 Gazebo Classic verifies rigid-body contact and the MoveIt planning scene verifies collision-free robot paths. A successful MoveIt plan does not prove stable grasp retention, finger force, friction, or real hardware safety. Do not execute the generated task on hardware without a guarded validation procedure.
+
+A tmuxp session is provided at `.tmuxp/pick-place-gazebo.yaml`:
+
+```bash
+cd ~/cr5a_ws/src/cr5a-ces2027
+tmuxp load -d .tmuxp/pick-place-gazebo.yaml
+```
+
+It opens a Gazebo/MoveIt launch pane, a controller/action monitor, a ROS service monitor and a shell. Keep the existing bridge and frontend windows running; stop the fake-hardware `moveit-demo` and simulated gripper windows first to avoid duplicate controllers/action servers.
