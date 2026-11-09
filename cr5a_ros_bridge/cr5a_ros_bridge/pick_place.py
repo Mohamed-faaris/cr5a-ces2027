@@ -18,7 +18,7 @@ OBJECT_PRESETS = {
     },
     "pringles_165g": {
         "label": "Pringles tube 165 g", "shape": "cylinder",
-        "dimensions_m": [0.076, 0.076, 0.240], "mass_kg": 0.205,
+        "dimensions_m": [0.075, 0.075, 0.240], "mass_kg": 0.215,
         "mass_source": "Estimate: 165 g contents plus approximately 40 g tube and lid",
     },
 }
@@ -47,7 +47,7 @@ def _vector(value: Any, length: int, name: str, *, minimum: float | None = None)
 
 
 def estimate_payload_mass(kind: str, dimensions_m: list[float] | None = None,
-                          density_kg_m3: float = 750.0, supplied_mass_kg: float | None = None) -> dict:
+                          density_kg_m3: float = 650.0, supplied_mass_kg: float | None = None) -> dict:
     """Return a traceable payload estimate; supplied mass takes precedence."""
     if supplied_mass_kg is not None:
         mass = _finite(supplied_mass_kg, "mass_kg", minimum=0.001)
@@ -85,7 +85,7 @@ def normalize_object(payload: dict) -> dict:
         dimensions = _vector(dims, 3, "dimensions_m", minimum=0.001)
     centroid = _vector(payload.get("centroid_m", payload.get("position_m", [0.3, 0.0, 0.1])), 3, "centroid_m")
     rpy = _vector(payload.get("rpy_rad", [0.0, 0.0, math.radians(float(payload.get("yaw_deg", 0.0)))]), 3, "rpy_rad")
-    mass = estimate_payload_mass(kind, dimensions, payload.get("density_kg_m3", 750.0), payload.get("mass_kg"))
+    mass = estimate_payload_mass(kind, dimensions, payload.get("density_kg_m3", 650.0), payload.get("mass_kg"))
     object_id = str(payload.get("id", "pick_object"))
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", object_id):
         raise ValueError("object id must be 1-64 letters, digits, dot, underscore or hyphen")

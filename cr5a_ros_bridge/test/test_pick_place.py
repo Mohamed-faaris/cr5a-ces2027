@@ -24,9 +24,9 @@ def test_coke_and_pringles_payload_estimates_are_traceable():
 
 
 def test_wood_box_mass_uses_volume_times_density():
-    result = estimate_payload_mass("wood_box", [0.12, 0.09, 0.08], 750)
-    assert result["mass_kg"] == pytest.approx(0.648)
-    assert "750" in result["source"]
+    result = estimate_payload_mass("wood_box", [0.12, 0.09, 0.08], 650)
+    assert result["mass_kg"] == pytest.approx(0.5616)
+    assert "650" in result["source"]
 
 
 def test_vision_object_schema_normalizes_centroid_and_mass():
