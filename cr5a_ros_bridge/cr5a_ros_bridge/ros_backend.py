@@ -478,6 +478,8 @@ class BridgeNode(Node):
         goal = MoveGroup.Goal()
         request = goal.request
         request.group_name = payload.get("group_name", moveit.get("group_name", "cr5_group"))
+        # An empty start state is a diff against MoveIt's monitored current state.
+        request.start_state.is_diff = True
         request.num_planning_attempts = int(payload.get("num_planning_attempts", 5))
         if not 1 <= request.num_planning_attempts <= 20:
             raise ValueError("num_planning_attempts must be between 1 and 20")
