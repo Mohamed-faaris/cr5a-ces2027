@@ -24,13 +24,19 @@ from .gripper_profiles import (
     resolve_profiles_path,
 )
 from .direct_motion import (JOINT_NAMES, joint_path_samples, movj_target, movl_path_samples, movl_target)
+from .pick_place import (
+    SHELF_PRESETS, build_task_waypoints, calculate_payload_model,
+    evaluate_gripper_fit, generate_grasp_candidates, generate_shelf_scene,
+    normalize_object, quaternion_from_rpy,
+    pose_relative_to, pose_compose, rotate_vector,
+)
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
 )
 from moveit_msgs.msg import (
     PlanningScene, PlanningSceneComponents, CollisionObject,
-    AttachedCollisionObject,
+    AttachedCollisionObject, AllowedCollisionEntry,
 )
 from moveit_msgs.srv import (
     GetPlanningScene, ApplyPlanningScene, GetPositionFK, GetPositionIK, GetStateValidity,
@@ -682,7 +688,29 @@ def create_app(backend, config):
         "reset": "ResetRobot",
         "start-drag": "StartDrag",
         "stop-drag": "StopDrag",
+        "set-payload": "SetPayload",
     }
+
+    def normalize_robot_command_payload(command: str, payload: Optional[dict]) -> dict:
+        data = payload or {}
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=422, detail="Robot command payload must be an object")
+        _validate_finite_json(data, "command payload")
+        if command == "set-payload":
+            try:
+                load = float(data.get("load"))
+                if not math.isfinite(load) or load <= 0:
+                    raise ValueError("load must be a finite value greater than zero")
+                maximum = float(config.get("robot", {}).get("max_payload_kg", 5.0))
+                if load > maximum:
+                    raise ValueError(f"total payload {load:g} kg exceeds configured CR5 limit {maximum:g} kg")
+                offsets = finite_vector([data.get("x", 0.0), data.get("y", 0.0), data.get("z", 0.0)], 3, "payload COM offsets")
+                if any(abs(value) > 500 for value in offsets):
+                    raise ValueError("payload COM offsets must be within ±500 mm")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return {"load": load, "x": offsets[0], "y": offsets[1], "z": offsets[2]}
+        return data
 
     @app.post("/api/v1/robot/commands/{command}")
     async def robot_command(command: str, payload: Optional[dict] = None):
@@ -694,8 +722,9 @@ def create_app(backend, config):
                 status_code=404,
                 detail="Unsupported command. Emergency stop is deliberately not exposed through this network API.",
             )
-        command_payload = payload or {}
-        _validate_finite_json(command_payload, "command payload")
+        command_payload = normalize_robot_command_payload(command, payload)
+        if command == "set-payload":
+            await require_connected_arm()
         result = await _await_ros(backend.robot_service(service_name, command_payload))
         data = _dict(result)
         backend.emit("robot.state", {"command": command, "response": data})
@@ -1713,7 +1742,7 @@ def create_app(backend, config):
         await apply_scene(scene)
         return {"id": object_id, "detached": True}
 
-    async def create_motion_plan_impl(payload: dict):
+    async def create_motion_plan_impl(payload: dict, goal_mutator=None):
         plan_id = "plan_" + uuid.uuid4().hex[:12]
         backend.plans[plan_id] = {
             "id": plan_id, "status": "PLANNING", "created_at": time.time(),
@@ -1759,6 +1788,8 @@ def create_app(backend, config):
                 )
 
             goal = backend.make_move_group_goal(payload)
+            if goal_mutator is not None:
+                goal_mutator(goal)
             result = await _await_ros(
                 backend.send_plan_goal(plan_id, goal),
                 float(config.get("ros", {}).get("action_timeout_sec", 45.0)),
@@ -1832,6 +1863,331 @@ def create_app(backend, config):
         }
         backend.emit("motion.plan", data)
         return data
+
+    def _pick_place_scene_payload(payload: dict):
+        obj = normalize_object(payload.get("object", {}))
+        frame_id = str(payload.get("frame_id", obj["frame_id"]))
+        shelf_spec = payload.get("shelf", "standard")
+        place_destination = str(payload.get("place_destination", "platform"))
+        if place_destination not in ("platform", "shelf"):
+            raise ValueError("place_destination must be 'platform' or 'shelf'")
+        platform = payload.get("platform", {"position_m": [0.45, 0.0, 0.0], "dimensions_m": [0.30, 0.24, 0.02]})
+        if place_destination == "shelf":
+            platform = None
+        clearance = float(payload.get("clearance_m", 0.012))
+        level = payload.get("level", 0)
+        scene_data = generate_shelf_scene(
+            shelf_spec, frame_id=frame_id, level=level,
+            place_level=payload.get("place_level", level),
+            clearance_m=clearance, object_dimensions_m=obj["dimensions_m"],
+            platform=platform,
+            origin_m=payload.get("shelf_pose", {}).get("position_m", [0.55, 0.0, 0.0]),
+            yaw_rad=payload.get("shelf_pose", {}).get("yaw_rad", 1.57079632679),
+            object_yaw_rad=obj["rpy_rad"][2],
+        )
+        if not scene_data["fit"]["valid"]:
+            raise ValueError("Object does not fit selected shelf bay: " + "; ".join(scene_data["fit"]["reasons"]))
+        pick_source = str(payload.get("pick_source", "shelf"))
+        if pick_source not in ("shelf", "free"):
+            raise ValueError("pick_source must be 'shelf' or 'free'")
+        object_relative_yaw = obj["rpy_rad"][2] - scene_data["shelf"]["yaw_rad"]
+        object_half_front_depth = (
+            abs(math.sin(object_relative_yaw)) * obj["dimensions_m"][0]
+            + abs(math.cos(object_relative_yaw)) * obj["dimensions_m"][1]
+        ) / 2.0
+        shelf_front_inward = rotate_vector(
+            quaternion_from_rpy(0.0, 0.0, scene_data["shelf"]["yaw_rad"]), [0.0, -1.0, 0.0]
+        )
+        source_corridor_distance = (
+            scene_data["shelf"]["depth_m"] / 2.0
+            + object_half_front_depth + clearance + 0.020
+        )
+        configured_approach = float(payload.get("approach_distance_m", 0.08))
+        pick_approach_distance = max(configured_approach, source_corridor_distance) if pick_source == "shelf" else configured_approach
+        grasp = generate_grasp_candidates(
+            obj,
+            gripper_yaw_deg=payload.get("gripper_yaw_deg"),
+            approach_angle_deg=payload.get("approach_angle_deg", 0.0),
+            approach_distance_m=pick_approach_distance,
+            tcp_offset_m=payload.get("tcp_offset_m", [0.0, 0.0, 0.0]),
+        )[0]
+        if pick_source == "shelf":
+            alignment = sum(grasp["approach_vector"][i] * shelf_front_inward[i] for i in range(3))
+            if alignment < math.cos(math.radians(35.0)):
+                raise ValueError(
+                    "Shelf pick approach must exit through the open front; align gripper yaw/approach with the shelf opening"
+                )
+        place_destination = str(payload.get("place_destination", "platform"))
+        if place_destination not in ("platform", "shelf"):
+            raise ValueError("place_destination must be 'platform' or 'shelf'")
+        if place_destination == "shelf":
+            place_surface = scene_data["shelf_place_surface_center_m"]
+            shelf_yaw = scene_data["shelf"]["yaw_rad"]
+            shelf_front_inward = rotate_vector(
+                quaternion_from_rpy(0.0, 0.0, shelf_yaw), [0.0, -1.0, 0.0]
+            )
+            approach = grasp["approach_vector"]
+            alignment = sum(approach[i] * shelf_front_inward[i] for i in range(3))
+            if alignment < math.cos(math.radians(35.0)):
+                raise ValueError(
+                    "Shelf placement approach must enter through the open front; rotate the gripper yaw/approach to align with the shelf opening"
+                )
+            relative_yaw = obj["rpy_rad"][2] - shelf_yaw
+            projected_half_depth = (
+                abs(math.sin(relative_yaw)) * obj["dimensions_m"][0]
+                + abs(math.cos(relative_yaw)) * obj["dimensions_m"][1]
+            ) / 2.0
+            shelf_front_clearance = (
+                scene_data["shelf"]["depth_m"] / 2.0
+                + projected_half_depth + clearance + 0.020
+            )
+            place_approach_distance = max(
+                float(payload.get("approach_distance_m", 0.08)), shelf_front_clearance
+            )
+        else:
+            place_surface = scene_data["platform_place_surface_center_m"]
+            place_approach_distance = float(payload.get("place_approach_distance_m", payload.get("approach_distance_m", 0.08)))
+        waypoints = build_task_waypoints(
+            obj, grasp, place_surface,
+            lift_distance_m=payload.get("lift_distance_m", 0.10),
+            place_approach_distance_m=place_approach_distance,
+            withdrawal_distance_m=(pick_approach_distance if pick_source == "shelf" else configured_approach),
+        )
+        scene_data["pick_source"] = pick_source
+        scene_data["pick_approach_distance_m"] = pick_approach_distance
+        scene_data["place_destination"] = place_destination
+        scene_data["selected_place_surface_center_m"] = place_surface
+        scene_data["place_approach_distance_m"] = place_approach_distance
+        return obj, scene_data, grasp, waypoints, frame_id
+
+    async def prepare_pick_place_scene(payload: dict):
+        try:
+            obj, scene_data, grasp, waypoints, frame_id = _pick_place_scene_payload(payload)
+            frame_id = str(payload.get("frame_id", config.get("moveit", {}).get("base_frame", "dummy_link")))
+            additions = []
+            for item in scene_data["collision_objects"]:
+                item = dict(item)
+                item["id"] = "pick_place_" + item["id"]
+                additions.append(collision_object(item))
+            object_pose = obj["centroid_m"]
+            object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            object_payload = {
+                "id": "pick_place_object", "shape": obj["shape"], "frame_id": frame_id,
+                "position_m": object_pose, "orientation_xyzw": object_orientation,
+            }
+            if obj["shape"] == "cylinder":
+                object_payload["height_m"] = obj["dimensions_m"][2]
+                object_payload["radius_m"] = max(obj["dimensions_m"][0:2]) / 2
+            elif obj["shape"] == "sphere":
+                object_payload["radius_m"] = obj["dimensions_m"][0] / 2
+            else:
+                object_payload["dimensions_m"] = obj["dimensions_m"]
+            additions.append(collision_object(object_payload))
+            current = await get_scene()
+            diff = PlanningScene()
+            diff.is_diff = True
+            for existing in current.world.collision_objects:
+                if existing.id.startswith("pick_place_"):
+                    remove = CollisionObject()
+                    remove.id = existing.id
+                    remove.operation = CollisionObject.REMOVE
+                    diff.world.collision_objects.append(remove)
+            diff.world.collision_objects.extend(additions)
+            await apply_scene(diff)
+            return {
+                "status": "SCENE_READY", "frame_id": frame_id,
+                "scene_object_ids": [item.id for item in additions],
+                "object": obj, "shelf": scene_data["shelf"],
+                "fit": scene_data["fit"], "grasp": grasp,
+                "waypoints": waypoints,
+                "place_destination": scene_data["place_destination"],
+                "place_surface_center_m": scene_data["selected_place_surface_center_m"],
+                "place_approach_distance_m": scene_data["place_approach_distance_m"],
+                "gripper_nominal_total_stroke_m": float(config.get("gripper", {}).get("nominal_total_stroke_m", 0.040)),
+                "gripper_finger_mesh_span_m": float(config.get("gripper", {}).get("finger_mesh_span_m", 0.045)),
+                "gripper_wrap_envelope_m": float(config.get("gripper", {}).get("wrap_envelope_m", 0.085)),
+                "grasp_strategy": payload.get("grasp_strategy", "parallel_jaw"),
+                "gripper_fit": evaluate_gripper_fit(
+                    obj["dimensions_m"],
+                    strategy=payload.get("grasp_strategy", "parallel_jaw"),
+                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0),
+                    clearance_m=payload.get("gripper_clearance_m", 0.006),
+                    nominal_stroke_m=config.get("gripper", {}).get("nominal_total_stroke_m", 0.040),
+                    finger_mesh_span_m=config.get("gripper", {}).get("finger_mesh_span_m", 0.045),
+                    wrap_envelope_m=config.get("gripper", {}).get("wrap_envelope_m", 0.085),
+                ),
+                "gripper_width_feasible": evaluate_gripper_fit(
+                    obj["dimensions_m"],
+                    strategy=payload.get("grasp_strategy", "parallel_jaw"),
+                    gripper_yaw_deg=payload.get("gripper_yaw_deg", 0.0),
+                    clearance_m=payload.get("gripper_clearance_m", 0.006),
+                    nominal_stroke_m=config.get("gripper", {}).get("nominal_total_stroke_m", 0.040),
+                    finger_mesh_span_m=config.get("gripper", {}).get("finger_mesh_span_m", 0.045),
+                    wrap_envelope_m=config.get("gripper", {}).get("wrap_envelope_m", 0.085),
+                )["valid"],
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    async def plan_pick_place_task(payload: dict):
+        prepared = await prepare_pick_place_scene(payload)
+        if not prepared["gripper_width_feasible"]:
+            strategy = prepared.get("grasp_strategy", "parallel_jaw")
+            return {**prepared, "status": "BLOCKED_GRIPPER_GEOMETRY",
+                    "error": f"Object plus clearance exceeds the PGEA envelope for grasp strategy {strategy!r}. Select an appropriate finger/contact strategy or end-effector."}
+        obj = prepared["object"]
+        scene_snapshot = await get_scene()
+        base_allowed_collision_matrix = copy.deepcopy(scene_snapshot.allowed_collision_matrix)
+        gripper_cfg = config.get("gripper", {})
+        try:
+            payload_model = calculate_payload_model(
+                obj["mass_kg"],
+                tool_mass_kg=payload.get("tool_mass_kg", gripper_cfg.get("tool_mass_kg", 1.6)),
+                object_com_m=payload.get("object_com_m", [0.0, 0.0, 0.0]),
+                tool_com_m=payload.get("tool_com_m", gripper_cfg.get("tool_com_tcp_m", [0.0, 0.0, 0.0])),
+                base_velocity_scaling=payload.get("max_velocity_scaling", 0.15),
+                base_acceleration_scaling=payload.get("max_acceleration_scaling", 0.15),
+                max_payload_kg=payload.get("max_payload_kg", config.get("robot", {}).get("max_payload_kg", 5.0)),
+            )
+        except ValueError as exc:
+            return {**prepared, "status": "BLOCKED_PAYLOAD_LIMIT", "error": str(exc)}
+        waypoints = prepared["waypoints"]
+        frame_id = prepared["frame_id"]
+        link_name = config.get("moveit", {}).get("pick_place_tcp_link", "tcp")
+        object_id = "pick_place_object"
+        touch_links = payload.get("touch_links", [link_name, "gripper_body", "left_finger", "right_finger"])
+        if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
+            raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
+
+        def allow_object_contact(goal):
+            matrix = copy.deepcopy(base_allowed_collision_matrix)
+            names = list(matrix.entry_names)
+            rows = [list(entry.enabled) for entry in matrix.entry_values]
+            while len(rows) < len(names):
+                rows.append([False] * len(names))
+            rows = [row[:len(names)] + [False] * max(0, len(names) - len(row)) for row in rows]
+
+            def ensure_name(name):
+                if name not in names:
+                    for row in rows:
+                        row.append(False)
+                    names.append(name)
+                    rows.append([False] * len(names))
+                return names.index(name)
+
+            object_index = ensure_name(object_id)
+            for link_name_item in touch_links:
+                link_index = ensure_name(link_name_item)
+                rows[object_index][link_index] = True
+                rows[link_index][object_index] = True
+            matrix.entry_names = names
+            matrix.entry_values = []
+            for row in rows:
+                entry = AllowedCollisionEntry()
+                entry.enabled = row
+                matrix.entry_values.append(entry)
+            goal.planning_options.planning_scene_diff.allowed_collision_matrix = matrix
+
+        def attach_object(goal):
+            scene_diff = goal.planning_options.planning_scene_diff
+            remove = CollisionObject()
+            remove.id = object_id
+            remove.operation = CollisionObject.REMOVE
+            scene_diff.world.collision_objects.append(remove)
+            attached = AttachedCollisionObject()
+            attached.link_name = link_name
+            attached.touch_links = touch_links
+            object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            relative = pose_relative_to(
+                waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
+                obj["centroid_m"], object_orientation,
+            )
+            attached.object = collision_object({
+                "id": object_id, "shape": obj["shape"], "frame_id": link_name,
+                "position_m": relative["position_m"], "orientation_xyzw": relative["orientation_xyzw"],
+                **({"dimensions_m": obj["dimensions_m"]} if obj["shape"] == "box" else
+                   {"height_m": obj["dimensions_m"][2], "radius_m": max(obj["dimensions_m"][0:2]) / 2} if obj["shape"] == "cylinder" else
+                   {"radius_m": obj["dimensions_m"][0] / 2}),
+            })
+            attached.object.header.frame_id = link_name
+            scene_diff.robot_state.attached_collision_objects.append(attached)
+            scene_diff.robot_state.is_diff = True
+
+        def detach_and_place(goal):
+            scene_diff = goal.planning_options.planning_scene_diff
+            attached = AttachedCollisionObject()
+            attached.link_name = link_name
+            attached.object.id = object_id
+            attached.object.operation = CollisionObject.REMOVE
+            scene_diff.robot_state.attached_collision_objects.append(attached)
+            scene_diff.robot_state.is_diff = True
+            place = next(item for item in waypoints if item["name"] == "place")
+            object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            relative = pose_relative_to(
+                waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
+                obj["centroid_m"], object_orientation,
+            )
+            world_pose = pose_compose(
+                place["position_m"], place["orientation_xyzw"],
+                relative["position_m"], relative["orientation_xyzw"],
+            )
+            object_payload = {
+                "id": object_id, "shape": obj["shape"], "frame_id": frame_id,
+                "position_m": world_pose["position_m"],
+                "orientation_xyzw": world_pose["orientation_xyzw"],
+            }
+            if obj["shape"] == "box":
+                object_payload["dimensions_m"] = obj["dimensions_m"]
+            elif obj["shape"] == "cylinder":
+                object_payload["height_m"] = obj["dimensions_m"][2]
+                object_payload["radius_m"] = max(obj["dimensions_m"][0:2]) / 2
+            else:
+                object_payload["radius_m"] = obj["dimensions_m"][0] / 2
+            scene_diff.world.collision_objects.append(collision_object(object_payload))
+            scene_diff.allowed_collision_matrix = copy.deepcopy(base_allowed_collision_matrix)
+
+        plans = []
+        start_state = None
+        for index, waypoint in enumerate(waypoints):
+            stage_payload = {
+                "group_name": payload.get("group_name", config.get("moveit", {}).get("group_name", "cr5_group")),
+                "target": {"type": "pose", "frame_id": frame_id, "link_name": link_name,
+                    "position_m": waypoint["position_m"], "orientation_xyzw": waypoint["orientation_xyzw"],
+                    "position_tolerance_m": payload.get("position_tolerance_m", 0.003),
+                    "orientation_tolerance_rad": payload.get("orientation_tolerance_rad", 0.03)},
+                "allowed_planning_time": payload.get("allowed_planning_time", 5.0),
+                "max_velocity_scaling": payload_model["max_velocity_scaling"],
+                "max_acceleration_scaling": payload_model["max_acceleration_scaling"],
+                "pipeline_id": payload.get("pipeline_id", "ompl"),
+                "planner_id": payload.get("planner_id", ""),
+            }
+            if start_state:
+                stage_payload["start_state"] = start_state
+            mutator = None
+            if waypoint["name"] == "grasp":
+                mutator = allow_object_contact
+            elif waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
+                mutator = attach_object
+            elif waypoint["name"] == "retreat":
+                mutator = detach_and_place
+            result = await create_motion_plan_impl(stage_payload, mutator)
+            plans.append({"name": waypoint["name"], **result})
+            if result.get("status") != "SUCCEEDED":
+                return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
+                        "payload_model": payload_model,
+                        "failed_stage": waypoint["name"], "error_code": result.get("error_code")}
+            trajectory = result.get("trajectory") or {}
+            joint = trajectory.get("joint_trajectory") or {}
+            points = joint.get("points") or []
+            if not points:
+                return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
+                        "payload_model": payload_model,
+                        "failed_stage": waypoint["name"], "error": "MoveIt returned no joint trajectory points"}
+            start_state = {"joint_names": joint.get("joint_names", []),
+                           "positions_rad": points[-1].get("positions", [])}
+        return {**prepared, "status": "PLANNED", "plans": plans,
+                "payload_model": payload_model,
+                "planning_time_total": sum(float(item.get("planning_time") or 0.0) for item in plans)}
 
     @app.post("/api/v1/motion-plans")
     async def create_motion_plan(payload: dict):
@@ -2270,8 +2626,11 @@ def create_app(backend, config):
                     status_code=404,
                     detail="Unsupported command. Emergency stop is not exposed through this network API.",
                 )
+            command_payload = normalize_robot_command_payload(command, params.get("payload", {}))
+            if command == "set-payload":
+                await require_connected_arm()
             result = await _await_ros(
-                backend.robot_service(service_name, params.get("payload", {}))
+                backend.robot_service(service_name, command_payload)
             )
             data = _dict(result)
             backend.emit("robot.state", {"command": command, "response": data})
@@ -2324,6 +2683,12 @@ def create_app(backend, config):
                 scene.world.collision_objects.append(obj)
             await apply_scene(scene)
             return {"removed_world_objects": len(scene.world.collision_objects)}
+
+        if method == "pick_place.prepare":
+            return await prepare_pick_place_scene(params)
+
+        if method == "pick_place.plan":
+            return await plan_pick_place_task(params)
 
         if method == "motion.plan":
             return await create_motion_plan_impl(params)

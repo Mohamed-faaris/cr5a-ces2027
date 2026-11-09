@@ -13,6 +13,7 @@ from rcl_interfaces.srv import GetParameters
 
 from cr5a_ros_bridge.api import create_app
 from cr5a_ros_bridge.ros_backend import BridgeNode
+from dobot_msgs_v4.srv import SetPayload, RobotMode
 
 
 class FakeBackend:
@@ -21,6 +22,20 @@ class FakeBackend:
 
     def get_name(self):
         return "cr5a_ros_bridge"
+
+    def robot_service(self, name, payload=None):
+        self.robot_calls = getattr(self, "robot_calls", [])
+        self.robot_calls.append((name, payload or {}))
+        if name == "RobotMode":
+            response = RobotMode.Response()
+            response.res = 0
+            response.robot_return = "5"
+        else:
+            response = SetPayload.Response()
+            response.res = 0
+        future = Future()
+        future.set_result(response)
+        return future
 
     def graph(self):
         return {
@@ -1137,3 +1152,40 @@ def test_direct_movement_enabled_at_startup_requires_idle_recovery():
     assert status.json()["phase"] == "recovery_required"
     assert blocked.status_code == 409
     assert not any(name == "MovJ" for name, _ in backend.robot_calls)
+
+
+def test_set_payload_command_validates_and_forwards_controller_load():
+    backend = FakeBackend()
+    from datetime import datetime, timezone
+    backend.topic_snapshot = lambda topic: {"data": {"is_connected": True}, "timestamp": datetime.now(timezone.utc).isoformat()}
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"topic_publish_enabled": False, "generic_service_calls_enabled": False},
+        "robot": {"allow_commands": True, "max_payload_kg": 5.0, "status_topic": "/status"},
+        "moveit": {"allow_execution": False},
+    }
+    with TestClient(create_app(backend, config)) as client:
+        response = client.post("/api/v1/robot/commands/set-payload", json={
+            "load": 1.955, "x": -86.6, "y": 0.0, "z": -109.6,
+        })
+        assert response.status_code == 200
+        assert backend.robot_calls == [
+            ("RobotMode", {}),
+            ("SetPayload", {"load": 1.955, "x": -86.6, "y": 0.0, "z": -109.6}),
+        ]
+
+
+def test_set_payload_rejects_load_above_cr5_rating():
+    backend = FakeBackend()
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"topic_publish_enabled": False, "generic_service_calls_enabled": False},
+        "robot": {"allow_commands": True, "max_payload_kg": 5.0},
+        "moveit": {"allow_execution": False},
+    }
+    with TestClient(create_app(backend, config)) as client:
+        response = client.post("/api/v1/robot/commands/set-payload", json={
+            "load": 5.1, "x": 0, "y": 0, "z": 0,
+        })
+        assert response.status_code == 422
+        assert "exceeds configured CR5 limit" in response.json()["detail"]

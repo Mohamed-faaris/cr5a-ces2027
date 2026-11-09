@@ -1,0 +1,142 @@
+"""Launch the PGEA CR5A in Gazebo Classic with ros2_control and MoveIt."""
+from __future__ import annotations
+
+import os
+import re
+import runpy
+import subprocess
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory, get_package_share_path
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, ExecuteProcess, SetEnvironmentVariable, TimerAction
+from launch.event_handlers import OnProcessExit
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def _setup(context):
+    profile = LaunchConfiguration("shelf_profile").perform(context)
+    object_kind = LaunchConfiguration("object_kind").perform(context)
+    level = int(LaunchConfiguration("shelf_level").perform(context))
+    world_path = Path("/tmp") / f"cr5a_pick_place_{profile}_{object_kind}.world"
+    generator = Path(get_package_share_directory("dobot_gazebo")) / "scripts/generate_pick_place_world.py"
+    generate_world = runpy.run_path(str(generator))["generate_world"]
+    generate_world(profile, object_kind, world_path, level=level)
+
+    gazebo_plugin_dir = Path(get_package_share_directory("gazebo_ros2_control")).parent.parent / "lib"
+    gazebo_port = LaunchConfiguration("gazebo_port").perform(context)
+    master_uri = f"http://127.0.0.1:{gazebo_port}"
+    gazebo_env = {
+        "GAZEBO_PLUGIN_PATH": str(gazebo_plugin_dir),
+        "GAZEBO_MASTER_URI": master_uri,
+        "GAZEBO_MODEL_PATH": os.pathsep.join([
+            str(get_package_share_path("dobot_rviz").parent),
+            os.environ.get("GAZEBO_MODEL_PATH", "/usr/share/gazebo-11/models"),
+        ]),
+    }
+    gazebo = ExecuteProcess(
+        cmd=["gzserver", "--verbose", str(world_path),
+             "-s", "libgazebo_ros_init.so",
+             "-s", "libgazebo_ros_factory.so",
+             "-s", "libgazebo_ros_force_system.so"],
+        output="screen", additional_env=gazebo_env,
+    )
+
+    urdf_path = get_package_share_path("dobot_rviz") / "urdf" / "cr5_pgea.urdf"
+    controllers_path = get_package_share_path("cr5_moveit") / "config" / "ros2_controllers_pgea.yaml"
+    robot_description_xml = urdf_path.read_text(encoding="utf-8")
+    robot_description_xml, replacements = re.subn(
+        r"<parameters>.*?</parameters>",
+        f"<parameters>{controllers_path}</parameters>",
+        robot_description_xml,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if replacements != 1:
+        raise RuntimeError("PGEA URDF is missing the gazebo_ros2_control parameters element")
+    if "<robot_param>" not in robot_description_xml:
+        robot_description_xml = robot_description_xml.replace(
+            "<robot_param_node>",
+            "<robot_param>robot_description</robot_param><robot_param_node>",
+            1,
+        )
+    runtime_urdf = Path("/tmp/cr5a_pgea_gazebo.urdf")
+    runtime_urdf.write_text(robot_description_xml, encoding="utf-8")
+    runtime_sdf = Path("/tmp/cr5a_pgea_gazebo.sdf")
+    converted = subprocess.run(
+        ["gz", "sdf", "-p", str(runtime_urdf)],
+        check=True, capture_output=True, text=True,
+    )
+    gazebo_control_plugin = Path(get_package_share_directory("gazebo_ros2_control")).parent.parent / "lib" / "libgazebo_ros2_control.so"
+    sdf_xml = converted.stdout.replace(
+        "filename='libgazebo_ros2_control.so'",
+        f"filename='{gazebo_control_plugin}'",
+    )
+    runtime_sdf.write_text(sdf_xml, encoding="utf-8")
+    import xml.etree.ElementTree as ET
+    world_tree = ET.parse(world_path)
+    robot_tree = ET.parse(runtime_sdf)
+    robot_model = robot_tree.getroot().find("model")
+    if robot_model is None:
+        raise RuntimeError("Converted PGEA SDF does not contain a model element")
+    world_tree.getroot().find("world").append(robot_model)
+    world_tree.write(world_path, encoding="unicode", xml_declaration=True)
+
+    robot_state_publisher = Node(
+        package="robot_state_publisher", executable="robot_state_publisher",
+        name="robot_state_publisher", output="screen",
+        parameters=[{"robot_description": robot_description_xml, "use_sim_time": True}],
+        remappings=[("/joint_states", "/rsp_joint_states")],
+    )
+    relay = Node(
+        package="dobot_gazebo", executable="joint_state_mimic_relay.py",
+        name="joint_state_mimic_relay", output="screen",
+        parameters=[{"use_sim_time": True}],
+    )
+    load_jsb = ExecuteProcess(
+        cmd=["ros2", "control", "load_controller", "--set-state", "active", "joint_state_broadcaster"],
+        output="screen",
+    )
+    load_arm = ExecuteProcess(
+        cmd=["ros2", "control", "load_controller", "--set-state", "active", "cr5_group_controller"],
+        output="screen",
+    )
+    load_gripper = ExecuteProcess(
+        cmd=["ros2", "control", "load_controller", "--set-state", "active", "gripper_action_controller"],
+        output="screen",
+    )
+    moveit_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(get_package_share_path("cr5_moveit") / "launch" / "moveit_gazebo.launch.py")),
+    )
+
+    simulation_adapter = Node(
+        package="dobot_simulation", executable="dobot_simulation", name="dobot_simulation",
+        output="screen", parameters=[{
+            "base_frame": "dummy_link", "tcp_link": "tcp",
+            "controller_action_name": "/cr5_group_controller/follow_joint_trajectory",
+            "use_sim_time": True,
+        }],
+    )
+
+    delayed_gazebo = TimerAction(period=2.0, actions=[gazebo])
+    delayed_jsb = TimerAction(period=7.0, actions=[load_jsb])
+    chain_arm = RegisterEventHandler(OnProcessExit(target_action=load_jsb, on_exit=[load_arm]))
+    chain_gripper = RegisterEventHandler(OnProcessExit(target_action=load_arm, on_exit=[load_gripper]))
+    chain_moveit = RegisterEventHandler(OnProcessExit(target_action=load_gripper, on_exit=[moveit_launch]))
+    return [robot_state_publisher, relay, simulation_adapter, delayed_gazebo,
+            delayed_jsb, chain_arm, chain_gripper, chain_moveit]
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument("shelf_profile", default_value="standard",
+                              description="compact, standard, wide or deep shelf geometry"),
+        DeclareLaunchArgument("object_kind", default_value="coke",
+                              description="coke, pringles or wood_box"),
+        DeclareLaunchArgument("shelf_level", default_value="1"),
+        DeclareLaunchArgument("gui", default_value="false", description="Enable Gazebo GUI (requires a working display/GPU)"),
+        DeclareLaunchArgument("gazebo_port", default_value="11346", description="Isolated Gazebo master TCP port"),
+        OpaqueFunction(function=_setup),
+    ])
