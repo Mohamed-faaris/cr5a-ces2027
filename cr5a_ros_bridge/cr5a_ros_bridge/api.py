@@ -687,7 +687,29 @@ def create_app(backend, config):
         "reset": "ResetRobot",
         "start-drag": "StartDrag",
         "stop-drag": "StopDrag",
+        "set-payload": "SetPayload",
     }
+
+    def normalize_robot_command_payload(command: str, payload: Optional[dict]) -> dict:
+        data = payload or {}
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=422, detail="Robot command payload must be an object")
+        _validate_finite_json(data, "command payload")
+        if command == "set-payload":
+            try:
+                load = float(data.get("load"))
+                if not math.isfinite(load) or load <= 0:
+                    raise ValueError("load must be a finite value greater than zero")
+                maximum = float(config.get("robot", {}).get("max_payload_kg", 5.0))
+                if load > maximum:
+                    raise ValueError(f"total payload {load:g} kg exceeds configured CR5 limit {maximum:g} kg")
+                offsets = finite_vector([data.get("x", 0.0), data.get("y", 0.0), data.get("z", 0.0)], 3, "payload COM offsets")
+                if any(abs(value) > 500 for value in offsets):
+                    raise ValueError("payload COM offsets must be within ±500 mm")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return {"load": load, "x": offsets[0], "y": offsets[1], "z": offsets[2]}
+        return data
 
     @app.post("/api/v1/robot/commands/{command}")
     async def robot_command(command: str, payload: Optional[dict] = None):
@@ -699,8 +721,7 @@ def create_app(backend, config):
                 status_code=404,
                 detail="Unsupported command. Emergency stop is deliberately not exposed through this network API.",
             )
-        command_payload = payload or {}
-        _validate_finite_json(command_payload, "command payload")
+        command_payload = normalize_robot_command_payload(command, payload)
         result = await _await_ros(backend.robot_service(service_name, command_payload))
         data = _dict(result)
         backend.emit("robot.state", {"command": command, "response": data})
@@ -1909,7 +1930,10 @@ def create_app(backend, config):
                 "waypoints": waypoints,
                 "place_surface_center_m": scene_data["place_surface_center_m"],
                 "gripper_nominal_opening_m": 0.04,
-                "gripper_width_feasible": max(obj["dimensions_m"][0:2]) <= 0.04,
+                "grasp_strategy": payload.get("grasp_strategy", "parallel_jaw"),
+                "gripper_width_feasible": (
+                    obj["kind"] == "coca_cola_330ml" and payload.get("grasp_strategy") == "pgea_hex_pocket"
+                ) or max(obj["dimensions_m"][0:2]) + float(payload.get("gripper_clearance_m", 0.006)) <= 0.04,
             }
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1922,9 +1946,9 @@ def create_app(backend, config):
         obj = prepared["object"]
         waypoints = prepared["waypoints"]
         frame_id = prepared["frame_id"]
-        link_name = config.get("moveit", {}).get("end_effector_link", "Link6")
+        link_name = config.get("moveit", {}).get("pick_place_tcp_link", "tcp")
         object_id = "pick_place_object"
-        touch_links = payload.get("touch_links", ["Link6", "gripper_body", "left_finger", "right_finger"])
+        touch_links = payload.get("touch_links", [link_name, "gripper_body", "left_finger", "right_finger"])
         if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
             raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
 
@@ -2471,8 +2495,9 @@ def create_app(backend, config):
                     status_code=404,
                     detail="Unsupported command. Emergency stop is not exposed through this network API.",
                 )
+            command_payload = normalize_robot_command_payload(command, params.get("payload", {}))
             result = await _await_ros(
-                backend.robot_service(service_name, params.get("payload", {}))
+                backend.robot_service(service_name, command_payload)
             )
             data = _dict(result)
             backend.emit("robot.state", {"command": command, "response": data})

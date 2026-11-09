@@ -43,6 +43,7 @@ moveit:
   joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
   base_frame: dummy_link
   end_effector_link: Link6
+  pick_place_tcp_link: tcp
   move_group_action: /move_action
   execute_trajectory_action: /execute_trajectory
   get_planning_scene_service: /get_planning_scene
@@ -54,6 +55,7 @@ moveit:
 
 robot:
   service_prefix: /dobot_bringup_ros2/srv/
+  max_payload_kg: 5.0
   simulation: true
   status_topic: /dobot_msgs_v4/msg/RobotStatus
   tcp_topic: /dobot_msgs_v4/msg/ToolVectorActual
