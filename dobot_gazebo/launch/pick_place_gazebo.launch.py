@@ -91,8 +91,8 @@ def _setup(context):
         remappings=[("/joint_states", "/rsp_joint_states")],
     )
     relay = Node(
-        package="dobot_rviz", executable="joint_state_relay.py",
-        name="joint_state_relay", output="screen", arguments=[str(urdf_path)],
+        package="dobot_gazebo", executable="joint_state_mimic_relay.py",
+        name="joint_state_mimic_relay", output="screen",
         parameters=[{"use_sim_time": True}],
     )
     load_jsb = ExecuteProcess(

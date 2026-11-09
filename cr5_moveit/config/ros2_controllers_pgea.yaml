@@ -15,6 +15,7 @@ joint_state_broadcaster:
     # MoveIt gets the right finger pose from the URDF mimic relation, so
     # publish only the source joint to avoid an unknown joint in /joint_states.
     joints: [joint1, joint2, joint3, joint4, joint5, joint6, left_finger_joint]
+    use_local_topics: true
 
 cr5_group_controller:
   ros__parameters:

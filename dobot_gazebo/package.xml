@@ -24,6 +24,8 @@
   <exec_depend>dobot_simulation</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>ros2controlcli</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>xacro</exec_depend>
 
   <export>
