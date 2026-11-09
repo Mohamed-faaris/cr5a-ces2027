@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory, get_package_share_path
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, ExecuteProcess, SetEnvironmentVariable
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -26,9 +26,17 @@ def _setup(context):
 
     gazebo_ros = get_package_share_directory("gazebo_ros")
     gazebo_launch = Path(gazebo_ros) / "launch" / "gazebo.launch.py"
+    gazebo_plugin_dir = Path(get_package_share_directory("gazebo_ros2_control")).parent.parent / "lib"
+    existing_plugins = os.environ.get("GAZEBO_PLUGIN_PATH", "")
+    plugin_path = os.pathsep.join(part for part in [existing_plugins, str(gazebo_plugin_dir)] if part)
+    plugin_env = SetEnvironmentVariable(name="GAZEBO_PLUGIN_PATH", value=plugin_path)
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(gazebo_launch)),
-        launch_arguments={"world": str(world_path), "verbose": "true"}.items(),
+        launch_arguments={
+            "world": str(world_path),
+            "verbose": "true",
+            "gui": LaunchConfiguration("gui"),
+        }.items(),
     )
 
     urdf_path = get_package_share_path("dobot_rviz") / "urdf" / "cr5_pgea.urdf"
@@ -89,7 +97,7 @@ def _setup(context):
     chain_arm = RegisterEventHandler(OnProcessExit(target_action=load_jsb, on_exit=[load_arm]))
     chain_gripper = RegisterEventHandler(OnProcessExit(target_action=load_arm, on_exit=[load_gripper]))
     chain_moveit = RegisterEventHandler(OnProcessExit(target_action=load_gripper, on_exit=[moveit_launch]))
-    return [gazebo, robot_state_publisher, relay, simulation_adapter, spawn_robot,
+    return [plugin_env, gazebo, robot_state_publisher, relay, simulation_adapter, spawn_robot,
             chain_jsb, chain_arm, chain_gripper, chain_moveit]
 
 
@@ -100,5 +108,6 @@ def generate_launch_description():
         DeclareLaunchArgument("object_kind", default_value="coke",
                               description="coke, pringles or wood_box"),
         DeclareLaunchArgument("shelf_level", default_value="1"),
+        DeclareLaunchArgument("gui", default_value="false", description="Enable Gazebo GUI (requires a working display/GPU)"),
         OpaqueFunction(function=_setup),
     ])
