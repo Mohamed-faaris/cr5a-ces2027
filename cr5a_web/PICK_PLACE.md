@@ -1,6 +1,17 @@
 # Pick & place planner
 
-The `/pick-place` route is a reusable task workspace. It accepts synthetic presets, manual objects and a JSON vision-detection adapter. Inputs are normalized to metres, radians and kilograms before bridge integration. The initial UI preview is a schematic side elevation, not a robot collision result.
+The `/pick-place` route is a guided, four-stage task workspace. It accepts synthetic presets, manual objects and a JSON vision-detection adapter. Inputs are normalized to metres, radians and kilograms before bridge integration. The initial UI preview is a schematic side elevation, not a robot collision result.
+
+## Guided workflow
+
+1. **Object** — select a Coke can, Pringles tube, wooden box or custom object; for camera input, load a detection JSON and ensure its frame matches the MoveIt base frame.
+2. **Pick and place scene** — choose the shelf/pick bay and destination, then load the three baseline obstacles (`ground_plane`, `base_pedestal`, `Box_0`). The `Load 3 default obstacles` action is safe to repeat and restores any missing obstacle after startup or after clearing the scene. `Prepare scene & continue` refreshes the shelf, platform and object collision geometry in MoveIt.
+3. **Grasp and validation** — tune the centroid/TCP target, yaw, approach and gripper strategy. Resolve all validation checks before proceeding.
+4. **Plan** — request the staged MoveIt pick/place plan and inspect the status of each returned waypoint. Changes to scene inputs invalidate the prepared-scene stage; changes to grasp or payload inputs invalidate the previous plan.
+
+Planning is not execution. The current pick/place page generates and displays candidate staged trajectories; it does not send them to the robot or run a physical pick/place action. Validate the complete task in Gazebo and establish a separate guarded execution workflow before commanding hardware.
+
+The 3D viewport keeps the last parsed robot model visible during scene refreshes. Joint states are sampled by the render loop rather than causing the whole 3D React tree to reconcile for every incoming joint message.
 
 ## Grasp variables
 
