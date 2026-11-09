@@ -67,3 +67,9 @@ This file records frontend-specific assumptions that are easy to break or costly
 - CHOMP accepts joint-space goal constraints only; mark it unsupported for TCP pose comparisons before sending a request. Show readable MoveIt error-code explanations, including `NO_IK_SOLUTION` and `INVALID_GOAL_CONSTRAINTS`, in comparison results.
 
 - Persist 3D viewer display preferences, object visibility/label overrides, and OrbitControls camera position/target in `cr5a-visualizer-view-preferences-v1` via `src/lib/visualizer-view-preferences.ts`. Share this browser-local schema between the Scene Visualizer and Calibration pages; validate stored values and tolerate unavailable/full localStorage. Keep collision participation separate from visual visibility.
+
+## Pick/place task workspace
+
+- `/pick-place` is a reusable task-planning page. It must use the shared bridge socket/store and normalize synthetic, manual, and vision-originated objects to SI units before ROS requests.
+- Object payload mass is separate from collision geometry. Keep the mass estimate and its source visible; never imply MoveIt geometric collision planning validates robot torque, payload limits, or gravity compensation.
+- The current PGEA-100-40-W nominal total opening stroke is 40 mm. Block grasp execution/planning claims for larger objects unless a different end-effector or a validated grasp geometry is selected.
