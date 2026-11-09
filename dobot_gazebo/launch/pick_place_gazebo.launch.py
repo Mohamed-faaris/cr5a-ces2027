@@ -67,7 +67,12 @@ def _setup(context):
         ["gz", "sdf", "-p", str(runtime_urdf)],
         check=True, capture_output=True, text=True,
     )
-    runtime_sdf.write_text(converted.stdout, encoding="utf-8")
+    gazebo_control_plugin = Path(get_package_share_directory("gazebo_ros2_control")).parent.parent / "lib" / "libgazebo_ros2_control.so"
+    sdf_xml = converted.stdout.replace(
+        "filename='libgazebo_ros2_control.so'",
+        f"filename='{gazebo_control_plugin}'",
+    )
+    runtime_sdf.write_text(sdf_xml, encoding="utf-8")
 
     robot_state_publisher = Node(
         package="robot_state_publisher", executable="robot_state_publisher",
