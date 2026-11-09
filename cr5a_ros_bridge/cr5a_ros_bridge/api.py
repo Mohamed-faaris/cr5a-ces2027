@@ -24,13 +24,17 @@ from .gripper_profiles import (
     resolve_profiles_path,
 )
 from .direct_motion import (JOINT_NAMES, joint_path_samples, movj_target, movl_path_samples, movl_target)
+from .pick_place import (
+    SHELF_PRESETS, build_task_waypoints, generate_grasp_candidates,
+    generate_shelf_scene, normalize_object, quaternion_from_rpy,
+)
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
 )
 from moveit_msgs.msg import (
     PlanningScene, PlanningSceneComponents, CollisionObject,
-    AttachedCollisionObject,
+    AttachedCollisionObject, AllowedCollisionEntry,
 )
 from moveit_msgs.srv import (
     GetPlanningScene, ApplyPlanningScene, GetPositionFK, GetPositionIK, GetStateValidity,
@@ -1713,7 +1717,7 @@ def create_app(backend, config):
         await apply_scene(scene)
         return {"id": object_id, "detached": True}
 
-    async def create_motion_plan_impl(payload: dict):
+    async def create_motion_plan_impl(payload: dict, goal_mutator=None):
         plan_id = "plan_" + uuid.uuid4().hex[:12]
         backend.plans[plan_id] = {
             "id": plan_id, "status": "PLANNING", "created_at": time.time(),
@@ -1759,6 +1763,8 @@ def create_app(backend, config):
                 )
 
             goal = backend.make_move_group_goal(payload)
+            if goal_mutator is not None:
+                goal_mutator(goal)
             result = await _await_ros(
                 backend.send_plan_goal(plan_id, goal),
                 float(config.get("ros", {}).get("action_timeout_sec", 45.0)),
@@ -1832,6 +1838,187 @@ def create_app(backend, config):
         }
         backend.emit("motion.plan", data)
         return data
+
+    def _pick_place_scene_payload(payload: dict):
+        obj = normalize_object(payload.get("object", {}))
+        frame_id = str(payload.get("frame_id", obj["frame_id"]))
+        shelf_spec = payload.get("shelf", "standard")
+        platform = payload.get("platform", {"position_m": [0.45, 0.0, 0.0], "dimensions_m": [0.30, 0.24, 0.02]})
+        clearance = float(payload.get("clearance_m", 0.012))
+        level = payload.get("level", 0)
+        scene_data = generate_shelf_scene(
+            shelf_spec, frame_id=frame_id, level=level,
+            clearance_m=clearance, object_dimensions_m=obj["dimensions_m"],
+            platform=platform,
+        )
+        if not scene_data["fit"]["valid"]:
+            raise ValueError("Object does not fit selected shelf bay: " + "; ".join(scene_data["fit"]["reasons"]))
+        grasp = generate_grasp_candidates(
+            obj,
+            gripper_yaw_deg=payload.get("gripper_yaw_deg"),
+            approach_angle_deg=payload.get("approach_angle_deg", 0.0),
+            approach_distance_m=payload.get("approach_distance_m", 0.08),
+            tcp_offset_m=payload.get("tcp_offset_m", [0.0, 0.0, 0.0]),
+        )[0]
+        waypoints = build_task_waypoints(
+            obj, grasp, scene_data["place_surface_center_m"],
+            lift_distance_m=payload.get("lift_distance_m", 0.10),
+        )
+        return obj, scene_data, grasp, waypoints, frame_id
+
+    async def prepare_pick_place_scene(payload: dict):
+        try:
+            obj, scene_data, grasp, waypoints, frame_id = _pick_place_scene_payload(payload)
+            frame_id = str(payload.get("frame_id", config.get("moveit", {}).get("base_frame", "dummy_link")))
+            additions = []
+            for item in scene_data["collision_objects"]:
+                item = dict(item)
+                item["id"] = "pick_place_" + item["id"]
+                additions.append(collision_object(item))
+            object_pose = obj["centroid_m"]
+            object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            object_payload = {
+                "id": "pick_place_object", "shape": obj["shape"], "frame_id": frame_id,
+                "position_m": object_pose, "orientation_xyzw": object_orientation,
+            }
+            if obj["shape"] == "cylinder":
+                object_payload["height_m"] = obj["dimensions_m"][2]
+                object_payload["radius_m"] = max(obj["dimensions_m"][0:2]) / 2
+            elif obj["shape"] == "sphere":
+                object_payload["radius_m"] = obj["dimensions_m"][0] / 2
+            else:
+                object_payload["dimensions_m"] = obj["dimensions_m"]
+            additions.append(collision_object(object_payload))
+            current = await get_scene()
+            diff = PlanningScene()
+            diff.is_diff = True
+            for existing in current.world.collision_objects:
+                if existing.id.startswith("pick_place_"):
+                    remove = CollisionObject()
+                    remove.id = existing.id
+                    remove.operation = CollisionObject.REMOVE
+                    diff.world.collision_objects.append(remove)
+            diff.world.collision_objects.extend(additions)
+            await apply_scene(diff)
+            return {
+                "status": "SCENE_READY", "frame_id": frame_id,
+                "scene_object_ids": [item.id for item in additions],
+                "object": obj, "shelf": scene_data["shelf"],
+                "fit": scene_data["fit"], "grasp": grasp,
+                "waypoints": waypoints,
+                "place_surface_center_m": scene_data["place_surface_center_m"],
+                "gripper_nominal_opening_m": 0.04,
+                "gripper_width_feasible": max(obj["dimensions_m"][0:2]) <= 0.04,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    async def plan_pick_place_task(payload: dict):
+        prepared = await prepare_pick_place_scene(payload)
+        if not prepared["gripper_width_feasible"] and payload.get("allow_infeasible_gripper", False) is not True:
+            return {**prepared, "status": "BLOCKED_GRIPPER_WIDTH",
+                    "error": "Object exceeds the configured PGEA 40 mm nominal opening; change end-effector or provide a validated grasp configuration."}
+        obj = prepared["object"]
+        waypoints = prepared["waypoints"]
+        frame_id = prepared["frame_id"]
+        link_name = config.get("moveit", {}).get("end_effector_link", "Link6")
+        object_id = "pick_place_object"
+        touch_links = payload.get("touch_links", ["Link6", "gripper_body", "left_finger", "right_finger"])
+        if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
+            raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
+
+        def allow_object_contact(goal):
+            matrix = goal.planning_options.planning_scene_diff.allowed_collision_matrix
+            names = [object_id] + touch_links
+            matrix.entry_names = names
+            for row in range(len(names)):
+                entry = AllowedCollisionEntry()
+                entry.enabled = [row != col and (row == 0 or col == 0) for col in range(len(names))]
+                matrix.entry_values.append(entry)
+
+        def attach_object(goal):
+            scene_diff = goal.planning_options.planning_scene_diff
+            remove = CollisionObject()
+            remove.id = object_id
+            remove.operation = CollisionObject.REMOVE
+            scene_diff.world.collision_objects.append(remove)
+            attached = AttachedCollisionObject()
+            attached.link_name = link_name
+            attached.touch_links = touch_links
+            attached.object = collision_object({
+                "id": object_id, "shape": obj["shape"], "frame_id": link_name,
+                "position_m": [0.0, 0.0, 0.0], "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                **({"dimensions_m": obj["dimensions_m"]} if obj["shape"] == "box" else
+                   {"height_m": obj["dimensions_m"][2], "radius_m": max(obj["dimensions_m"][0:2]) / 2} if obj["shape"] == "cylinder" else
+                   {"radius_m": obj["dimensions_m"][0] / 2}),
+            })
+            attached.object.header.frame_id = link_name
+            scene_diff.robot_state.attached_collision_objects.append(attached)
+            scene_diff.robot_state.is_diff = True
+
+        def detach_and_place(goal):
+            scene_diff = goal.planning_options.planning_scene_diff
+            attached = AttachedCollisionObject()
+            attached.link_name = link_name
+            attached.object.id = object_id
+            attached.object.operation = CollisionObject.REMOVE
+            scene_diff.robot_state.attached_collision_objects.append(attached)
+            scene_diff.robot_state.is_diff = True
+            place = waypoints[4]
+            pose = obj["rpy_rad"]
+            object_payload = {
+                "id": object_id, "shape": obj["shape"], "frame_id": frame_id,
+                "position_m": place["position_m"],
+                "orientation_xyzw": quaternion_from_rpy(*pose),
+            }
+            if obj["shape"] == "box":
+                object_payload["dimensions_m"] = obj["dimensions_m"]
+            elif obj["shape"] == "cylinder":
+                object_payload["height_m"] = obj["dimensions_m"][2]
+                object_payload["radius_m"] = max(obj["dimensions_m"][0:2]) / 2
+            else:
+                object_payload["radius_m"] = obj["dimensions_m"][0] / 2
+            scene_diff.world.collision_objects.append(collision_object(object_payload))
+
+        plans = []
+        start_state = None
+        for index, waypoint in enumerate(waypoints):
+            stage_payload = {
+                "group_name": payload.get("group_name", config.get("moveit", {}).get("group_name", "cr5_group")),
+                "target": {"type": "pose", "frame_id": frame_id, "link_name": link_name,
+                    "position_m": waypoint["position_m"], "orientation_xyzw": waypoint["orientation_xyzw"],
+                    "position_tolerance_m": payload.get("position_tolerance_m", 0.003),
+                    "orientation_tolerance_rad": payload.get("orientation_tolerance_rad", 0.03)},
+                "allowed_planning_time": payload.get("allowed_planning_time", 5.0),
+                "max_velocity_scaling": payload.get("max_velocity_scaling", 0.15),
+                "max_acceleration_scaling": payload.get("max_acceleration_scaling", 0.15),
+                "pipeline_id": payload.get("pipeline_id", "ompl"),
+                "planner_id": payload.get("planner_id", ""),
+            }
+            if start_state:
+                stage_payload["start_state"] = start_state
+            mutator = None
+            if waypoint["name"] == "grasp":
+                mutator = allow_object_contact
+            elif waypoint["name"] in ("lift", "preplace", "place"):
+                mutator = attach_object
+            elif waypoint["name"] == "retreat":
+                mutator = detach_and_place
+            result = await create_motion_plan_impl(stage_payload, mutator)
+            plans.append({"name": waypoint["name"], **result})
+            if result.get("status") != "SUCCEEDED":
+                return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
+                        "failed_stage": waypoint["name"], "error_code": result.get("error_code")}
+            trajectory = result.get("trajectory") or {}
+            joint = trajectory.get("joint_trajectory") or {}
+            points = joint.get("points") or []
+            if not points:
+                return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
+                        "failed_stage": waypoint["name"], "error": "MoveIt returned no joint trajectory points"}
+            start_state = {"joint_names": joint.get("joint_names", []),
+                           "positions_rad": points[-1].get("positions", [])}
+        return {**prepared, "status": "PLANNED", "plans": plans,
+                "planning_time_total": sum(float(item.get("planning_time") or 0.0) for item in plans)}
 
     @app.post("/api/v1/motion-plans")
     async def create_motion_plan(payload: dict):
@@ -2324,6 +2511,12 @@ def create_app(backend, config):
                 scene.world.collision_objects.append(obj)
             await apply_scene(scene)
             return {"removed_world_objects": len(scene.world.collision_objects)}
+
+        if method == "pick_place.prepare":
+            return await prepare_pick_place_scene(params)
+
+        if method == "pick_place.plan":
+            return await plan_pick_place_task(params)
 
         if method == "motion.plan":
             return await create_motion_plan_impl(params)

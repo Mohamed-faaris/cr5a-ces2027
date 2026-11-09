@@ -581,6 +581,20 @@ class BridgeNode(Node):
         else:
             raise ValueError("target.type must be 'pose' or 'joints'")
 
+        start_state = payload.get("start_state")
+        if start_state is not None:
+            if not isinstance(start_state, dict):
+                raise ValueError("start_state must be an object")
+            names = start_state.get("joint_names", [])
+            if (not isinstance(names, list) or not names
+                    or any(not isinstance(name, str) or not name for name in names)
+                    or len(set(names)) != len(names)):
+                raise ValueError("start_state.joint_names must be unique non-empty names")
+            positions = finite_vector(start_state.get("positions_rad", []), len(names), "start_state.positions_rad")
+            request.start_state.is_diff = True
+            request.start_state.joint_state.name = names
+            request.start_state.joint_state.position = positions
+
         request.goal_constraints = [constraints]
         goal.planning_options.plan_only = True
         goal.planning_options.replan = False
