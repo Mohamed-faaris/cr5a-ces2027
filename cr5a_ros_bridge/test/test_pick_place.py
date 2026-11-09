@@ -2,7 +2,7 @@ import math
 import pytest
 
 from cr5a_ros_bridge.pick_place import (
-    SHELF_PRESETS, build_task_waypoints, estimate_payload_mass,
+    SHELF_PRESETS, build_task_waypoints, calculate_payload_model, estimate_payload_mass,
     generate_grasp_candidates, generate_shelf_scene, normalize_object,
 )
 
@@ -63,3 +63,48 @@ def test_task_waypoints_include_pick_lift_place_and_retreat():
 def test_rejects_non_finite_dimensions():
     with pytest.raises(ValueError):
         normalize_object({"dimensions_m": [0.1, math.nan, 0.1]})
+
+
+def test_payload_model_combines_tool_and_object_mass_and_scales_motion():
+    light = calculate_payload_model(0.20, tool_mass_kg=0.50, object_com_m=[0.02, 0.0, 0.0])
+    heavy = calculate_payload_model(1.00, tool_mass_kg=0.50, object_com_m=[0.02, 0.0, 0.0])
+    assert light["total_mass_kg"] == pytest.approx(0.70)
+    assert light["center_of_mass_m"][0] == pytest.approx(0.0057142857)
+    assert light["static_weight_n"] == pytest.approx(0.70 * 9.80665)
+    assert heavy["max_velocity_scaling"] < light["max_velocity_scaling"]
+    assert heavy["max_acceleration_scaling"] < light["max_acceleration_scaling"]
+
+
+def test_payload_model_rejects_non_finite_or_out_of_range_scaling():
+    with pytest.raises(ValueError):
+        calculate_payload_model(0.2, base_velocity_scaling=1.2)
+
+
+def test_grasp_tcp_offset_is_rotated_in_gripper_frame():
+    obj = normalize_object({"kind": "coca_cola_330ml", "centroid_m": [0.3, 0.1, 0.2]})
+    grasp = generate_grasp_candidates(obj, gripper_yaw_deg=90, approach_angle_deg=30,
+                                      tcp_offset_m=[0.0, 0.0, 0.02])[0]
+    assert grasp["tcp_target_m"][0] == pytest.approx(0.3)
+    assert grasp["tcp_target_m"][1] == pytest.approx(0.11)
+    assert grasp["tcp_target_m"][2] == pytest.approx(0.217320508)
+
+
+def test_relative_pose_and_composition_round_trip():
+    from cr5a_ros_bridge.pick_place import pose_compose, pose_relative_to
+    parent_pos = [0.2, -0.1, 0.4]
+    parent_q = [0.0, 0.0, math.sin(math.pi/4), math.cos(math.pi/4)]
+    child_pos = [0.3, 0.0, 0.5]
+    child_q = [0.0, 0.0, 0.0, 1.0]
+    relative = pose_relative_to(parent_pos, parent_q, child_pos, child_q)
+    result = pose_compose(parent_pos, parent_q, relative["position_m"], relative["orientation_xyzw"])
+    assert result["position_m"] == pytest.approx(child_pos)
+    assert result["orientation_xyzw"] == pytest.approx(child_q)
+
+
+def test_all_shelf_profiles_fit_coke_pringles_and_wood_box():
+    objects = [[0.066, 0.066, 0.122], [0.075, 0.075, 0.240], [0.12, 0.09, 0.08]]
+    for profile in SHELF_PRESETS:
+        for dimensions in objects:
+            for level in range(SHELF_PRESETS[profile]["levels"]):
+                scene = generate_shelf_scene(profile, level=level, object_dimensions_m=dimensions)
+                assert scene["fit"]["valid"] is True, (profile, level, dimensions, scene["fit"])

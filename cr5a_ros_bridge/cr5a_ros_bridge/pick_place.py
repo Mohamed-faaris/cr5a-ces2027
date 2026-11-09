@@ -19,7 +19,12 @@ OBJECT_PRESETS = {
     "pringles_165g": {
         "label": "Pringles tube 165 g", "shape": "cylinder",
         "dimensions_m": [0.075, 0.075, 0.240], "mass_kg": 0.215,
-        "mass_source": "Estimate: 165 g contents plus approximately 40 g tube and lid",
+        "mass_source": "Estimate: 165 g contents plus approximately 50 g tube and lid",
+    },
+    "wood_box": {
+        "label": "Pine box", "shape": "box",
+        "dimensions_m": [0.080, 0.030, 0.120],
+        "mass_source": "Solid volume × configurable pine density",
     },
 }
 
@@ -67,6 +72,46 @@ def estimate_payload_mass(kind: str, dimensions_m: list[float] | None = None,
         "estimated": True,
     }
 
+
+
+def calculate_payload_model(object_mass_kg: float, *, tool_mass_kg: float = 0.0,
+                            object_com_m: list[float] | None = None,
+                            tool_com_m: list[float] | None = None,
+                            base_velocity_scaling: float = 0.15,
+                            base_acceleration_scaling: float = 0.15,
+                            reference_mass_kg: float = 0.25) -> dict:
+    """Estimate combined load and apply a conservative mass-based planning heuristic.
+
+    MoveIt geometric planners do not model payload dynamics. The returned
+    velocity/acceleration factors only slow trajectory timing; they are not a
+    torque, stability, or controller payload-limit proof.
+    """
+    object_mass = _finite(object_mass_kg, "object_mass_kg", minimum=0.001)
+    tool_mass = _finite(tool_mass_kg, "tool_mass_kg", minimum=0.0)
+    object_com = _vector(object_com_m or [0.0, 0.0, 0.0], 3, "object_com_m")
+    tool_com = _vector(tool_com_m or [0.0, 0.0, 0.0], 3, "tool_com_m")
+    velocity = _finite(base_velocity_scaling, "base_velocity_scaling", minimum=0.01)
+    acceleration = _finite(base_acceleration_scaling, "base_acceleration_scaling", minimum=0.01)
+    reference = _finite(reference_mass_kg, "reference_mass_kg", minimum=0.01)
+    if velocity > 1.0 or acceleration > 1.0:
+        raise ValueError("base velocity and acceleration scaling must not exceed 1")
+    total_mass = object_mass + tool_mass
+    center = [(object_mass * object_com[i] + tool_mass * tool_com[i]) / total_mass
+              for i in range(3)]
+    weight = total_mass * 9.80665
+    moment = weight * math.hypot(center[0], center[1])
+    # A bounded heuristic reduces timing scales as payload grows. It is not
+    # a validated robot dynamics model and must not replace SetPayload.
+    factor = max(0.05, min(1.0, 1.0 / math.sqrt(1.0 + total_mass / reference)))
+    return {
+        "object_mass_kg": object_mass, "tool_mass_kg": tool_mass,
+        "total_mass_kg": total_mass, "center_of_mass_m": center,
+        "static_weight_n": weight, "gravity_moment_nm": moment,
+        "payload_scale_factor": factor,
+        "max_velocity_scaling": min(velocity, velocity * factor),
+        "max_acceleration_scaling": min(acceleration, acceleration * factor),
+        "heuristic": "bounded inverse-square-root mass scaling; not dynamics validation",
+    }
 
 def normalize_object(payload: dict) -> dict:
     """Normalize synthetic, UI, or vision object payloads to one metric schema."""
@@ -193,7 +238,8 @@ def generate_grasp_candidates(obj: dict, *, gripper_yaw_deg: float | None = None
     for yaw_deg in yaw_values:
         yaw = math.radians(_finite(yaw_deg, "gripper_yaw_deg"))
         q = quaternion_from_rpy(0.0, approach, yaw)
-        tcp = [centroid[i] + offset[i] for i in range(3)]
+        offset_world = rotate_vector(q, offset)
+        tcp = [centroid[i] + offset_world[i] for i in range(3)]
         approach_vector = [math.sin(yaw) * math.cos(approach), -math.cos(yaw) * math.cos(approach), math.sin(approach)]
         pregrasp = [tcp[i] - approach_vector[i] * distance for i in range(3)]
         candidates.append({"tcp_target_m": tcp, "pregrasp_target_m": pregrasp,

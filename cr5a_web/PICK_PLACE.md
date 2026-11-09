@@ -45,3 +45,11 @@ The configured PGEA-100-40-W has 20 mm travel per finger (40 mm nominal total st
 ```
 
 A detection's frame must be transformed into `model.base_frame` before using it as a MoveIt target. Never treat a camera optical-frame centroid as a base-frame target without TF transformation.
+
+## Controller payload integration
+
+The task planner sends the estimated object mass with the task. The Dobot controller's `SetPayload(load,x,y,z)` command is separate from MoveIt geometric planning: `load` is in kg and the centre-of-mass offsets are in mm. The UI requires an explicit confirmation before calling the bridge `set-payload` command; the bridge keeps this disabled when `robot.allow_commands` is false and rejects loads above the configured CR5 5 kg limit. [Dobot SetPayload reference](https://github.com/Dobot-Edu/Dobot_CRtrainer/blob/main/scripts/dobot_api.py).
+
+The current PGEA URDF sums to 1.60 kg for the tool assembly (0.30 kg extension plate + 0.40 kg connector + 0.60 kg gripper body + 0.15 kg per finger). DH-Robotics publishes 0.60 kg for the PGEA-100-40 assembly, so the URDF may double-count finger mass. The UI exposes the tool-mass override and requires the operator to verify the mounted assembly and controller Tool0 frame before applying a payload. The initial COM estimate is derived from the URDF assuming controller Tool0 matches the `tcp` link; it must be checked against the actual controller tool definition. [PGEA specifications](https://www.dobot-robots.com/ecosystem/accessories/dh-robotics-pgea-servo-gripper.html).
+
+The `tcp` link is the intended centre of the custom fork hex-pocket seat in the current PGEA URDF. The Coke-can grasp strategy uses this seat; its collision fit still needs simulation verification. The generic parallel-jaw strategy uses the 40 mm nominal opening check.
