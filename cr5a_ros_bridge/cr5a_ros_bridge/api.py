@@ -2057,15 +2057,6 @@ def create_app(backend, config):
         if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
             raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
 
-        def allow_object_contact(goal):
-            matrix = goal.planning_options.planning_scene_diff.allowed_collision_matrix
-            names = [object_id] + touch_links
-            matrix.entry_names = names
-            for row in range(len(names)):
-                entry = AllowedCollisionEntry()
-                entry.enabled = [row != col and (row == 0 or col == 0) for col in range(len(names))]
-                matrix.entry_values.append(entry)
-
         def attach_object(goal):
             scene_diff = goal.planning_options.planning_scene_diff
             remove = CollisionObject()
@@ -2141,9 +2132,7 @@ def create_app(backend, config):
             if start_state:
                 stage_payload["start_state"] = start_state
             mutator = None
-            if waypoint["name"] == "grasp":
-                mutator = allow_object_contact
-            elif waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
+            if waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
                 mutator = attach_object
             elif waypoint["name"] == "retreat":
                 mutator = detach_and_place

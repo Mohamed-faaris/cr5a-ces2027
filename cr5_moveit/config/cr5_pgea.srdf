@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<robot name="cr5_pgea">
+<robot name="cr5_robot">
   <group name="cr5_group"><chain base_link="dummy_link" tip_link="Link6"/></group>
   <group name="pgea_gripper"><joint name="left_finger_joint"/></group>
   <end_effector name="pgea" parent_link="Link6" group="pgea_gripper" parent_group="cr5_group"/>
@@ -19,6 +19,7 @@
   <disable_collisions link1="Link4" link2="base_link" reason="Never"/>
   <disable_collisions link1="Link5" link2="Link6" reason="Adjacent"/>
   <disable_collisions link1="Link6" link2="pgea_extension_plate" reason="Adjacent"/>
+  <disable_collisions link1="Link6" link2="connector_slabs" reason="Never"/>
   <disable_collisions link1="pgea_extension_plate" link2="connector_slabs" reason="Adjacent"/>
   <disable_collisions link1="connector_slabs" link2="gripper_body" reason="Adjacent"/>
   <disable_collisions link1="gripper_body" link2="left_finger" reason="Adjacent"/>
