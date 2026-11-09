@@ -27,6 +27,7 @@ from dobot_msgs_v4.srv import (
     StartDrag,
     Stop,
     StopDrag,
+    SetPayload,
 )
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -90,6 +91,8 @@ class DobotSimulation(Node):
         self._last_motion_at = 0.0
         self._joint_positions = {}
         self._active_error_code = max(0, int(self.get_parameter("simulated_error_code").value))
+        self._payload_load_kg = 0.0
+        self._payload_com_mm = (0.0, 0.0, 0.0)
         self._errors = [self._active_error_code] if self._active_error_code else []
         if self._errors:
             self._mode = 9
@@ -125,6 +128,7 @@ class DobotSimulation(Node):
             "StartDrag": StartDrag,
             "StopDrag": StopDrag,
             "ClearError": ClearError,
+            "SetPayload": SetPayload,
         }
         self._dashboard_services = [
             self.create_service(
@@ -259,8 +263,6 @@ class DobotSimulation(Node):
         return response
 
     def _handle_service(self, name, request, response):
-        del request
-
         if name == "RobotMode":
             if not self._connected() and not self._errors:
                 self._mode = 1
@@ -276,6 +278,17 @@ class DobotSimulation(Node):
                 {"id": code, "description": "Injected simulation fault"}
                 for code in self._errors
             ])
+            return self._set_result(response)
+
+        if name == "SetPayload":
+            load = float(request.load)
+            offsets = (float(request.x), float(request.y), float(request.z))
+            if not math.isfinite(load) or load <= 0.0 or load > 5.0:
+                return self._set_result(response, -1)
+            if not all(math.isfinite(value) and abs(value) <= 500.0 for value in offsets):
+                return self._set_result(response, -1)
+            self._payload_load_kg = load
+            self._payload_com_mm = offsets
             return self._set_result(response)
 
         if name == "ClearError":

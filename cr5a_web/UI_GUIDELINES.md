@@ -72,7 +72,7 @@ This file records frontend-specific assumptions that are easy to break or costly
 
 - `/pick-place` is a reusable task-planning page. It must use the shared bridge socket/store and normalize synthetic, manual, and vision-originated objects to SI units before ROS requests.
 - Object payload mass is separate from collision geometry. Keep the mass estimate and its source visible; never imply MoveIt geometric collision planning validates robot torque, payload limits, or gravity compensation.
-- The current PGEA-100-40-W nominal total opening stroke is 40 mm. Block grasp execution/planning claims for larger objects unless a different end-effector or a validated grasp geometry is selected.
+- The PGEA nominal total mechanism stroke is 40 mm. The custom CAD finger meshes add a 45 mm lateral span; the `pgea_finger_wrap` strategy uses a preliminary 85 mm envelope with clearance. This admits the 66 mm Coke can and 75 mm Pringles tube as planning candidates, but it is not a rated grip or retention guarantee. Keep the parallel-jaw strategy limited to nominal stroke.
 
 ## Pick-and-place workbench
 
@@ -80,4 +80,4 @@ This file records frontend-specific assumptions that are easy to break or costly
 - Synthetic shelf/platform/object geometry is added to MoveIt through `scene.add`; generated object IDs use the `pp_` prefix. Remove only IDs created by the current workbench session; never clear unrelated user collision objects.
 - Vision detections must carry a frame ID and metric centroid/dimensions before planning. Never interpret pixels or camera-frame coordinates as base-frame metres without an explicit transform.
 - Grasp centroid, gripper orientation, approach vector/distance, lift offset, and place pose are separate inputs. A successful plan is preview-only; execution remains an explicit separate operation.
-- MoveIt geometric planning does not accept arbitrary attached-object mass as a robot dynamics/load setting. Payload mass estimates and derived static loads must not be presented as configured controller payload compensation.
+- MoveIt geometric planning does not model arbitrary attached-object mass as robot dynamics. The pick/place bridge derives a transparent mass/COM model and reduces waypoint velocity/acceleration scaling as a heuristic. Controller payload compensation is a separate explicit Dobot `SetPayload` command requiring operator Tool0/mass confirmation.

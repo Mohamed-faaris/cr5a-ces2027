@@ -56,8 +56,9 @@ def test_task_waypoints_include_pick_lift_place_and_retreat():
     obj = normalize_object({"kind": "coca_cola_330ml", "centroid_m": [0.3, 0.0, 0.1]})
     grasp = generate_grasp_candidates(obj, gripper_yaw_deg=0)[0]
     waypoints = build_task_waypoints(obj, grasp, [0.45, 0.0, 0.02])
-    assert [item["name"] for item in waypoints] == ["pregrasp", "grasp", "lift", "preplace", "place", "retreat"]
+    assert [item["name"] for item in waypoints] == ["pregrasp", "grasp", "withdraw", "lift", "preplace", "place", "retreat"]
     assert waypoints[2]["object_attached"] is True
+    assert waypoints[6]["object_attached"] is False
 
 
 def test_rejects_non_finite_dimensions():
@@ -145,3 +146,35 @@ def test_shelf_collision_geometry_and_pick_target_use_world_pose():
     left = next(item for item in scene["collision_objects"] if item["id"] == "shelf_left")
     assert left["position_m"] == pytest.approx([0.55, -0.291, 0.45])
     assert left["orientation_xyzw"][2] == pytest.approx(math.sin(math.pi/4))
+
+
+def test_shelf_place_surface_is_the_selected_bay_floor_in_world_frame():
+    scene = generate_shelf_scene("standard", level=1, object_dimensions_m=[0.066, 0.066, 0.122],
+                                 origin_m=[0.55, 0.0, 0.0], yaw_rad=math.pi / 2,
+                                 clearance_m=0.012)
+    expected_floor = 0.018 + (0.900 - 0.018 * 4) / 3 + 0.018 + 0.012
+    assert scene["shelf_place_surface_center_m"] == pytest.approx([0.55, 0.0, expected_floor])
+
+
+def test_place_and_retreat_waypoints_follow_the_approach_axis():
+    obj = normalize_object({"kind": "pringles_165g", "centroid_m": [0.5, 0.0, 0.2]})
+    grasp = generate_grasp_candidates(obj, gripper_yaw_deg=90, approach_distance_m=0.08)[0]
+    waypoints = build_task_waypoints(obj, grasp, [0.3, -0.2, 0.05], place_approach_distance_m=0.28)
+    preplace = waypoints[4]["position_m"]
+    place = waypoints[5]["position_m"]
+    retreat = waypoints[6]["position_m"]
+    assert preplace == pytest.approx([place[0] - grasp["approach_vector"][0] * 0.28,
+                                      place[1] - grasp["approach_vector"][1] * 0.28,
+                                      place[2] - grasp["approach_vector"][2] * 0.28])
+    assert retreat == pytest.approx(preplace)
+
+
+def test_shelf_pick_withdraws_before_lifting_to_avoid_upper_shelf_board():
+    obj = normalize_object({"kind": "pringles_165g", "centroid_m": [0.55, 0.0, 0.46], "yaw_deg": 90})
+    grasp = generate_grasp_candidates(obj, gripper_yaw_deg=0, approach_distance_m=0.27)[0]
+    waypoints = build_task_waypoints(obj, grasp, [0.35, -0.35, 0.02],
+                                     lift_distance_m=0.10, withdrawal_distance_m=0.27)
+    withdraw, lift = waypoints[2]["position_m"], waypoints[3]["position_m"]
+    assert withdraw[0] < obj["centroid_m"][0] - 0.25
+    assert lift[0] == pytest.approx(withdraw[0])
+    assert lift[2] == pytest.approx(withdraw[2] + 0.10)

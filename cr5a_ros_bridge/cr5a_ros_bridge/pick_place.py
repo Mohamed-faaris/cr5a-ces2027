@@ -205,7 +205,8 @@ def _box(object_id: str, position: list[float], dimensions: list[float], frame_i
 
 
 def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dummy_link",
-                         level: int = 0, clearance_m: float = 0.012,
+                         level: int = 0, place_level: int | None = None,
+                         clearance_m: float = 0.012,
                          object_dimensions_m: list[float] | None = None,
                          platform: dict | None = None,
                          origin_m: list[float] | None = None,
@@ -226,6 +227,9 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
         raise ValueError("Shelf boards leave no usable bay height")
     if not 0 <= level < levels:
         raise ValueError(f"level must be between 0 and {levels - 1}")
+    destination_level = level if place_level is None else place_level
+    if isinstance(destination_level, bool) or not isinstance(destination_level, int) or not 0 <= destination_level < levels:
+        raise ValueError(f"place_level must be an integer between 0 and {levels - 1}")
     bay_height = (height - board * (levels + 1)) / levels
     bay_width, bay_depth = width - 2 * board, depth - board
     origin = _vector(origin_m or [0.55, 0.0, 0.0], 3, "shelf.origin_m")
@@ -241,6 +245,8 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
         objects.append(_box(f"shelf_board_{index}", [0.0, 0.0, z], [width, depth, board], frame_id))
     bay_floor = board + level * (bay_height + board)
     target_local = [0.0, 0.0, bay_floor + bay_height/2]
+    destination_bay_floor = board + destination_level * (bay_height + board)
+    shelf_place_surface_local = [0.0, 0.0, destination_bay_floor + clearance_m]
     fit = True
     fit_reasons = []
     if object_dimensions_m is not None:
@@ -261,6 +267,8 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
         item["orientation_xyzw"] = quaternion_multiply(shelf_q, item["orientation_xyzw"])
     target_rotated = rotate_vector(shelf_q, target_local)
     target = [origin[i] + target_rotated[i] for i in range(3)]
+    shelf_place_surface_rotated = rotate_vector(shelf_q, shelf_place_surface_local)
+    shelf_place_surface = [origin[i] + shelf_place_surface_rotated[i] for i in range(3)]
     if platform:
         px, py, pz = _vector(platform.get("position_m", [0.45, 0.0, 0.0]), 3, "platform.position_m")
         pd = _vector(platform.get("dimensions_m", [0.30, 0.24, 0.02]), 3, "platform.dimensions_m", minimum=0.001)
@@ -271,9 +279,12 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
     return {
         "frame_id": frame_id, "shelf": {"width_m": width, "height_m": height, "depth_m": depth,
             "board_m": board, "levels": levels, "selected_level": level,
+            "selected_place_level": destination_level,
             "origin_m": origin, "yaw_rad": shelf_yaw,
             "bay_dimensions_m": [bay_width, bay_depth, bay_height]},
         "collision_objects": objects, "pick_slot_center_m": target,
+        "shelf_place_surface_center_m": shelf_place_surface,
+        "platform_place_surface_center_m": place,
         "place_surface_center_m": place,
         "fit": {"valid": fit, "reasons": fit_reasons},
     }
@@ -303,27 +314,43 @@ def generate_grasp_candidates(obj: dict, *, gripper_yaw_deg: float | None = None
         candidates.append({"tcp_target_m": tcp, "pregrasp_target_m": pregrasp,
             "orientation_xyzw": q, "gripper_yaw_deg": math.degrees(yaw),
             "gripper_yaw_relative_deg": float(yaw_deg),
-            "approach_angle_deg": float(approach_angle_deg), "approach_distance_m": distance})
+            "approach_angle_deg": float(approach_angle_deg), "approach_distance_m": distance,
+            "approach_vector": approach_vector})
     return candidates
 
 
 def build_task_waypoints(obj: dict, grasp: dict, place_surface_center_m: list[float],
-                         *, lift_distance_m: float = 0.10) -> list[dict]:
+                         *, lift_distance_m: float = 0.10,
+                         place_approach_distance_m: float | None = None,
+                         withdrawal_distance_m: float | None = None) -> list[dict]:
     """Describe the plan-only sequence. The caller plans each waypoint with MoveIt."""
     lift = _finite(lift_distance_m, "lift_distance_m", minimum=0.02)
     x, y, z = _vector(place_surface_center_m, 3, "place_surface_center_m")
     object_height = obj["dimensions_m"][2]
     place_tcp = [x, y, z + object_height/2 + 0.002]
-    preplace_tcp = [x, y, z + object_height/2 + grasp["approach_distance_m"] + 0.002]
+    place_distance = _finite(
+        grasp["approach_distance_m"] if place_approach_distance_m is None else place_approach_distance_m,
+        "place_approach_distance_m", minimum=0.01,
+    )
+    place_approach = _vector(grasp.get("approach_vector", [0.0, -1.0, 0.0]), 3, "grasp.approach_vector")
+    preplace_tcp = [place_tcp[i] - place_approach[i] * place_distance for i in range(3)]
     grasp_tcp = grasp["tcp_target_m"]
     pregrasp = grasp["pregrasp_target_m"]
+    approach = _vector(grasp.get("approach_vector", [0.0, -1.0, 0.0]), 3, "grasp.approach_vector")
+    withdrawal = _finite(
+        grasp["approach_distance_m"] if withdrawal_distance_m is None else withdrawal_distance_m,
+        "withdrawal_distance_m", minimum=0.01,
+    )
+    withdraw_tcp = [grasp_tcp[i] - approach[i] * withdrawal for i in range(3)]
+    lift_tcp = [withdraw_tcp[0], withdraw_tcp[1], withdraw_tcp[2] + lift]
     return [
         {"name": "pregrasp", "position_m": pregrasp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": False},
         {"name": "grasp", "position_m": grasp_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": False},
-        {"name": "lift", "position_m": [grasp_tcp[0], grasp_tcp[1], grasp_tcp[2] + lift], "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": True},
+        {"name": "withdraw", "position_m": withdraw_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": True},
+        {"name": "lift", "position_m": lift_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": True},
         {"name": "preplace", "position_m": preplace_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": True},
         {"name": "place", "position_m": place_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": True},
-        {"name": "retreat", "position_m": [x, y, place_tcp[2] + grasp["approach_distance_m"]], "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": False},
+        {"name": "retreat", "position_m": preplace_tcp, "orientation_xyzw": grasp["orientation_xyzw"], "object_attached": False},
     ]
 
 
