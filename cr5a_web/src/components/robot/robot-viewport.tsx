@@ -373,8 +373,15 @@ function TrajectoryPreview({
     // piecewise-linear 3D tube instead so each planner path is visible at scene scale.
     const group=new THREE.Group();
     group.name="Benchmark trajectory "+plan.plan_id;
-    const pathMaterial=new THREE.MeshBasicMaterial({color,depthTest:true});
-    const markerMaterial=new THREE.MeshBasicMaterial({color,depthTest:false});
+    // The planned path must remain visible when it passes behind or through
+    // the robot's own visual meshes. Markers already used this overlay mode;
+    // apply the same depth policy to the tube segments.
+    const pathMaterial=new THREE.MeshBasicMaterial({
+      color,depthTest:false,depthWrite:false,toneMapped:false,side:THREE.DoubleSide
+    });
+    const markerMaterial=new THREE.MeshBasicMaterial({
+      color,depthTest:false,depthWrite:false,toneMapped:false
+    });
     const up=new THREE.Vector3(0,1,0);
     for(let index=1;index<path.length;index++){
       const start=path[index-1],end=path[index];
@@ -382,18 +389,18 @@ function TrajectoryPreview({
       const length=delta.length();
       if(!Number.isFinite(length)||length<1e-5)continue;
       const segment=new THREE.Mesh(
-        new THREE.CylinderGeometry(0.0028,0.0028,length,8),
+        new THREE.CylinderGeometry(0.0045,0.0045,length,10),
         pathMaterial
       );
       segment.position.copy(start).add(end).multiplyScalar(0.5);
       segment.quaternion.setFromUnitVectors(up,delta.normalize());
-      segment.renderOrder=40;
+      segment.renderOrder=45;
       group.add(segment);
     }
     const startMarker=new THREE.Mesh(new THREE.SphereGeometry(0.010,16,12),markerMaterial);
-    startMarker.position.copy(path[0]);startMarker.renderOrder=42;group.add(startMarker);
+    startMarker.position.copy(path[0]);startMarker.renderOrder=46;group.add(startMarker);
     const endMarker=new THREE.Mesh(new THREE.SphereGeometry(0.014,16,12),markerMaterial);
-    endMarker.position.copy(path[path.length-1]);endMarker.renderOrder=42;group.add(endMarker);
+    endMarker.position.copy(path[path.length-1]);endMarker.renderOrder=46;group.add(endMarker);
     setPathGroup(group);
     setPathMarkers({start:path[0].clone(),end:path[path.length-1].clone()});
     return ()=>{

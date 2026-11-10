@@ -67,7 +67,7 @@ export function PlannerSettings({
   const [messageError,setMessageError]=useState(false);
   const [profileName,setProfileName]=useState(profile.name);
   const [selectedForCompare,setSelectedForCompare]=useState<string[]>(["balanced","quality"]);
-  const [repeatCount,setRepeatCount]=useState<1|3|5>(3);
+  const [repeatCount,setRepeatCount]=useState<1|3|5>(1);
   const [initialized,setInitialized]=useState(false);
   useEffect(()=>{
     const saved=loadSavedProfiles();setCustomProfiles(saved);

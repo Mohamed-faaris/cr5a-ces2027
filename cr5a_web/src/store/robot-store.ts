@@ -10,6 +10,46 @@ export interface TopicMessageState {
   sequence?:number;
 }
 
+const JOINT_STATE_FIELDS=["position","velocity","effort"] as const;
+
+function mergeJointStateMessages(
+  previous:JointStateMessage|null,
+  incoming:JointStateMessage|null|undefined
+):JointStateMessage|null{
+  if(!incoming)return previous;
+  const incomingNames=Array.isArray(incoming.name)?incoming.name:[];
+  if(incomingNames.length===0)return previous??incoming;
+
+  type JointStateValues=Partial<Record<(typeof JOINT_STATE_FIELDS)[number],number|null>>;
+  const merged=new Map<string,JointStateValues>();
+  const consume=(message:JointStateMessage|null|undefined)=>{
+    if(!message||!Array.isArray(message.name))return;
+    message.name.forEach((rawName,index)=>{
+      const name=String(rawName??"").trim();
+      if(!name)return;
+      const values=merged.get(name)??{};
+      JOINT_STATE_FIELDS.forEach(field=>{
+        const fieldValues=message[field];
+        if(Array.isArray(fieldValues)&&index<fieldValues.length){
+          values[field]=fieldValues[index]??null;
+        }
+      });
+      merged.set(name,values);
+    });
+  };
+  consume(previous);
+  consume(incoming);
+
+  const names=[...merged.keys()];
+  const result:JointStateMessage={name:names};
+  JOINT_STATE_FIELDS.forEach(field=>{
+    if(names.some(name=>field in (merged.get(name)??{}))){
+      result[field]=names.map(name=>merged.get(name)?.[field]??null);
+    }
+  });
+  return result;
+}
+
 interface RobotStore {
   bridgeState: BridgeState; connectionError: string | null; simulation: boolean;
   robotStatus: RobotStatusMessage | null; robotMode: RobotModeMessage | null;
@@ -46,20 +86,23 @@ export const useRobotStore = create<RobotStore>((set)=>({
   setRobotMode:(value)=>set({robotMode:value}),
   setErrors:(value)=>set({errors:value}),
   setJoints:(value,timestamp)=>set((state)=>{
-    const previous=state.joints?.position??[];
-    const next=value.position??[];
-    const changed=previous.length===next.length && next.some((item,index)=>{
-      const before=previous[index];
-      return typeof item==="number"&&Number.isFinite(item)&&
-        typeof before==="number"&&Number.isFinite(before)&&Math.abs(item-before)>0.002;
+    const merged=mergeJointStateMessages(state.joints,value)??value;
+    const previousByName=new Map((state.joints?.name??[]).map((name,index)=>[
+      name,state.joints?.position?.[index]
+    ]));
+    const changed=(merged.name??[]).some((name,index)=>{
+      const before=previousByName.get(name);
+      const current=merged.position?.[index];
+      return typeof current==="number"&&Number.isFinite(current)&&
+        typeof before==="number"&&Number.isFinite(before)&&Math.abs(current-before)>0.002;
     });
-    return {joints:value,lastJointChangeAt:changed?Date.now():state.lastJointChangeAt,timestamps:{...state.timestamps,joints:timestamp??state.timestamps.joints}};
+    return {joints:merged,lastJointChangeAt:changed?Date.now():state.lastJointChangeAt,timestamps:{...state.timestamps,joints:timestamp??state.timestamps.joints}};
   }),
   setTcp:(value,timestamp)=>set((state)=>({tcp:value,timestamps:{...state.timestamps,tcp:timestamp??state.timestamps.tcp}})),
   mergeSnapshot:(value)=>set((state)=>({
     robotStatus:{is_connected:value.connected,is_enable:value.enabled},
     robotMode:value.mode??state.robotMode,errors:value.errors??state.errors,
-    joints:value.joints??state.joints,tcp:value.tcp??state.tcp,
+    joints:mergeJointStateMessages(state.joints,value.joints)??state.joints,tcp:value.tcp??state.tcp,
     timestamps:value.timestamps??state.timestamps,capabilities:value.capabilities??state.capabilities,
     simulation:value.simulation===true
   })),
