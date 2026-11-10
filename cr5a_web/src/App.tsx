@@ -5,6 +5,8 @@ import { VisualizerPage } from "@/pages/visualizer-page";
 import { GripperPage } from "@/pages/gripper-page";
 import { CalibrationPage } from "@/pages/calibration-page";
 import { PickPlacePage } from "@/pages/pick-place-page";
+import { VisionPage } from "@/pages/vision-page";
+import { PlatformBuilderPage } from "@/pages/platform-builder-page";
 
 export default function App() {
   return (
@@ -17,6 +19,8 @@ export default function App() {
           <Route path="/gripper" element={<GripperPage />} />
           <Route path="/calibration" element={<CalibrationPage />} />
           <Route path="/pick-place" element={<PickPlacePage />} />
+          <Route path="/vision" element={<VisionPage />} />
+          <Route path="/platform-builder" element={<PlatformBuilderPage />} />
           <Route path="*" element={<Navigate to="/diagnostics" replace />} />
         </Routes>
       </AppShell>

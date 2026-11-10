@@ -4,6 +4,7 @@ import pytest
 from cr5a_ros_bridge.pick_place import (
     SHELF_PRESETS, build_task_waypoints, calculate_payload_model, estimate_payload_mass,
     evaluate_gripper_fit, generate_grasp_candidates, generate_shelf_scene, normalize_object,
+    requires_shelf_fit,
 )
 
 
@@ -81,13 +82,17 @@ def test_payload_model_rejects_non_finite_or_out_of_range_scaling():
         calculate_payload_model(0.2, base_velocity_scaling=1.2)
 
 
-def test_grasp_tcp_offset_is_rotated_in_gripper_frame():
+def test_grasp_tcp_offset_is_rotated_in_mounted_pgea_frame():
+    from cr5a_ros_bridge.pick_place import rotate_vector
     obj = normalize_object({"kind": "coca_cola_330ml", "centroid_m": [0.3, 0.1, 0.2]})
     grasp = generate_grasp_candidates(obj, gripper_yaw_deg=90, approach_angle_deg=30,
                                       tcp_offset_m=[0.0, 0.0, 0.02])[0]
-    assert grasp["tcp_target_m"][0] == pytest.approx(0.3)
-    assert grasp["tcp_target_m"][1] == pytest.approx(0.11)
-    assert grasp["tcp_target_m"][2] == pytest.approx(0.217320508)
+    # The mounted PGEA TCP is offset along its local +X axis. With this grasp
+    # orientation, that local axis points 30 degrees above world +X.
+    assert grasp["tcp_target_m"] == pytest.approx([0.29, 0.1, 0.217320508])
+    local_fork_axis = rotate_vector(grasp["orientation_xyzw"], [1.0, 0.0, 0.0])
+    assert local_fork_axis == pytest.approx(grasp["approach_vector"])
+    assert local_fork_axis == pytest.approx([math.cos(math.radians(30)), 0.0, math.sin(math.radians(30))])
 
 
 def test_relative_pose_and_composition_round_trip():
@@ -178,3 +183,21 @@ def test_shelf_pick_withdraws_before_lifting_to_avoid_upper_shelf_board():
     assert withdraw[0] < obj["centroid_m"][0] - 0.25
     assert lift[0] == pytest.approx(withdraw[0])
     assert lift[2] == pytest.approx(withdraw[2] + 0.10)
+
+
+@pytest.mark.parametrize(("pick_source", "place_destination", "expected"), [
+    ("free", "platform", False),
+    ("shelf", "platform", True),
+    ("free", "shelf", True),
+    ("shelf", "shelf", True),
+])
+def test_shelf_fit_is_required_only_when_pick_or_place_uses_a_shelf(
+    pick_source, place_destination, expected
+):
+    assert requires_shelf_fit(pick_source, place_destination) is expected
+
+
+def test_free_space_to_platform_can_use_an_object_larger_than_the_shelf():
+    scene = generate_shelf_scene("compact", object_dimensions_m=None)
+    assert scene["fit"]["valid"] is True
+    assert len(scene["collision_objects"]) == SHELF_PRESETS["compact"]["levels"] + 4

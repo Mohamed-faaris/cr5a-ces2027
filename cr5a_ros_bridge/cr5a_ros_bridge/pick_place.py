@@ -204,6 +204,15 @@ def _box(object_id: str, position: list[float], dimensions: list[float], frame_i
             "dimensions_m": dimensions}
 
 
+def requires_shelf_fit(pick_source: str, place_destination: str) -> bool:
+    """Whether the workpiece must physically fit inside a shelf bay."""
+    if pick_source not in ("shelf", "free"):
+        raise ValueError("pick_source must be 'shelf' or 'free'")
+    if place_destination not in ("platform", "shelf"):
+        raise ValueError("place_destination must be 'platform' or 'shelf'")
+    return pick_source == "shelf" or place_destination == "shelf"
+
+
 def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dummy_link",
                          level: int = 0, place_level: int | None = None,
                          clearance_m: float = 0.012,
@@ -292,11 +301,18 @@ def generate_shelf_scene(shelf: dict | str = "standard", *, frame_id: str = "dum
 
 def generate_grasp_candidates(obj: dict, *, gripper_yaw_deg: float | None = None,
                               approach_angle_deg: float = 0.0,
+                              gripper_roll_deg: float = 0.0,
                               approach_distance_m: float = 0.08,
                               tcp_offset_m: list[float] | None = None,
                               yaw_samples_deg: list[float] | None = None) -> list[dict]:
-    """Use object centroid as the nominal TCP target; vary yaw/approach explicitly."""
+    """Build a PGEA TCP pose whose local +X fork axis matches the approach vector.
+
+    The mounted PGEA TCP is offset along gripper-body +X. Its forks approach the
+    object along TCP +X, not TCP +Z. The previous RPY mapping rotated the wrong
+    local axis, so the pregrasp translation and physical fork direction disagreed.
+    """
     approach = math.radians(_finite(approach_angle_deg, "approach_angle_deg"))
+    roll = math.radians(_finite(gripper_roll_deg, "gripper_roll_deg"))
     distance = _finite(approach_distance_m, "approach_distance_m", minimum=0.01)
     offset = _vector(tcp_offset_m or [0.0, 0.0, 0.0], 3, "tcp_offset_m")
     yaw_values = [gripper_yaw_deg] if gripper_yaw_deg is not None else (yaw_samples_deg or [0, 45, 90, 135])
@@ -306,14 +322,17 @@ def generate_grasp_candidates(obj: dict, *, gripper_yaw_deg: float | None = None
     for yaw_deg in yaw_values:
         relative_yaw = math.radians(_finite(yaw_deg, "gripper_yaw_deg"))
         yaw = relative_yaw + object_yaw
-        q = quaternion_from_rpy(0.0, approach, yaw)
+        # Local +X is the fork/approach axis. Roll spins the finger plane around
+        # that axis; pitch and yaw define the desired approach direction.
+        q = quaternion_from_rpy(roll, -approach, yaw - math.pi / 2.0)
         offset_world = rotate_vector(q, offset)
         tcp = [centroid[i] + offset_world[i] for i in range(3)]
-        approach_vector = [math.sin(yaw) * math.cos(approach), -math.cos(yaw) * math.cos(approach), math.sin(approach)]
+        approach_vector = rotate_vector(q, [1.0, 0.0, 0.0])
         pregrasp = [tcp[i] - approach_vector[i] * distance for i in range(3)]
         candidates.append({"tcp_target_m": tcp, "pregrasp_target_m": pregrasp,
             "orientation_xyzw": q, "gripper_yaw_deg": math.degrees(yaw),
             "gripper_yaw_relative_deg": float(yaw_deg),
+            "gripper_roll_deg": float(gripper_roll_deg),
             "approach_angle_deg": float(approach_angle_deg), "approach_distance_m": distance,
             "approach_vector": approach_vector})
     return candidates
@@ -324,7 +343,7 @@ def build_task_waypoints(obj: dict, grasp: dict, place_surface_center_m: list[fl
                          place_approach_distance_m: float | None = None,
                          withdrawal_distance_m: float | None = None) -> list[dict]:
     """Describe the plan-only sequence. The caller plans each waypoint with MoveIt."""
-    lift = _finite(lift_distance_m, "lift_distance_m", minimum=0.02)
+    lift = _finite(lift_distance_m, "lift_distance_m", minimum=0.0)
     x, y, z = _vector(place_surface_center_m, 3, "place_surface_center_m")
     object_height = obj["dimensions_m"][2]
     place_tcp = [x, y, z + object_height/2 + 0.002]

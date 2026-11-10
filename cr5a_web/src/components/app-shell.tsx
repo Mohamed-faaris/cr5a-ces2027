@@ -1,5 +1,5 @@
 import {NavLink} from "react-router-dom";
-import {Activity,Bot,Box,Scan,Package} from "lucide-react";
+import {Activity,Bot,Box,Scan,Package,Camera,PanelsTopLeft} from "lucide-react";
 import type {ReactNode} from "react";
 import {StatusBadge} from "./status-badge";
 import {deriveRobotStatus} from "@/lib/status";
@@ -25,7 +25,9 @@ export function AppShell({children}:{children:ReactNode}) {
     {to:"/diagnostics",label:"Diagnostics",icon:Activity},
     {to:"/visualizer",label:"Visualizer",icon:Box},
     {to:"/calibration",label:"Calibration",icon:Scan},
-    {to:"/pick-place",label:"Pick & Place",icon:Package}
+    {to:"/pick-place",label:"Pick & Place",icon:Package},
+    {to:"/vision",label:"Vision",icon:Camera},
+    {to:"/platform-builder",label:"Platform Builder",icon:PanelsTopLeft}
   ];
   return (
     <div className="min-h-screen bg-zinc-50 text-zinc-950">

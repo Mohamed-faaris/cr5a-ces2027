@@ -1,4 +1,4 @@
-import {memo,Suspense,useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type SetStateAction} from "react";
+import {Component,memo,Suspense,useCallback,useEffect,useRef,useState,type Dispatch,type ReactNode,type RefObject,type SetStateAction} from "react";
 import {Canvas,useFrame} from "@react-three/fiber";
 import {Billboard,Grid,OrbitControls,Text} from "@react-three/drei";
 import {ChevronDown,Eye,Grid3X3} from "lucide-react";
@@ -15,6 +15,22 @@ type RobotObject=THREE.Object3D&{
   links:Record<string,THREE.Object3D>;
   joints:Record<string,THREE.Object3D&{jointValue:number[];angle:number}>;
 };
+
+type ViewportCanvasBoundaryProps={children:ReactNode};
+type ViewportCanvasBoundaryState={error:Error|null};
+class ViewportCanvasBoundary extends Component<ViewportCanvasBoundaryProps,ViewportCanvasBoundaryState>{
+  state:ViewportCanvasBoundaryState={error:null};
+  static getDerivedStateFromError(error:Error):ViewportCanvasBoundaryState{return {error};}
+  componentDidCatch(error:Error){console.warn("CR5A 3D viewport unavailable:",error.message);}
+  render(){
+    if(this.state.error)return <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-2 bg-zinc-50 px-6 text-center">
+      <div className="text-sm font-medium text-zinc-800">3D viewport unavailable</div>
+      <p className="max-w-md text-xs leading-5 text-zinc-500">The browser could not create a WebGL context. Enable browser hardware acceleration or use a browser with WebGL support. Object configuration, collision-scene management and planning controls remain available.</p>
+      <button type="button" onClick={()=>this.setState({error:null})} className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50">Retry 3D viewport</button>
+    </div>;
+    return this.props.children;
+  }
+}
 
 type StickSegment={
   rod:THREE.Mesh;
@@ -501,7 +517,7 @@ function RobotViewportView({
         <span>Start · 0.00 s</span><span>{trajectoryPoints.length} points</span><span>End · {totalTime.toFixed(2)} s</span>
       </div>
     </div>}
-    <Canvas shadows camera={{position:viewPreferences.cameraPosition,fov:42,near:0.01,far:100}} dpr={[1,1.35]} gl={{antialias:true,alpha:false,powerPreference:"high-performance"}}>
+    <ViewportCanvasBoundary key="robot-viewport-canvas"><Canvas shadows camera={{position:viewPreferences.cameraPosition,fov:42,near:0.01,far:100}} dpr={[1,1.35]} gl={{antialias:true,alpha:false,powerPreference:"high-performance"}}>
       <color attach="background" args={["#fafafa"]}/>
       <ambientLight intensity={1.1}/>
       <directionalLight position={[2,4,2]} intensity={2.1} castShadow/>
@@ -563,7 +579,7 @@ function RobotViewportView({
           const cameraTarget=controls.target.toArray() as [number,number,number];
           onViewPreferencesChange(current=>({...current,cameraPosition,cameraTarget}));
         }}/>
-    </Canvas>
+    </Canvas></ViewportCanvasBoundary>
     <div className={hasTrajectory?"absolute bottom-24 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500":"absolute bottom-4 right-4 z-10 rounded-md border border-zinc-200 bg-white/80 px-2.5 py-1.5 text-[10px] text-zinc-500"}>
       {model?.base_frame??"dummy_link"} · metres
     </div>

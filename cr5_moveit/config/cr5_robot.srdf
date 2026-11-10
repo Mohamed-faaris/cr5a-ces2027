@@ -1,46 +1,41 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version='1.0' encoding='UTF-8'?>
 <robot name="cr5_robot">
   <group name="cr5_group">
-    <chain base_link="dummy_link" tip_link="Link6" />
+    <chain base_link="dummy_link" tip_link="Link6"/>
   </group>
   <group name="pgea_gripper">
-    <joint name="left_finger_joint" />
+    <joint name="left_finger_joint"/>
   </group>
-  <end_effector name="pgea" parent_link="Link6" group="pgea_gripper" parent_group="cr5_group" />
+  <end_effector name="pgea" parent_link="Link6" group="pgea_gripper" parent_group="cr5_group"/>
   <group_state name="home" group="cr5_group">
-    <joint name="joint1" value="0" />
-    <joint name="joint2" value="0.4337" />
-    <joint name="joint3" value="-1.4695" />
-    <joint name="joint4" value="-0.2602" />
-    <joint name="joint5" value="1.7175" />
-    <joint name="joint6" value="0" />
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="0.4337"/>
+    <joint name="joint3" value="-1.4695"/>
+    <joint name="joint4" value="-0.2602"/>
+    <joint name="joint5" value="1.7175"/>
+    <joint name="joint6" value="0"/>
   </group_state>
   <group_state name="open" group="pgea_gripper">
-    <joint name="left_finger_joint" value="0" />
+    <joint name="left_finger_joint" value="0"/>
   </group_state>
   <group_state name="closed" group="pgea_gripper">
-    <joint name="left_finger_joint" value="0.020" />
+    <joint name="left_finger_joint" value="0.020"/>
   </group_state>
-  <disable_collisions link1="Link1" link2="Link2" reason="Adjacent" />
-  <disable_collisions link1="Link1" link2="Link4" reason="Never" />
-  <disable_collisions link1="Link1" link2="base_link" reason="Adjacent" />
-  <disable_collisions link1="Link2" link2="Link3" reason="Adjacent" />
-  <disable_collisions link1="Link2" link2="base_link" reason="Never" />
-  <disable_collisions link1="Link3" link2="Link4" reason="Adjacent" />
-  <disable_collisions link1="Link4" link2="Link5" reason="Adjacent" />
-  <disable_collisions link1="Link4" link2="Link6" reason="Never" />
-  <disable_collisions link1="Link4" link2="base_link" reason="Never" />
-  <disable_collisions link1="Link5" link2="Link6" reason="Adjacent" />
-  <disable_collisions link1="Link6" link2="pgea_extension_plate" reason="Adjacent" />
+  <disable_collisions link1="Link1" link2="Link2" reason="Adjacent"/>
+  <disable_collisions link1="Link1" link2="Link4" reason="Never"/>
+  <disable_collisions link1="Link1" link2="base_link" reason="Adjacent"/>
+  <disable_collisions link1="Link2" link2="Link3" reason="Adjacent"/>
+  <disable_collisions link1="Link2" link2="base_link" reason="Never"/>
+  <disable_collisions link1="Link3" link2="Link4" reason="Adjacent"/>
+  <disable_collisions link1="Link4" link2="Link5" reason="Adjacent"/>
+  <disable_collisions link1="Link4" link2="Link6" reason="Never"/>
+  <disable_collisions link1="Link4" link2="base_link" reason="Never"/>
+  <disable_collisions link1="Link5" link2="Link6" reason="Adjacent"/>
   <!-- The connector slab overlaps the Link6 mounting envelope by design. -->
-  <disable_collisions link1="Link6" link2="connector_slabs" reason="Never" />
-  <disable_collisions link1="pgea_extension_plate" link2="connector_slabs" reason="Adjacent" />
-  <disable_collisions link1="connector_slabs" link2="gripper_body" reason="Adjacent" />
-  <disable_collisions link1="gripper_body" link2="left_finger" reason="Adjacent" />
-  <disable_collisions link1="gripper_body" link2="right_finger" reason="Adjacent" />
-  <disable_collisions link1="pgea_extension_plate" link2="gripper_body" reason="Never" />
-  <disable_collisions link1="pgea_extension_plate" link2="left_finger" reason="Never" />
-  <disable_collisions link1="pgea_extension_plate" link2="right_finger" reason="Never" />
-  <disable_collisions link1="connector_slabs" link2="left_finger" reason="Never" />
-  <disable_collisions link1="connector_slabs" link2="right_finger" reason="Never" />
-</robot>
+  <disable_collisions link1="Link6" link2="connector_slabs" reason="Never"/>
+  <disable_collisions link1="connector_slabs" link2="gripper_body" reason="Adjacent"/>
+  <disable_collisions link1="gripper_body" link2="left_finger" reason="Adjacent"/>
+  <disable_collisions link1="gripper_body" link2="right_finger" reason="Adjacent"/>
+  <disable_collisions link1="connector_slabs" link2="left_finger" reason="Never"/>
+  <disable_collisions link1="connector_slabs" link2="right_finger" reason="Never"/>
+<disable_collisions link1="Link6" link2="gripper_body" reason="Never"/><disable_collisions link1="Link6" link2="left_finger" reason="Never"/><disable_collisions link1="Link6" link2="right_finger" reason="Never"/></robot>

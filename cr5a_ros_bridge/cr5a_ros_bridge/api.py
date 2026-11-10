@@ -27,9 +27,10 @@ from .direct_motion import (JOINT_NAMES, joint_path_samples, movj_target, movl_p
 from .pick_place import (
     SHELF_PRESETS, build_task_waypoints, calculate_payload_model,
     evaluate_gripper_fit, generate_grasp_candidates, generate_shelf_scene,
-    normalize_object, quaternion_from_rpy,
+    normalize_object, quaternion_from_rpy, requires_shelf_fit,
     pose_relative_to, pose_compose, rotate_vector,
 )
+from .platform_geometry import build_platform_box, compose_marker_pose
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import (
     ListParameters, GetParameters, DescribeParameters, SetParametersAtomically
@@ -1871,6 +1872,13 @@ def create_app(backend, config):
         place_destination = str(payload.get("place_destination", "platform"))
         if place_destination not in ("platform", "shelf"):
             raise ValueError("place_destination must be 'platform' or 'shelf'")
+        pick_source = str(payload.get("pick_source", "shelf"))
+        if pick_source not in ("shelf", "free"):
+            raise ValueError("pick_source must be 'shelf' or 'free'")
+        # A free-space pick placed on a platform does not occupy a shelf bay.
+        # Still create the shelf collision geometry, but do not incorrectly reject
+        # an unrelated object because its dimensions exceed that shelf.
+        shelf_fit_required = requires_shelf_fit(pick_source, place_destination)
         platform = payload.get("platform", {"position_m": [0.45, 0.0, 0.0], "dimensions_m": [0.30, 0.24, 0.02]})
         if place_destination == "shelf":
             platform = None
@@ -1879,17 +1887,24 @@ def create_app(backend, config):
         scene_data = generate_shelf_scene(
             shelf_spec, frame_id=frame_id, level=level,
             place_level=payload.get("place_level", level),
-            clearance_m=clearance, object_dimensions_m=obj["dimensions_m"],
+            clearance_m=clearance,
+            object_dimensions_m=obj["dimensions_m"] if shelf_fit_required else None,
             platform=platform,
             origin_m=payload.get("shelf_pose", {}).get("position_m", [0.55, 0.0, 0.0]),
             yaw_rad=payload.get("shelf_pose", {}).get("yaw_rad", 1.57079632679),
             object_yaw_rad=obj["rpy_rad"][2],
         )
-        if not scene_data["fit"]["valid"]:
+        if shelf_fit_required and not scene_data["fit"]["valid"]:
             raise ValueError("Object does not fit selected shelf bay: " + "; ".join(scene_data["fit"]["reasons"]))
-        pick_source = str(payload.get("pick_source", "shelf"))
-        if pick_source not in ("shelf", "free"):
-            raise ValueError("pick_source must be 'shelf' or 'free'")
+        # Do not put an unused rack into the robot's collision world for the
+        # free-space -> platform workflow. This keeps the default demo scene
+        # focused on the object and actual destination instead of distant rack
+        # panels that have no role in this task.
+        if pick_source == "free" and place_destination == "platform":
+            scene_data["collision_objects"] = [
+                item for item in scene_data["collision_objects"]
+                if not str(item.get("id", "")).startswith("shelf_")
+            ]
         object_relative_yaw = obj["rpy_rad"][2] - scene_data["shelf"]["yaw_rad"]
         object_half_front_depth = (
             abs(math.sin(object_relative_yaw)) * obj["dimensions_m"][0]
@@ -1908,6 +1923,7 @@ def create_app(backend, config):
             obj,
             gripper_yaw_deg=payload.get("gripper_yaw_deg"),
             approach_angle_deg=payload.get("approach_angle_deg", 0.0),
+            gripper_roll_deg=payload.get("gripper_roll_deg", 0.0),
             approach_distance_m=pick_approach_distance,
             tcp_offset_m=payload.get("tcp_offset_m", [0.0, 0.0, 0.0]),
         )[0]
@@ -2042,7 +2058,7 @@ def create_app(backend, config):
         try:
             payload_model = calculate_payload_model(
                 obj["mass_kg"],
-                tool_mass_kg=payload.get("tool_mass_kg", gripper_cfg.get("tool_mass_kg", 1.6)),
+                tool_mass_kg=payload.get("tool_mass_kg", gripper_cfg.get("tool_mass_kg", 1.30)),
                 object_com_m=payload.get("object_com_m", [0.0, 0.0, 0.0]),
                 tool_com_m=payload.get("tool_com_m", gripper_cfg.get("tool_com_tcp_m", [0.0, 0.0, 0.0])),
                 base_velocity_scaling=payload.get("max_velocity_scaling", 0.15),
@@ -2055,7 +2071,9 @@ def create_app(backend, config):
         frame_id = prepared["frame_id"]
         link_name = config.get("moveit", {}).get("pick_place_tcp_link", "tcp")
         object_id = "pick_place_object"
-        touch_links = payload.get("touch_links", [link_name, "gripper_body", "left_finger", "right_finger"])
+        touch_links = payload.get("touch_links", [
+            link_name, "gripper_body", "left_finger", "right_finger", "connector_slabs",
+        ])
         if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
             raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
 
@@ -2086,10 +2104,13 @@ def create_app(backend, config):
                 entry = AllowedCollisionEntry()
                 entry.enabled = row
                 matrix.entry_values.append(entry)
-            goal.planning_options.planning_scene_diff.allowed_collision_matrix = matrix
+            scene_diff = goal.planning_options.planning_scene_diff
+            scene_diff.is_diff = True
+            scene_diff.allowed_collision_matrix = matrix
 
         def attach_object(goal):
             scene_diff = goal.planning_options.planning_scene_diff
+            scene_diff.is_diff = True
             remove = CollisionObject()
             remove.id = object_id
             remove.operation = CollisionObject.REMOVE
@@ -2113,14 +2134,45 @@ def create_app(backend, config):
             scene_diff.robot_state.attached_collision_objects.append(attached)
             scene_diff.robot_state.is_diff = True
 
+        def allow_place_contact(goal):
+            # The object is still attached for the place trajectory. Permit
+            # contact with the support surface only for this final lowering
+            # segment; all other environment collisions remain active.
+            attach_object(goal)
+            matrix = copy.deepcopy(base_allowed_collision_matrix)
+            names = list(matrix.entry_names)
+            rows = [list(entry.enabled) for entry in matrix.entry_values]
+            while len(rows) < len(names):
+                rows.append([False] * len(names))
+            rows = [row[:len(names)] + [False] * max(0, len(names) - len(row)) for row in rows]
+
+            def ensure_name(name):
+                if name not in names:
+                    for row in rows:
+                        row.append(False)
+                    names.append(name)
+                    rows.append([False] * len(names))
+                return names.index(name)
+
+            object_index = ensure_name(object_id)
+            platform_index = ensure_name("pick_place_place_platform")
+            rows[object_index][platform_index] = True
+            rows[platform_index][object_index] = True
+            matrix.entry_names = names
+            matrix.entry_values = []
+            for row in rows:
+                entry = AllowedCollisionEntry()
+                entry.enabled = row
+                matrix.entry_values.append(entry)
+            goal.planning_options.planning_scene_diff.allowed_collision_matrix = matrix
+
         def detach_and_place(goal):
             scene_diff = goal.planning_options.planning_scene_diff
-            attached = AttachedCollisionObject()
-            attached.link_name = link_name
-            attached.object.id = object_id
-            attached.object.operation = CollisionObject.REMOVE
-            scene_diff.robot_state.attached_collision_objects.append(attached)
-            scene_diff.robot_state.is_diff = True
+            scene_diff.is_diff = True
+            # Planning requests use isolated scene diffs; the previous goal's
+            # attachment is not committed to the scene monitor. Model the release
+            # state directly as a world object at the final place pose instead
+            # of removing a non-existent globally-attached body.
             place = next(item for item in waypoints if item["name"] == "place")
             object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
             relative = pose_relative_to(
@@ -2144,7 +2196,44 @@ def create_app(backend, config):
             else:
                 object_payload["radius_m"] = obj["dimensions_m"][0] / 2
             scene_diff.world.collision_objects.append(collision_object(object_payload))
-            scene_diff.allowed_collision_matrix = copy.deepcopy(base_allowed_collision_matrix)
+            matrix = copy.deepcopy(base_allowed_collision_matrix)
+            names = list(matrix.entry_names)
+            rows = [list(entry.enabled) for entry in matrix.entry_values]
+            while len(rows) < len(names):
+                rows.append([False] * len(names))
+            rows = [row[:len(names)] + [False] * max(0, len(names) - len(row)) for row in rows]
+            if object_id not in names:
+                for row in rows:
+                    row.append(False)
+                names.append(object_id)
+                rows.append([False] * len(names))
+            platform_id = "pick_place_place_platform"
+            if platform_id not in names:
+                for row in rows:
+                    row.append(False)
+                names.append(platform_id)
+                rows.append([False] * len(names))
+            object_index, platform_index = names.index(object_id), names.index(platform_id)
+            rows[object_index][platform_index] = True
+            rows[platform_index][object_index] = True
+            # The released object can still be in contact with the PGEA fingers
+            # at the first retreat state. Allow only those known gripper links.
+            for link in touch_links:
+                if link not in names:
+                    for row in rows:
+                        row.append(False)
+                    names.append(link)
+                    rows.append([False] * len(names))
+                link_index = names.index(link)
+                rows[object_index][link_index] = True
+                rows[link_index][object_index] = True
+            matrix.entry_names = names
+            matrix.entry_values = []
+            for row in rows:
+                entry = AllowedCollisionEntry()
+                entry.enabled = row
+                matrix.entry_values.append(entry)
+            scene_diff.allowed_collision_matrix = matrix
 
         plans = []
         start_state = None
@@ -2156,6 +2245,7 @@ def create_app(backend, config):
                     "position_tolerance_m": payload.get("position_tolerance_m", 0.003),
                     "orientation_tolerance_rad": payload.get("orientation_tolerance_rad", 0.03)},
                 "allowed_planning_time": payload.get("allowed_planning_time", 5.0),
+                "num_planning_attempts": payload.get("num_planning_attempts", 5),
                 "max_velocity_scaling": payload_model["max_velocity_scaling"],
                 "max_acceleration_scaling": payload_model["max_acceleration_scaling"],
                 "pipeline_id": payload.get("pipeline_id", "ompl"),
@@ -2166,8 +2256,12 @@ def create_app(backend, config):
             mutator = None
             if waypoint["name"] == "grasp":
                 mutator = allow_object_contact
-            elif waypoint["name"] in ("withdraw", "lift", "preplace", "place"):
+            elif waypoint["name"] in ("withdraw", "lift", "preplace"):
+                # Each MoveGroup goal receives its own PlanningScene diff; reapply
+                # the TCP-relative attachment to every carried segment.
                 mutator = attach_object
+            elif waypoint["name"] == "place":
+                mutator = allow_place_contact
             elif waypoint["name"] == "retreat":
                 mutator = detach_and_place
             result = await create_motion_plan_impl(stage_payload, mutator)
@@ -2363,6 +2457,141 @@ def create_app(backend, config):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def websocket_request(method: str, params: dict):
+        if method == "vision.configure":
+            allowed = {
+                "camera_topic", "depth_topic", "camera_info_topic", "base_frame",
+                "detector_backend", "model_family", "model_size", "image_size",
+                "class_prompts", "yolo_weights_path", "confidence_threshold",
+                "iou_threshold", "min_depth_m", "max_depth_m", "max_fps",
+                "max_detections", "boxernet_topic", "hand_eye_transform_yaml",
+                "hand_eye_parent_frame", "preview_width", "jpeg_quality",
+                "tf_lookup_timeout_sec",
+            }
+            values = params.get("parameters", {})
+            if not isinstance(values, dict) or not values:
+                raise HTTPException(status_code=422, detail="parameters must be a non-empty object")
+            unknown = sorted(set(values) - allowed)
+            if unknown:
+                raise HTTPException(status_code=422, detail="Unsupported vision parameters: " + ", ".join(unknown))
+            for name in ("camera_topic", "depth_topic", "camera_info_topic", "boxernet_topic"):
+                if name in values and (not isinstance(values[name], str) or not values[name].startswith("/")):
+                    raise HTTPException(status_code=422, detail=f"{name} must be an absolute ROS topic name")
+            if "base_frame" in values and (not isinstance(values["base_frame"], str) or not values["base_frame"].strip()):
+                raise HTTPException(status_code=422, detail="base_frame must be a non-empty frame name")
+            if "hand_eye_transform_yaml" in values:
+                calibration_yaml = values["hand_eye_transform_yaml"]
+                if not isinstance(calibration_yaml, str) or len(calibration_yaml.encode("utf-8")) > 160_000:
+                    raise HTTPException(status_code=422, detail="hand-eye calibration YAML must be text smaller than 160 KB")
+            if "detector_backend" in values and values["detector_backend"] not in ("yolo_seg", "boxernet"):
+                raise HTTPException(status_code=422, detail="detector_backend must be yolo_seg or boxernet")
+            if "model_family" in values and values["model_family"] not in (
+                "yolo26-seg", "yoloe-26-seg", "yolo11-seg", "yolov8-seg", "custom"
+            ):
+                raise HTTPException(status_code=422, detail="Unsupported segmentation model family")
+            if "model_size" in values and values["model_size"] not in ("n", "s", "m", "l", "x"):
+                raise HTTPException(status_code=422, detail="model_size must be n, s, m, l or x")
+            if "image_size" in values and values["image_size"] not in (320, 416, 512, 640, 768, 960, 1024, 1280):
+                raise HTTPException(status_code=422, detail="image_size must be one of 320, 416, 512, 640, 768, 960, 1024 or 1280")
+            if "confidence_threshold" in values and not 0.0 < float(values["confidence_threshold"]) < 1.0:
+                raise HTTPException(status_code=422, detail="confidence_threshold must be between 0 and 1")
+            _validate_finite_json(values, "vision parameters")
+            service_name = _parameter_service_name(backend, "/cr5a_vision", "set_parameters_atomically")
+            request = SetParametersAtomically.Request()
+            try:
+                request.parameters = [
+                    Parameter(name=name, value=value).to_parameter_msg()
+                    for name, value in values.items()
+                ]
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Invalid vision parameter: {exc}") from exc
+            result = await _await_ros(backend.call_service(service_name, SetParametersAtomically, request))
+            if not result.result.successful:
+                raise HTTPException(status_code=409, detail=result.result.reason or "Vision configuration was rejected")
+            return {"successful": True, "parameters": values}
+
+        if method in ("vision.start", "vision.stop", "vision.detect_once"):
+            service_suffix = {
+                "vision.start": "start",
+                "vision.stop": "stop",
+                "vision.detect_once": "detect_once",
+            }[method]
+            service_name = f"/cr5a_vision/{service_suffix}"
+            try:
+                result = await _await_ros(
+                    backend.call_service(service_name, Trigger, Trigger.Request()),
+                    10.0 if method == "vision.start" else 3.0,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Vision service unavailable ({service_name}): {exc}") from exc
+            data = {"success": bool(result.success), "message": str(result.message)}
+            if not result.success:
+                raise HTTPException(status_code=409, detail=result.message or "Vision operation failed")
+            return data
+
+        if method == "apriltag.configure":
+            allowed = {"tag_family", "tag_size_m", "tag_ids", "frame_prefix", "max_fps", "jpeg_quality"}
+            values = params.get("parameters", {})
+            if not isinstance(values, dict) or not values:
+                raise HTTPException(status_code=422, detail="parameters must be a non-empty object")
+            unknown = sorted(set(values)-allowed)
+            if unknown:
+                raise HTTPException(status_code=422, detail="Unsupported AprilTag parameters: "+", ".join(unknown))
+            if "tag_family" in values and values["tag_family"] not in ("tag36h11", "tag25h9", "tag16h5"):
+                raise HTTPException(status_code=422, detail="Unsupported AprilTag family")
+            if "tag_size_m" in values:
+                size = float(values["tag_size_m"])
+                if not math.isfinite(size) or not 0.005 <= size <= 0.5:
+                    raise HTTPException(status_code=422, detail="tag_size_m must be between 5 mm and 500 mm")
+            if "tag_ids" in values:
+                if not isinstance(values["tag_ids"], str) or any(not item.strip().lstrip("-").isdigit() for item in values["tag_ids"].split(",") if item.strip()):
+                    raise HTTPException(status_code=422, detail="tag_ids must be a comma-separated list of integer IDs")
+            _validate_finite_json(values, "AprilTag parameters")
+            service_name = _parameter_service_name(backend, "/cr5a_apriltag_detector", "set_parameters_atomically")
+            request = SetParametersAtomically.Request()
+            try:
+                request.parameters = [Parameter(name=name, value=value).to_parameter_msg() for name, value in values.items()]
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Invalid AprilTag parameter: {exc}") from exc
+            result = await _await_ros(backend.call_service(service_name, SetParametersAtomically, request))
+            if not result.result.successful:
+                raise HTTPException(status_code=409, detail=result.result.reason or "AprilTag configuration rejected")
+            return {"successful": True, "parameters": values}
+
+        if method in ("apriltag.start", "apriltag.stop"):
+            suffix = "start" if method == "apriltag.start" else "stop"
+            service_name = f"/cr5a_apriltag/{suffix}"
+            try:
+                result = await _await_ros(backend.call_service(service_name, Trigger, Trigger.Request()), 5.0)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"AprilTag detector service unavailable ({service_name}): {exc}") from exc
+            if not result.success:
+                raise HTTPException(status_code=409, detail=result.message or "AprilTag operation failed")
+            return {"success": True, "message": str(result.message)}
+
+        if method == "apriltag.get_status":
+            backend.subscribe_topic("/cr5/apriltag/status", "std_msgs/msg/String")
+            backend.subscribe_topic("/cr5/apriltag/detections", "std_msgs/msg/String")
+            status = backend.topic_snapshot("/cr5/apriltag/status")
+            detections = backend.topic_snapshot("/cr5/apriltag/detections")
+            def parse_text_topic(snapshot):
+                if not snapshot:
+                    return None
+                try:
+                    return json.loads(snapshot["data"].get("data", "{}"))
+                except (TypeError, ValueError):
+                    return snapshot["data"]
+            return {"status": parse_text_topic(status), "detections": parse_text_topic(detections)}
+
+        if method == "vision.get_status":
+            status = backend.topic_snapshot("/cr5/vision/status")
+            detections = backend.topic_snapshot("/cr5/vision/detections")
+            return {
+                "status": status["data"] if status else None,
+                "detections": detections["data"] if detections else None,
+            }
+
         if method == "gripper.get_profiles":
             try:
                 await ensure_active_gripper_profile()
@@ -2684,6 +2913,88 @@ def create_app(backend, config):
             await apply_scene(scene)
             return {"removed_world_objects": len(scene.world.collision_objects)}
 
+        if method == "scene_builder.resolve_markers":
+            base_frame = str(config.get("moveit", {}).get("base_frame", "dummy_link"))
+            markers = params.get("markers")
+            if not isinstance(markers, list) or not 1 <= len(markers) <= 4:
+                raise HTTPException(status_code=422, detail="markers must contain one to four marker entries")
+            resolved = []
+            for marker in markers:
+                if not isinstance(marker, dict) or not str(marker.get("id", "")).strip():
+                    raise HTTPException(status_code=422, detail="each marker requires a non-empty id")
+                source_frame = str(marker.get("source_frame") or base_frame).strip().lstrip("/")
+                if not source_frame:
+                    raise HTTPException(status_code=422, detail=f"marker {marker.get('id')} needs a source_frame")
+                has_pose = marker.get("position_m") is not None and marker.get("orientation_xyzw") is not None
+                if has_pose:
+                    try:
+                        position = finite_vector(marker["position_m"], 3, f"marker {marker['id']} position_m")
+                        orientation = finite_quaternion(marker["orientation_xyzw"], f"marker {marker['id']} orientation_xyzw")
+                    except ValueError as exc:
+                        raise HTTPException(status_code=422, detail=str(exc)) from exc
+                else:
+                    position, orientation = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]
+                tf_info = None
+                if source_frame != base_frame:
+                    try:
+                        tf_info = backend.lookup_transform(base_frame, source_frame, params.get("tf_timeout_sec", 0.25))
+                    except Exception as exc:
+                        raise HTTPException(status_code=409, detail=str(exc)) from exc
+                    composed = compose_marker_pose(
+                        tf_info["translation_m"], tf_info["quaternion_xyzw"], position, orientation
+                    )
+                    position, orientation = composed["position_m"], composed["orientation_xyzw"]
+                resolved.append({
+                    "id": str(marker["id"]), "corner": str(marker.get("corner", "")),
+                    "frame_id": base_frame, "source_frame": source_frame,
+                    "position_m": position, "orientation_xyzw": orientation,
+                    "transform_applied": source_frame != base_frame, "tf": tf_info,
+                })
+            return {"frame_id": base_frame, "markers": resolved,
+                    "resolved_count": len(resolved), "transform_source": "live TF"}
+
+        if method in ("scene_builder.preview", "scene_builder.construct"):
+            base_frame = str(config.get("moveit", {}).get("base_frame", "dummy_link"))
+            try:
+                geometry = build_platform_box(
+                    str(params.get("mode", "")), params.get("markers", []),
+                    params.get("ground_z_m", -0.7429),
+                    width_m=params.get("width_m"), depth_m=params.get("depth_m"),
+                    margin_m=params.get("margin_m", 0.0),
+                    max_marker_tilt_deg=params.get("max_marker_tilt_deg", 15.0),
+                    max_height_spread_m=params.get("max_height_spread_m", 0.035),
+                    max_corner_fit_rms_m=params.get("max_corner_fit_rms_m", 0.05),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            geometry["frame_id"] = base_frame
+            geometry["id"] = str(params.get("object_id") or "platform_builder_platform")
+            if method == "scene_builder.preview":
+                return geometry
+            try:
+                obj = collision_object(geometry, geometry["id"])
+                diff = PlanningScene()
+                diff.is_diff = True
+                diff.world.collision_objects.append(obj)
+                await apply_scene(diff)
+            except Exception as exc:
+                raise HTTPException(status_code=409, detail=f"Unable to add platform collision object: {exc}") from exc
+            geometry["loaded"] = True
+            return geometry
+
+        if method == "scene_builder.remove":
+            object_id = str(params.get("object_id") or "platform_builder_platform")
+            if not object_id.startswith("platform_builder_"):
+                raise HTTPException(status_code=422, detail="Only Platform Builder collision objects can be removed here")
+            remove = CollisionObject()
+            remove.id = object_id
+            remove.operation = CollisionObject.REMOVE
+            scene = PlanningScene()
+            scene.is_diff = True
+            scene.world.collision_objects.append(remove)
+            await apply_scene(scene)
+            return {"id": object_id, "removed": True}
+
         if method == "scene.load_defaults":
             """Idempotently restore the three standard CR5 workspace obstacles."""
             base_frame = str(config.get("moveit", {}).get("base_frame", "dummy_link"))
@@ -2723,6 +3034,72 @@ def create_app(backend, config):
 
         if method == "pick_place.plan":
             return await plan_pick_place_task(params)
+
+        if method == "pick_place.execute_phase":
+            # Automatic pick/place is intentionally simulation-only. The real
+            # hardware bridge keeps both moveit.allow_execution and
+            # gripper.allow_commands disabled unless explicitly commissioned.
+            if not bool(config.get("robot", {}).get("simulation", False)):
+                raise HTTPException(status_code=403, detail="Automatic pick/place phases are restricted to the simulation bridge")
+            if not bool(config.get("moveit", {}).get("allow_execution", False)):
+                raise HTTPException(status_code=403, detail="MoveIt execution is disabled by bridge safety configuration")
+            if not bool(config.get("gripper", {}).get("allow_commands", False)):
+                raise HTTPException(status_code=403, detail="PGEA commands are disabled by bridge safety configuration")
+            phase = str(params.get("phase", "")).lower()
+            sequences = {
+                "pick": (
+                    ("pregrasp", "motion", None),
+                    ("grasp", "motion", None),
+                    ("close_gripper", "gripper", 0.0),
+                    ("withdraw", "motion", None),
+                    ("lift", "motion", None),
+                ),
+                "place": (
+                    ("preplace", "motion", None),
+                    ("place", "motion", None),
+                    ("open_gripper", "gripper", 0.020),
+                    ("retreat", "motion", None),
+                ),
+            }
+            if phase not in sequences:
+                raise HTTPException(status_code=422, detail="phase must be 'pick' or 'place'")
+            supplied = params.get("plans")
+            if not isinstance(supplied, list):
+                raise HTTPException(status_code=422, detail="plans must be the planned name/plan_id list")
+            supplied_by_name = {
+                str(item.get("name")): str(item.get("plan_id"))
+                for item in supplied if isinstance(item, dict) and item.get("name") and item.get("plan_id")
+            }
+            required_motion = [name for name, kind, _ in sequences[phase] if kind == "motion"]
+            missing = [name for name in required_motion if not supplied_by_name.get(name)]
+            if missing:
+                raise HTTPException(status_code=422, detail="Missing planned segments: " + ", ".join(missing))
+            for name in required_motion:
+                stored = backend.plans.get(supplied_by_name[name])
+                if stored is None or stored.get("status") != "SUCCEEDED":
+                    raise HTTPException(status_code=409, detail=f"Planned segment '{name}' is missing, expired or not successful; re-plan the task")
+            await require_connected_arm(enabled=True)
+            completed = []
+            for name, kind, position in sequences[phase]:
+                try:
+                    if kind == "motion":
+                        result = await execute_motion_plan_impl(supplied_by_name[name])
+                    else:
+                        result = await websocket_request("gripper.move", {"position_m": position, "max_effort": 0.0})
+                    state = str(result.get("status", "SUCCEEDED"))
+                    completed.append({"step": name, "status": state, "result": result})
+                    if state != "SUCCEEDED":
+                        return {"phase": phase, "status": "FAILED", "completed": completed,
+                                "failed_step": name, "error": result.get("error")}
+                except HTTPException as exc:
+                    completed.append({"step": name, "status": "FAILED", "error": str(exc.detail)})
+                    backend.emit("pick_place.execution", {
+                        "phase": phase, "status": "FAILED", "failed_step": name,
+                    })
+                    return {"phase": phase, "status": "FAILED", "completed": completed,
+                            "failed_step": name, "error": str(exc.detail)}
+            backend.emit("pick_place.execution", {"phase": phase, "status": "SUCCEEDED"})
+            return {"phase": phase, "status": "SUCCEEDED", "completed": completed}
 
         if method == "motion.plan":
             return await create_motion_plan_impl(params)

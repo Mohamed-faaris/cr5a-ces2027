@@ -1,3 +1,4 @@
+import base64
 import concurrent.futures
 import json
 import threading
@@ -7,6 +8,9 @@ from datetime import datetime, timezone
 
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.parameter import Parameter
@@ -44,6 +48,10 @@ class BridgeNode(Node):
         super().__init__("cr5a_ros_bridge")
         self.config = config
         self._lock = threading.RLock()
+        # Shared TF buffer for calibrated camera/tag-to-base transforms. The
+        # listener uses this node's executor so the graph has one TF subscriber.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
         self._service_clients = {}
         self._topic_subscriptions = {}
         self._topic_publishers = {}
@@ -218,6 +226,31 @@ class BridgeNode(Node):
             value = self._topic_cache.get(topic)
             return dict(value) if value else None
 
+    def lookup_transform(self, target_frame, source_frame, timeout_sec=0.25):
+        """Return latest T_target_source from the live TF tree or raise LookupError."""
+        target = str(target_frame).strip().lstrip("/")
+        source = str(source_frame).strip().lstrip("/")
+        if not target or not source:
+            raise ValueError("target_frame and source_frame are required")
+        if target == source:
+            return {"target_frame": target, "source_frame": source,
+                    "translation_m": [0.0, 0.0, 0.0],
+                    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                target, source, Time(), timeout=Duration(seconds=max(0.01, min(float(timeout_sec), 1.0)))
+            )
+        except TransformException as exc:
+            raise LookupError(f"No TF transform {target} <- {source}: {exc}") from exc
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        return {
+            "target_frame": target, "source_frame": source,
+            "translation_m": [float(translation.x), float(translation.y), float(translation.z)],
+            "quaternion_xyzw": [float(rotation.x), float(rotation.y), float(rotation.z), float(rotation.w)],
+            "stamp": {"sec": transform.header.stamp.sec, "nanosec": transform.header.stamp.nanosec},
+        }
+
     def subscribe_topic(self, topic, type_name=None, qos_config=None):
         if topic in self._topic_subscriptions:
             return
@@ -248,7 +281,15 @@ class BridgeNode(Node):
 
         def callback(message, topic_name=topic, ros_type=type_name):
             invalid_paths = []
-            payload = message_dict(message, invalid_paths)
+            if ros_type == "sensor_msgs/msg/CompressedImage":
+                header = message_dict(message.header, invalid_paths)
+                payload = {
+                    "header": header,
+                    "format": str(message.format),
+                    "data_base64": base64.b64encode(bytes(message.data)).decode("ascii"),
+                }
+            else:
+                payload = message_dict(message, invalid_paths)
             self._warn_non_finite(topic_name, invalid_paths)
             with self._lock:
                 seq = self._topic_seq.get(topic_name, 0) + 1

@@ -1,0 +1,3 @@
+# Latest stable Ultralytics release verified 2026-11-09.
+# Includes YOLO26-seg, YOLOE-26-seg, YOLO11-seg and YOLOv8-seg.
+ultralytics>=8.4.208

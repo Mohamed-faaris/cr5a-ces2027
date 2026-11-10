@@ -1,11 +1,9 @@
-# Simulation-only bridge profile. Never use this profile with physical hardware.
-# The API and raw rosbridge are loopback-only. Put them behind an authenticated
-# TLS reverse proxy before exposing them to another machine.
+# Simulation-only bridge profile. Never use with physical hardware.
+# API and raw rosbridge bind to loopback; use an authenticated TLS proxy before any remote exposure.
 api:
   host: 127.0.0.1
   port: 8000
   log_level: info
-
 ros:
   node_name: cr5a_ros_bridge
   service_timeout_sec: 3.0
@@ -13,34 +11,59 @@ ros:
   generic_service_calls_enabled: false
   topic_publish_enabled: false
   auto_subscribe:
-    - topic: /joint_states
-      type: sensor_msgs/msg/JointState
-      qos: {reliability: reliable, durability: volatile, depth: 10}
-    - topic: /tf
-      type: tf2_msgs/msg/TFMessage
-      qos: {reliability: best_effort, durability: volatile, depth: 50}
-    - topic: /tf_static
-      type: tf2_msgs/msg/TFMessage
-      qos: {reliability: reliable, durability: transient_local, depth: 10}
-    - topic: /dobot_msgs_v4/msg/RobotStatus
-      type: dobot_msgs_v4/msg/RobotStatus
-      qos: {reliability: reliable, durability: volatile, depth: 10}
-    - topic: /dobot_msgs_v4/msg/ToolVectorActual
-      type: dobot_msgs_v4/msg/ToolVectorActual
-      qos: {reliability: reliable, durability: volatile, depth: 10}
-    - topic: /monitored_planning_scene
-      type: moveit_msgs/msg/PlanningScene
-      qos: {reliability: reliable, durability: volatile, depth: 10}
-    - topic: /display_planned_path
-      type: moveit_msgs/msg/DisplayTrajectory
-      qos: {reliability: reliable, durability: volatile, depth: 10}
-
+  - topic: /joint_states
+    type: sensor_msgs/msg/JointState
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  - topic: /tf
+    type: tf2_msgs/msg/TFMessage
+    qos:
+      reliability: best_effort
+      durability: volatile
+      depth: 50
+  - topic: /tf_static
+    type: tf2_msgs/msg/TFMessage
+    qos:
+      reliability: reliable
+      durability: transient_local
+      depth: 10
+  - topic: /dobot_msgs_v4/msg/RobotStatus
+    type: dobot_msgs_v4/msg/RobotStatus
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  - topic: /dobot_msgs_v4/msg/ToolVectorActual
+    type: dobot_msgs_v4/msg/ToolVectorActual
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  - topic: /monitored_planning_scene
+    type: moveit_msgs/msg/PlanningScene
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  - topic: /display_planned_path
+    type: moveit_msgs/msg/DisplayTrajectory
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
 scene:
   auto_load_defaults: true
-
 moveit:
   group_name: cr5_group
-  joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+  joint_names:
+  - joint1
+  - joint2
+  - joint3
+  - joint4
+  - joint5
+  - joint6
   base_frame: dummy_link
   end_effector_link: Link6
   pick_place_tcp_link: tcp
@@ -52,8 +75,8 @@ moveit:
   allow_execution: true
   start_state_tolerance_rad: 0.03
   max_joint_state_age_sec: 1.0
-
 robot:
+  # This profile intentionally enables simulated robot commands only.
   service_prefix: /dobot_bringup_ros2/srv/
   max_payload_kg: 5.0
   simulation: true
@@ -62,14 +85,16 @@ robot:
   allow_commands: true
   allow_direct_movement: false
   allow_error_clear: true
-
 gripper:
-  # Estimated custom PGEA finger envelope from current CAD mesh dimensions.
-  nominal_total_stroke_m: 0.040
+  # Assembly mass/COM correspond to the current PGEA geometry-only URDF.
+  nominal_total_stroke_m: 0.04
   finger_mesh_span_m: 0.045
   wrap_envelope_m: 0.085
-  tool_mass_kg: 1.60
-  tool_com_tcp_m: [-0.086625, 0.0, -0.1095625]
+  tool_mass_kg: 1.30
+  tool_com_tcp_m:
+  - -0.0860769
+  - 0.0
+  - -0.0926154
   allow_commands: true
   action_name: /gripper_action_controller/gripper_cmd
   status_service: /pgea_gripper/get_status
@@ -77,26 +102,18 @@ gripper:
   calibrate_service: /pgea_gripper/calibrate
   action_timeout_sec: 25.0
   lifecycle_timeout_sec: 70.0
-
 auth:
   enabled: false
-  # Set CR5A_BRIDGE_TOKEN when enabling auth. Do not commit secrets here.
   token_env: CR5A_BRIDGE_TOKEN
-
 rosbridge:
   enabled: true
   host: 127.0.0.1
   port: 9090
-
-# Direct Dobot MovJ/MovL pre-validation.
-# MovL is blocked until controller user/tool coordinates are verified to
-# match the MoveIt base frame and end-effector link. Do not set true by
-# guesswork; validate the calibration and active controller user/tool.
+# Direct MovL remains locked until real controller user/tool frames are verified.
 direct_movement:
   controller_pose_frame_confirmed: false
   controller_user: null
   controller_tool: null
-  # Set indices only after verifying the controller's active user/tool frames.
   joint_step_deg: 2.0
   cartesian_step_mm: 10.0
   angular_step_deg: 2.0

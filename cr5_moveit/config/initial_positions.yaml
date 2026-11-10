@@ -1,9 +1,10 @@
-# Default initial positions for cr5_robot's ros2_control fake system
-
+# Start fake ros2_control at the SRDF `home` state, not the all-zero pose.
+# The zero configuration places the PGEA extension plate into Link3 in the
+# current collision model and is not a valid MoveIt planning start state.
 initial_positions:
-  joint1: 0
-  joint2: 0
-  joint3: 0
-  joint4: 0
-  joint5: 0
-  joint6: 0
+  joint1: 0.0
+  joint2: 0.4337
+  joint3: -1.4695
+  joint4: -0.2602
+  joint5: 1.7175
+  joint6: 0.0

@@ -52,3 +52,7 @@ button{cursor:pointer}
   background:#18181b;box-shadow:0 0 0 1px #a1a1aa;
 }
 @media(max-width:640px){.robot-viewport{height:52vh;min-height:360px}}
+
+/* Keep the dedicated task viewport visible without pushing configuration below the fold. */
+.pick-place-viewport .robot-viewport{height:min(42vh,460px);min-height:320px}
+@media(max-width:640px){.pick-place-viewport .robot-viewport{height:42vh;min-height:300px}}
