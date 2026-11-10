@@ -321,63 +321,111 @@ function ScenePrimitive({object,showLabel,collisionEnabled,frameTransform}:{
 }
 
 function TrajectoryPreview({
-  robot,model,plan,rootRef,color
+  robot,model,plan,rootRef,color,startJoints
 }:{
   robot:RobotObject|null;model:RobotModel;plan:MotionPlan|null;
-  rootRef:RefObject<THREE.Group|null>;color:string;
+  rootRef:RefObject<THREE.Group|null>;color:string;startJoints?:Record<string,number>|null;
 }) {
-  const [line,setLine]=useState<THREE.Line|null>(null);
+  const [pathGroup,setPathGroup]=useState<THREE.Group|null>(null);
+  const [pathMarkers,setPathMarkers]=useState<{start:THREE.Vector3;end:THREE.Vector3}|null>(null);
   useEffect(()=>{
     if(!robot||!plan?.trajectory?.joint_trajectory?.points?.length||!rootRef.current){
-      setLine(null);return;
+      setPathGroup(null);setPathMarkers(null);return;
     }
     const trajectory=plan.trajectory.joint_trajectory;
     const names:string[]=trajectory.joint_names??[];
     const points=trajectory.points??[];
-    const actual:Record<string,number>={};
+    const liveJoints:Record<string,number>={};
     Object.entries(robot.joints).forEach(([name,joint])=>{
-      if(joint.jointValue?.length===1&&isFiniteNumber(joint.angle))actual[name]=joint.angle;
+      if(joint.jointValue?.length===1&&isFiniteNumber(joint.angle))liveJoints[name]=joint.angle;
     });
-    if(!names.length||names.some((name)=>!isFiniteNumber(actual[name]))||
-      !points.length||!points.every((point:any)=>Array.isArray(point.positions)&&
+    // Use the exact joint snapshot captured when planning/benchmarking. Fall back
+    // to the live model only for plans created before a snapshot was recorded.
+    const initial:Record<string,number>={...liveJoints,...(startJoints??{})};
+    if(!names.length||names.some((name)=>!isFiniteNumber(initial[name]))||
+      points.length<2||!points.every((point:any)=>Array.isArray(point.positions)&&
         point.positions.length===names.length&&point.positions.every(isFiniteNumber))){
-      setLine(null);
+      setPathGroup(null);setPathMarkers(null);
       return;
     }
     const root=rootRef.current;
+    const link=robot.links[model.end_effector_link];
+    if(!link){setPathGroup(null);setPathMarkers(null);return;}
     const path:THREE.Vector3[]=[];
     try{
+      root.updateWorldMatrix(true,false);
       points.forEach((point:any)=>{
-        const values:Record<string,number>={...actual};
+        const values:Record<string,number>={...initial};
         names.forEach((name,index)=>{values[name]=point.positions[index];});
-        robot.setJointValues(values);robot.updateMatrixWorld(true);
-        const link=robot.links[model.end_effector_link];
-        if(link){
-          const position=new THREE.Vector3();link.getWorldPosition(position);
-          path.push(root.worldToLocal(position));
-        }
+        robot.setJointValues(values);
+        robot.updateMatrixWorld(true);
+        const position=new THREE.Vector3();
+        link.getWorldPosition(position);
+        path.push(root.worldToLocal(position));
       });
     }finally{
-      robot.setJointValues(actual);robot.updateMatrixWorld(true);
+      robot.setJointValues(initial);
+      robot.updateMatrixWorld(true);
     }
-    if(path.length<2){setLine(null);return;}
-    const geometry=new THREE.BufferGeometry().setFromPoints(path);
-    const material=new THREE.LineBasicMaterial({color});
-    const next=new THREE.Line(geometry,material);
-    setLine(next);
-    return ()=>{geometry.dispose();material.dispose();};
-  },[robot,model.end_effector_link,plan,rootRef]);
-  return line?<primitive object={line}/>:null;
+    if(path.length<2){setPathGroup(null);setPathMarkers(null);return;}
+
+    // A standard WebGL line is effectively one pixel wide. Build an exact,
+    // piecewise-linear 3D tube instead so each planner path is visible at scene scale.
+    const group=new THREE.Group();
+    group.name="Benchmark trajectory "+plan.plan_id;
+    const pathMaterial=new THREE.MeshBasicMaterial({color,depthTest:true});
+    const markerMaterial=new THREE.MeshBasicMaterial({color,depthTest:false});
+    const up=new THREE.Vector3(0,1,0);
+    for(let index=1;index<path.length;index++){
+      const start=path[index-1],end=path[index];
+      const delta=end.clone().sub(start);
+      const length=delta.length();
+      if(!Number.isFinite(length)||length<1e-5)continue;
+      const segment=new THREE.Mesh(
+        new THREE.CylinderGeometry(0.0028,0.0028,length,8),
+        pathMaterial
+      );
+      segment.position.copy(start).add(end).multiplyScalar(0.5);
+      segment.quaternion.setFromUnitVectors(up,delta.normalize());
+      segment.renderOrder=40;
+      group.add(segment);
+    }
+    const startMarker=new THREE.Mesh(new THREE.SphereGeometry(0.010,16,12),markerMaterial);
+    startMarker.position.copy(path[0]);startMarker.renderOrder=42;group.add(startMarker);
+    const endMarker=new THREE.Mesh(new THREE.SphereGeometry(0.014,16,12),markerMaterial);
+    endMarker.position.copy(path[path.length-1]);endMarker.renderOrder=42;group.add(endMarker);
+    setPathGroup(group);
+    setPathMarkers({start:path[0].clone(),end:path[path.length-1].clone()});
+    return ()=>{
+      group.traverse((object)=>{
+        if(object instanceof THREE.Mesh)object.geometry.dispose();
+      });
+      pathMaterial.dispose();markerMaterial.dispose();
+    };
+  },[robot,model.end_effector_link,plan,rootRef,color,startJoints]);
+  return <>
+    {pathGroup&&<primitive object={pathGroup}/>}
+    {pathMarkers&&<>
+      <Billboard position={pathMarkers.start.toArray()}>
+        <Text fontSize={0.022} color={color} outlineColor="#ffffff" outlineWidth={0.002}>START</Text>
+      </Billboard>
+      <Billboard position={pathMarkers.end.toArray()}>
+        <Text fontSize={0.022} color={color} outlineColor="#ffffff" outlineWidth={0.002}>GOAL</Text>
+      </Billboard>
+    </>}
+  </>;
 }
 
-const EMPTY_COMPARISON_PATHS:Array<{key:string;label:string;color:string;plan:MotionPlan}> = [];
+type TrajectoryComparisonPath={key:string;groupId?:string;label:string;legendLabel?:string;color:string;legendColor?:string;plan:MotionPlan;startJoints?:Record<string,number>};
+const EMPTY_COMPARISON_PATHS:TrajectoryComparisonPath[] = [];
 
 function RobotViewportView({
-  model,scene,plan,comparisonPaths=EMPTY_COMPARISON_PATHS,targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,viewPreferences,onViewPreferencesChange,
+  model,scene,plan,comparisonPaths=EMPTY_COMPARISON_PATHS,trajectoryStartJoints=null,targetTcp=null,gripperPositionMm=null,poseMarkers=[],loading,error,viewPreferences,onViewPreferencesChange,
   objectLabels,disabledObjects,hiddenObjects
 }:{
   model:RobotModel|null;scene:any;
-  plan:MotionPlan|null;comparisonPaths?:Array<{key:string;label:string;color:string;plan:MotionPlan}>;
+  plan:MotionPlan|null;comparisonPaths?:TrajectoryComparisonPath[];
+  trajectoryStartJoints?:Record<string,number>|null;
   poseMarkers?:Array<{id:string;label:string;position:[number,number,number];orientation?:[number,number,number,number];frame_id?:string;color?:string;selected?:boolean}>;
   targetTcp?:{x:number;y:number;z:number;rx:number;ry:number;rz:number}|null;
   gripperPositionMm?:number|null;loading:boolean;error:string|null;
@@ -565,8 +613,10 @@ function RobotViewportView({
           })}
 
           {showPath&&robot&&model&&comparisonPaths.length>0
-            ?comparisonPaths.map((item)=><TrajectoryPreview key={item.key} robot={robot} model={model} plan={item.plan} rootRef={rootRef} color={item.color}/>)
-            :showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan} rootRef={rootRef} color="#2563eb"/>}
+            ?comparisonPaths.map((item)=><TrajectoryPreview key={item.key} robot={robot} model={model} plan={item.plan}
+              rootRef={rootRef} color={item.color} startJoints={item.startJoints}/>)
+            :showPath&&hasTrajectory&&robot&&model&&<TrajectoryPreview robot={robot} model={model} plan={plan}
+              rootRef={rootRef} color="#2563eb" startJoints={trajectoryStartJoints}/>}
           {showAxes&&<BaseAxes/>}
         </group>
       </Suspense>
@@ -595,7 +645,7 @@ function sameTarget(a:RobotViewportProps["targetTcp"],b:RobotViewportProps["targ
 type RobotViewportProps=Parameters<typeof RobotViewportView>[0];
 function sameRobotViewportProps(a:RobotViewportProps,b:RobotViewportProps){
   return a.model===b.model&&a.scene===b.scene&&a.plan===b.plan&&
-    a.comparisonPaths===b.comparisonPaths&&sameTarget(a.targetTcp,b.targetTcp)&&
+    a.comparisonPaths===b.comparisonPaths&&a.trajectoryStartJoints===b.trajectoryStartJoints&&sameTarget(a.targetTcp,b.targetTcp)&&
     a.gripperPositionMm===b.gripperPositionMm&&a.poseMarkers===b.poseMarkers&&
     a.loading===b.loading&&a.error===b.error&&a.viewPreferences===b.viewPreferences&&
     a.onViewPreferencesChange===b.onViewPreferencesChange&&a.objectLabels===b.objectLabels&&

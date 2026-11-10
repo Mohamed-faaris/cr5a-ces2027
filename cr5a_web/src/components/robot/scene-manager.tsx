@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { ChevronDown, Download, Ellipsis, Eye, EyeOff, FileJson, Pencil, Plus, ShieldCheck, ShieldOff, Tag, Trash2, Upload, X } from "lucide-react";
+import { ChevronDown, Download, Ellipsis, Layers3, Eye, EyeOff, FileJson, Pencil, Plus, ShieldCheck, ShieldOff, Tag, Trash2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { CollisionObject, PlanningScene } from "@/lib/types";
 import { useRobotStore } from "@/store/robot-store";
@@ -298,6 +298,7 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(initialDraft);
   const [busy, setBusy] = useState(false);
+  const [defaultsBusy, setDefaultsBusy] = useState(false);
   const [converterOpen, setConverterOpen] = useState(false);
   const [constraintsText, setConstraintsText] = useState(DEFAULT_CONSTRAINTS_JSON);
   const [convertedObjects, setConvertedObjects] = useState<Payload[] | null>(null);
@@ -312,6 +313,29 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
     const current = await request("moveit.get_scene");
     useRobotStore.getState().setScene(current);
     return current as PlanningScene;
+  };
+
+  const loadDefaultObjects = async () => {
+    if (!connected || !modelReady || busy || defaultsBusy) return;
+    setDefaultsBusy(true);
+    try {
+      const result = await request("scene.load_defaults", { frame_id: frameId });
+      await refresh();
+      onSceneChanged();
+      const loaded = Array.isArray(result.loaded) ? result.loaded.length : 0;
+      const present = Array.isArray(result.already_present) ? result.already_present.length : 0;
+      onNotice({
+        tone: "success",
+        message: `Default scene objects restored: ${loaded} added, ${present} already present (frame ${frameId}).`,
+      });
+    } catch (error) {
+      onNotice({
+        tone: "error",
+        message: `Could not load default scene objects: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      setDefaultsBusy(false);
+    }
   };
 
   // The bridge may seed its built-in objects before this page restores the
@@ -590,6 +614,9 @@ export function SceneManager({ scene, frameId, connected, modelReady, request, o
     <div className="panel-header flex-wrap">
       <div><div className="text-sm font-semibold">Scene objects</div><div className="mt-0.5 text-[11px] text-zinc-400">{objects.length} objects · {world.length} collision active · {attached.length} attached</div></div>
       <div className="flex flex-wrap items-center gap-1.5">
+        <Button size="sm" variant="outline" onClick={loadDefaultObjects} disabled={!connected || !modelReady || busy || defaultsBusy}>
+          <Layers3 size={13}/>{defaultsBusy ? "Loading defaults…" : "Load defaults"}
+        </Button>
         <Button size="sm" onClick={add} disabled={!connected || busy}><Plus size={13}/> Add</Button>
         <details className="relative">
           <summary title="Import, export, convert or clear planning-scene objects" className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">

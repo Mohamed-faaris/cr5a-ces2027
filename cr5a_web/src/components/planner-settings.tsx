@@ -48,11 +48,13 @@ function Hint({text}:{text:string}){return <span title={text} aria-label={text} 
 function MetricLabel({children,hint}:{children:React.ReactNode;hint:string}){return <span className={LABEL}>{children}<Hint text={hint}/></span>;}
 
 export function PlannerSettings({
-  onProfileChange,disabled,onBenchmark,benchmarking,benchmarkResults,benchmarkDisabledReason,onUseBenchmarkPlan,benchmarkTargetType
+  onProfileChange,disabled,onBenchmark,benchmarking,benchmarkResults,benchmarkDisabledReason,onUseBenchmarkPlan,benchmarkTargetType,
+  benchmarkPathMode,onBenchmarkPathModeChange
 }:{onProfileChange:(profile:PlannerProfile)=>void;disabled:boolean;
   onBenchmark:(profiles:PlannerProfile[],repeatCount:1|3|5)=>void;benchmarking:boolean;
   benchmarkResults:PlannerBenchmarkResult[];benchmarkDisabledReason:string|null;
   onUseBenchmarkPlan:(result:PlannerBenchmarkResult)=>void;benchmarkTargetType:"pose"|"joints";
+  benchmarkPathMode:"representative"|"all";onBenchmarkPathModeChange:(mode:"representative"|"all")=>void;
 }){
   const [profile,setProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
   const [customProfiles,setCustomProfiles]=useState<PlannerProfile[]>([]);
@@ -177,7 +179,23 @@ export function PlannerSettings({
             <Button size="sm" onClick={()=>onBenchmark(comparedProfiles,repeatCount)} disabled={disabled||benchmarking||Boolean(compareReason)||comparedProfiles.length<2}><Play size={12} className={benchmarking?"animate-pulse":""}/>{benchmarking?"Benchmarking…":"Benchmark selected profiles"}</Button>
           </div>
           {compareReason&&<p className="text-[11px] text-amber-700">{compareReason}</p>}
-          {benchmarkResults.length>0&&<div className="space-y-2 border-t border-zinc-100 pt-3"><div className="text-xs font-semibold">Benchmark results</div><div className="overflow-x-auto"><table className="w-full min-w-[420px] text-left text-[10px]"><thead className="bg-zinc-50 text-zinc-500"><tr><th className="p-2">Profile</th><th className="p-2">Result</th><th className="p-2">Plan time</th><th className="p-2">Duration</th><th className="p-2">Points</th><th className="p-2" title="Sum of waypoint-to-waypoint joint-space distances; not Cartesian TCP distance.">Joint travel</th><th className="p-2"></th></tr></thead><tbody>{benchmarkResults.map(result=><tr key={result.profile.id} className="border-t border-zinc-100"><td className="p-2"><span className="mr-1 inline-block h-2 w-2 rounded-full" style={{backgroundColor:result.color}}/>{result.profile.name}</td><td className="p-2 align-top"><div>{result.status} · {result.successfulRuns}/{result.totalRuns}{result.errorCode!==null?" ("+result.errorCode+")":""}</div>{result.error&&<p className="mt-1 max-w-56 whitespace-normal text-[9px] leading-4 text-amber-800">{result.error}</p>}{result.errorCode!==null&&<p className="mt-1 max-w-56 whitespace-normal text-[9px] leading-4 text-zinc-500">{describeMoveItError(result.errorCode,{pipeline:result.profile.pipeline_id,targetType:result.targetType})}</p>}</td><td className="p-2 font-mono">{result.planningTime===null?"—":result.planningTime.toFixed(3)+" s median"}</td><td className="p-2 font-mono">{result.trajectoryDuration===null?"—":result.trajectoryDuration.toFixed(2)+" s median"}</td><td className="p-2 font-mono">{result.trajectoryPoints||"—"}</td><td className="p-2 font-mono" title="Euclidean joint-space travel accumulated across trajectory points. Not a Cartesian TCP path length.">{result.jointTravel===null?"—":result.jointTravel.toFixed(3)+" rad median"}</td><td className="p-2">{result.successfulRuns>0&&result.plan?.plan_id&&<button type="button" className="font-medium text-blue-700 hover:underline" onClick={()=>onUseBenchmarkPlan(result)} title="Make the representative median-time successful run active, ready for inspection and explicit execution">Use</button>}</td></tr>)}</tbody></table></div><p className="text-[10px] text-zinc-500">Each path uses its own color in the 3D view. Metrics show medians across successful runs. Select Use to make the representative median-time plan active; execution remains a separate action.</p></div>}
+          {benchmarkResults.length>0&&<div className="space-y-2 border-t border-zinc-100 pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><div className="text-xs font-semibold">Benchmark results</div><div className="text-[10px] text-zinc-500">3D trajectory display</div></div>
+              <div className="inline-flex rounded-md border border-zinc-200 bg-zinc-50 p-0.5" role="group" aria-label="Benchmark path display">
+                <button type="button" aria-pressed={benchmarkPathMode==="representative"} disabled={benchmarking}
+                  onClick={()=>onBenchmarkPathModeChange("representative")}
+                  className={"rounded px-2.5 py-1.5 text-[10px] font-medium "+(benchmarkPathMode==="representative"?"bg-white text-zinc-900 shadow-sm":"text-zinc-500 hover:text-zinc-800")}>
+                  Median run
+                </button>
+                <button type="button" aria-pressed={benchmarkPathMode==="all"} disabled={benchmarking}
+                  onClick={()=>onBenchmarkPathModeChange("all")}
+                  className={"rounded px-2.5 py-1.5 text-[10px] font-medium "+(benchmarkPathMode==="all"?"bg-white text-zinc-900 shadow-sm":"text-zinc-500 hover:text-zinc-800")}>
+                  All successful runs
+                </button>
+              </div>
+            </div>
+            <div className="overflow-x-auto"><table className="w-full min-w-[420px] text-left text-[10px]"><thead className="bg-zinc-50 text-zinc-500"><tr><th className="p-2">Profile</th><th className="p-2">Result</th><th className="p-2">Plan time</th><th className="p-2">Duration</th><th className="p-2">Points</th><th className="p-2" title="Sum of waypoint-to-waypoint joint-space distances; not Cartesian TCP distance.">Joint travel</th><th className="p-2"></th></tr></thead><tbody>{benchmarkResults.map(result=><tr key={result.profile.id} className="border-t border-zinc-100"><td className="p-2"><span className="mr-1 inline-block h-2 w-2 rounded-full" style={{backgroundColor:result.color}}/>{result.profile.name}</td><td className="p-2 align-top"><div>{result.status} · {result.successfulRuns}/{result.totalRuns}{result.errorCode!==null?" ("+result.errorCode+")":""}</div>{result.error&&<p className="mt-1 max-w-56 whitespace-normal text-[9px] leading-4 text-amber-800">{result.error}</p>}{result.errorCode!==null&&<p className="mt-1 max-w-56 whitespace-normal text-[9px] leading-4 text-zinc-500">{describeMoveItError(result.errorCode,{pipeline:result.profile.pipeline_id,targetType:result.targetType})}</p>}</td><td className="p-2 font-mono">{result.planningTime===null?"—":result.planningTime.toFixed(3)+" s median"}</td><td className="p-2 font-mono">{result.trajectoryDuration===null?"—":result.trajectoryDuration.toFixed(2)+" s median"}</td><td className="p-2 font-mono">{result.trajectoryPoints||"—"}</td><td className="p-2 font-mono" title="Euclidean joint-space travel accumulated across trajectory points. Not a Cartesian TCP path length.">{result.jointTravel===null?"—":result.jointTravel.toFixed(3)+" rad median"}</td><td className="p-2">{result.successfulRuns>0&&result.plan?.plan_id&&<button type="button" className="font-medium text-blue-700 hover:underline" onClick={()=>onUseBenchmarkPlan(result)} title="Make the representative median-time successful run active, ready for inspection and explicit execution">Use</button>}</td></tr>)}</tbody></table></div><p className="text-[10px] text-zinc-500">Metrics show medians across successful runs. Median run displays one representative trajectory per planner; All successful runs displays every successful repeat. Select Use to make the representative plan active; execution remains a separate action.</p></div>}
         </div>
       </details>
     </div>

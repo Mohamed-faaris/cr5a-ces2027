@@ -19,6 +19,7 @@ import {useGripperController} from "@/components/gripper/use-gripper-controller"
 
 type TcpTarget={x:number;y:number;z:number;rx:number;ry:number;rz:number};
 type DirectMotionStatus={phase:string;detail?:string|null;last_command?:string|null};
+type BenchmarkTrajectoryPath={key:string;groupId:string;label:string;legendLabel:string;runNumber:number;color:string;legendColor:string;plan:MotionPlan;startJoints?:Record<string,number>};
 
 const DIRECT_JOINT_NAMES=["joint1","joint2","joint3","joint4","joint5","joint6"] as const;
 
@@ -31,6 +32,17 @@ function readNumberTuple(params:URLSearchParams,key:string,length:number):number
   return values.every(Number.isFinite)?values:null;
 }
 const plannerProfileLabel=(profile:PlannerProfile)=>profile.planner_id|| (profile.pipeline_id==="pilz_industrial_motion_planner"?"Pilz":profile.pipeline_id.toUpperCase());
+function benchmarkRepeatColor(color:string,runNumber:number):string{
+  const match=/^#?([0-9a-f]{6})$/i.exec(color);
+  if(!match)return color;
+  const adjustments=[0,0.30,-0.28,0.52,-0.48];
+  const adjustment=adjustments[(runNumber-1)%adjustments.length];
+  const channels=[0,2,4].map(offset=>parseInt(match[1].slice(offset,offset+2),16));
+  const adjusted=channels.map(channel=>Math.max(0,Math.min(255,Math.round(
+    adjustment>=0?channel+(255-channel)*adjustment:channel*(1+adjustment)
+  ))));
+  return "#"+adjusted.map(channel=>channel.toString(16).padStart(2,"0")).join("");
+}
 
 function planErrorDetail(code?:number|null):string|null{
   if(code===undefined||code===null)return null;
@@ -182,7 +194,14 @@ export function VisualizerPage(){
   const [plannerProfile,setPlannerProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
   const [activePlanProfile,setActivePlanProfile]=useState<PlannerProfile>(DEFAULT_PLANNER_PROFILE);
   const [benchmarkResults,setBenchmarkResults]=useState<PlannerBenchmarkResult[]>([]);
-  const [comparisonPaths,setComparisonPaths]=useState<Array<{key:string;label:string;color:string;plan:MotionPlan}>>([]);
+  const [representativePaths,setRepresentativePaths]=useState<BenchmarkTrajectoryPath[]>([]);
+  const [allRepeatPaths,setAllRepeatPaths]=useState<BenchmarkTrajectoryPath[]>([]);
+  const [benchmarkPathMode,setBenchmarkPathMode]=useState<"representative"|"all">("representative");
+  const comparisonPaths=benchmarkPathMode==="all"?allRepeatPaths:representativePaths;
+  const comparisonLegend=comparisonPaths.filter((item,index,items)=>
+    items.findIndex(candidate=>candidate.groupId===item.groupId)===index
+  );
+  const clearComparisonPaths=()=>{setRepresentativePaths([]);setAllRepeatPaths([]);};
   const [benchmarkStartSnapshot,setBenchmarkStartSnapshot]=useState<Record<string,number>|null>(null);
   const [benchmarkSceneSnapshot,setBenchmarkSceneSnapshot]=useState<string|null>(null);
   const directJointNames=[...DIRECT_JOINT_NAMES];
@@ -200,11 +219,18 @@ export function VisualizerPage(){
     ()=>parseJointBounds(model?.urdf,jointLimits?.joint_limits),
     [model?.urdf,jointLimits]
   );
-  const jointNames=joints?.name??[];
-  const actualJoints=joints?.position??[];
-  const actualJointsValid=jointNames.length>0&&jointNames.every((_,index)=>
-    typeof actualJoints[index]==="number"&&Number.isFinite(actualJoints[index])
-  );
+  // The CR5A arm target is exactly six axes. /joint_states also includes
+  // partial gripper-publisher samples; keep those out of the arm target and
+  // planning request while preserving name-to-position alignment.
+  const allJointNames=joints?.name??[];
+  const allJointPositions=joints?.position??[];
+  const jointNames:string[]=DIRECT_JOINT_NAMES.filter(name=>allJointNames.includes(name));
+  const actualJoints=jointNames.map(name=>allJointPositions[allJointNames.indexOf(name)]??null);
+  const actualJointsValid=DIRECT_JOINT_NAMES.every(name=>{
+    const index=allJointNames.indexOf(name);
+    const value=index>=0?allJointPositions[index]:undefined;
+    return typeof value==="number"&&Number.isFinite(value);
+  });
   const worldObjects=scene?.world?.collision_objects??[];
   const attachedObjects=scene?.robot_state?.attached_collision_objects??[];
 
@@ -281,7 +307,7 @@ export function VisualizerPage(){
       return typeof current!=="number"||!Number.isFinite(current)||Math.abs(current-value)>0.03;
     });
     if(changed){
-      setComparisonPaths([]);
+      clearComparisonPaths();
       setNotice({tone:"neutral",message:"Benchmark paths were hidden because the robot moved from the benchmark start state. Results remain available for reference."});
     }
   },[actualJoints.join("|"),jointNames.join("|"),benchmarkStartSnapshot,comparisonPaths.length,busy]);
@@ -289,7 +315,7 @@ export function VisualizerPage(){
   useEffect(()=>{
     if(!benchmarkSceneSnapshot||!comparisonPaths.length||busy==="benchmark")return;
     if(planningSceneSignature(scene)!==benchmarkSceneSnapshot){
-      setComparisonPaths([]);
+      clearComparisonPaths();
       setNotice({tone:"neutral",message:"Benchmark paths were hidden because the planning scene changed. Run the comparison again for the current scene."});
     }
   },[scene,benchmarkSceneSnapshot,comparisonPaths.length,busy]);
@@ -331,7 +357,7 @@ export function VisualizerPage(){
   const directMotionBlocked=directMotionStatus!==null&&directMotionStatus.phase!=="idle";
 
   const resetTargets=()=>{
-    setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);
+    setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);clearComparisonPaths();setBenchmarkResults([]);
     setTcpDirty(false);setJointDirty(false);setDirectJointDirty(false);setDirectPoseDirty(false);setDirectCheck(null);
     if(tcp&&[tcp.x,tcp.y,tcp.z,tcp.rx,tcp.ry,tcp.rz].every((value)=>typeof value==="number"&&Number.isFinite(value))){
       setTcpTarget({
@@ -356,7 +382,7 @@ export function VisualizerPage(){
     const startJoints:Record<string,number>={};
     jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index] as number;});
     setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
-    setActivePlanProfile(plannerProfile);setComparisonPaths([]);setBenchmarkResults([]);
+    setActivePlanProfile(plannerProfile);clearComparisonPaths();setBenchmarkResults([]);
     try{
       const quaternion=rpyDegreesToQuaternion(tcpTarget.rx,tcpTarget.ry,tcpTarget.rz);
       const result=await request("motion.plan",{
@@ -393,7 +419,7 @@ export function VisualizerPage(){
     const startJoints:Record<string,number>={};
     jointNames.forEach((name,index)=>{startJoints[name]=actualJoints[index] as number;});
     setBusy("plan");setNotice(null);setPlan({status:"PLANNING"});setExecutionStatus(null);setPlannedJointSnapshot(null);
-    setActivePlanProfile(plannerProfile);setComparisonPaths([]);setBenchmarkResults([]);
+    setActivePlanProfile(plannerProfile);clearComparisonPaths();setBenchmarkResults([]);
     try{
       const result=await request("motion.plan",{
         group_name:model.group_name,
@@ -445,7 +471,7 @@ export function VisualizerPage(){
     const previousPlanProfile=activePlanProfile;
     setBenchmarkStartSnapshot(startSnapshot);
     setBusy("benchmark");setNotice(null);setExecutionStatus(null);setPlan(null);
-    setBenchmarkResults([]);setComparisonPaths([]);
+    setBenchmarkResults([]);clearComparisonPaths();
     type RunRecord={plan:MotionPlan;exception?:string};
     const records=new Map<string,{profile:PlannerProfile;color:string;runs:RunRecord[]}>();
     profiles.forEach((selected,index)=>records.set(selected.id,{
@@ -519,11 +545,30 @@ export function VisualizerPage(){
         setBenchmarkResults([...rows]);
       }
     }
-    const paths:Array<{key:string;label:string;color:string;plan:MotionPlan}>=[];
+    const paths:BenchmarkTrajectoryPath[]=[];
+    const everySuccessfulPath:BenchmarkTrajectoryPath[]=[];
     for(const result of rows){
-      const points=result.plan.trajectory?.joint_trajectory?.points??[];
-      if(result.successfulRuns>0&&result.plan.plan_id&&points.length>1){
-        paths.push({key:result.plan.plan_id,label:result.profile.name,color:result.color,plan:result.plan});
+      const record=records.get(result.profile.id)!;
+      const usableRuns=record.runs.map((run,index)=>({plan:run.plan,runNumber:index+1})).filter(({plan})=>{
+        const points=plan.trajectory?.joint_trajectory?.points??[];
+        return plan.status==="SUCCEEDED"&&Boolean(plan.plan_id)&&points.length>1;
+      });
+      for(const run of usableRuns){
+        everySuccessfulPath.push({
+          key:run.plan.plan_id!,groupId:result.profile.id,
+          label:result.profile.name+" · Run "+run.runNumber,legendLabel:result.profile.name,
+          runNumber:run.runNumber,color:benchmarkRepeatColor(result.color,run.runNumber),
+          legendColor:result.color,plan:run.plan,startJoints:{...startSnapshot}
+        });
+      }
+      const representativeRun=usableRuns.find(run=>run.plan.plan_id===result.plan.plan_id);
+      if(representativeRun){
+        paths.push({
+          key:representativeRun.plan.plan_id!,groupId:result.profile.id,
+          label:result.profile.name+" · Run "+representativeRun.runNumber,legendLabel:result.profile.name,
+          runNumber:representativeRun.runNumber,color:result.color,legendColor:result.color,
+          plan:representativeRun.plan,startJoints:{...startSnapshot}
+        });
       }
     }
     await new Promise(resolve=>window.setTimeout(resolve,150));
@@ -535,7 +580,10 @@ export function VisualizerPage(){
     });
     const sceneChanged=planningSceneSignature(useRobotStore.getState().scene)!==sceneSnapshot;
     setPlan(previousPlan);setExecutionStatus(previousExecution);setPlannedJointSnapshot(previousPlannedSnapshot);
-    setActivePlanProfile(previousPlanProfile);setComparisonPaths(paths);setBenchmarkResults(rows);setBusy(null);
+    setActivePlanProfile(previousPlanProfile);
+    setRepresentativePaths(paths);setAllRepeatPaths(everySuccessfulPath);
+    setBenchmarkResults(rows);setBusy(null);
+    if(paths.length>0)setViewPreferences(current=>({...current,showTrajectoryPaths:true}));
     const successCount=rows.filter(item=>item.successfulRuns>0).length;
     const fullSuccessCount=rows.filter(item=>item.successfulRuns===repeatCount).length;
     setNotice({tone:jointsChanged||sceneChanged?"neutral":successCount?"success":"error",
@@ -680,13 +728,14 @@ export function VisualizerPage(){
           <div className="flex items-center gap-2"><Box size={15} className="text-zinc-500"/><span className="text-sm font-semibold">3D scene</span><span className="text-xs text-zinc-400">{worldObjects.length} world · {attachedObjects.length} attached</span></div>
           <span className="text-[11px] text-zinc-400">{model?.base_frame??"dummy_link"}</span>
         </div>
-        <RobotViewport model={model} scene={scene} plan={plan} comparisonPaths={comparisonPaths} targetTcp={tcpTarget}
+        <RobotViewport model={model} scene={scene} plan={plan} comparisonPaths={comparisonPaths}
+          trajectoryStartJoints={plannedJointSnapshot} targetTcp={tcpTarget}
           gripperPositionMm={gripper.positionMm} loading={modelLoading} error={modelError??sceneError}
           viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
           objectLabels={objectLabels} disabledObjects={disabledObjects} hiddenObjects={hiddenObjects}/>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-3 py-2.5 text-[10px] text-zinc-500">
           <div className="flex flex-wrap items-center gap-2">
-            {comparisonPaths.length>0?comparisonPaths.map(item=><span key={item.key} className="inline-flex items-center gap-1.5" title={item.label}><i className="h-2 w-5 rounded-full" style={{backgroundColor:item.color}}/>{item.label}</span>)
+            {comparisonPaths.length>0?comparisonLegend.map(item=><span key={item.groupId} className="inline-flex items-center gap-1.5" title={item.label}><i className="h-2 w-5 rounded-full" style={{backgroundColor:item.legendColor}}/>{item.legendLabel}</span>)
               :<span className="inline-flex items-center gap-1.5"><i className="h-2 w-5 rounded-full bg-blue-600"/>Active plan path</span>}
           </div>
           <div className="flex flex-wrap items-center gap-3"><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-slate-500"/>Collision enabled</span><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-amber-500"/>Collision disabled</span></div>
@@ -703,7 +752,8 @@ export function VisualizerPage(){
             <PlannerSettings onProfileChange={setPlannerProfile} disabled={busy!==null}
               onBenchmark={runBenchmark} benchmarking={busy==="benchmark"} benchmarkResults={benchmarkResults}
               benchmarkDisabledReason={benchmarkDisabledReason} onUseBenchmarkPlan={useBenchmarkPlan}
-              benchmarkTargetType={tab==="tcp"?"pose":"joints"}/>
+              benchmarkTargetType={tab==="tcp"?"pose":"joints"} benchmarkPathMode={benchmarkPathMode}
+              onBenchmarkPathModeChange={setBenchmarkPathMode}/>
             <section className="panel overflow-hidden">
               <div className="panel-header">
                 <div><div className="text-sm font-semibold">Robot target</div><div className="mt-0.5 text-xs text-zinc-500">CR5A arm · planning only until Execute</div></div>
@@ -718,9 +768,9 @@ export function VisualizerPage(){
                   <TabsContent value="tcp" className="mt-3">
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       {(["x","y","z"] as const).map(key=><NumericInput key={key} label={key.toUpperCase()} value={tcpTarget?.[key]??0} suffix="mm" actual={tcp?.[key]??null} disabled={busy!==null}
-                        onChange={value=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);setTcpDirty(true);setTcpTarget(current=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));}}/>)}
+                        onChange={value=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);clearComparisonPaths();setBenchmarkResults([]);setTcpDirty(true);setTcpTarget(current=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));}}/>)}
                       {(["rx","ry","rz"] as const).map(key=><NumericInput key={key} label={key.toUpperCase()} value={tcpTarget?.[key]??0} suffix="°" actual={tcp?.[key]??null} disabled={busy!==null}
-                        onChange={value=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);setTcpDirty(true);setTcpTarget(current=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));}}/>)}
+                        onChange={value=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);clearComparisonPaths();setBenchmarkResults([]);setTcpDirty(true);setTcpTarget(current=>({x:0,y:0,z:0,rx:0,ry:0,rz:0,...current,[key]:value}));}}/>)}
                     </div>
                     <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-400"><span>Position mm · RPY degrees</span><span>Frame: {model?.base_frame??"—"}</span></div>
                     <p className="mt-2 text-[10px] leading-4 text-zinc-500" title="Controller ToolVectorActual may use a different tool/user frame or TCP offset. The displayed actual values are raw controller telemetry.">
@@ -732,20 +782,21 @@ export function VisualizerPage(){
                   </TabsContent>
                   <TabsContent value="joints" className="mt-3">
                     <div className="space-y-3">
-                      {jointNames.map((name,index)=>{
-                        const bound=bounds[name];const rawActual=actualJoints[index];
+                      {DIRECT_JOINT_NAMES.map((name)=>{
+                        const bound=bounds[name];
+                        const sourceIndex=allJointNames.indexOf(name);
+                        const rawActual=sourceIndex>=0?allJointPositions[sourceIndex]:null;
                         const actual=typeof rawActual==="number"&&Number.isFinite(rawActual)?rawActual:null;
                         const target=jointTargets[name]??actual??0;
                         if(!bound)return <div key={name} className="text-xs text-zinc-500">{name}: position limits unavailable.</div>;
                         return <div key={name}>
                           <div className="mb-1 flex items-center justify-between gap-2"><span className="text-xs font-medium text-zinc-700">{name}</span><span className="font-mono text-[11px] tabular-nums text-zinc-500">{formatNumber(target*180/Math.PI,1)}° <span className="ml-1 text-zinc-400">Actual {actual===null?"—":formatNumber(actual*180/Math.PI,1)+"°"}</span></span></div>
-                          <input type="range" min={bound.lower*180/Math.PI} max={bound.upper*180/Math.PI} step="0.1" value={target*180/Math.PI} disabled={busy!==null}
-                            onChange={event=>{setJointDirty(true);setComparisonPaths([]);setBenchmarkResults([]);const radians=Number(event.target.value)*Math.PI/180;setJointTargets(current=>({...current,[name]:radians}));}} className="range-control w-full"/>
+                          <input type="range" min={bound.lower*180/Math.PI} max={bound.upper*180/Math.PI} step="0.1" value={target*180/Math.PI} disabled={busy!==null||!actualJointsValid}
+                            onChange={event=>{setJointDirty(true);clearComparisonPaths();setBenchmarkResults([]);const radians=Number(event.target.value)*Math.PI/180;setJointTargets(current=>({...current,[name]:radians}));}} className="range-control w-full"/>
                           <div className="mt-1 flex justify-between font-mono text-[10px] text-zinc-400"><span>{formatNumber(bound.lower*180/Math.PI,0)}°</span><span>{formatNumber(bound.upper*180/Math.PI,0)}°</span></div>
                         </div>;
                       })}
-                      {!jointNames.length&&<div className="text-xs text-zinc-400">Waiting for joint state messages.</div>}
-                      {jointNames.length>0&&!actualJointsValid&&<div className="text-xs text-amber-700">Current joint readings are incomplete. Planning is disabled.</div>}
+                      {!actualJointsValid&&<div className="text-xs text-amber-700">Waiting for complete six-axis arm telemetry. Joint targets stay visible but disabled until all six readings arrive.</div>}
                     </div>
                     <Button className="mt-3 w-full" onClick={planJoints} disabled={busy!==null||!model||!actualJointsValid||jointNames.some(name=>!bounds[name])}>
                       {busy==="plan"?<RefreshCw size={14} className="animate-spin"/>:<Route size={14}/>} Plan joint target
@@ -866,7 +917,7 @@ export function VisualizerPage(){
               onToggleObjectVisibility={toggleObjectVisibility} disabledObjects={disabledObjects}
               onToggleCollision={toggleObjectCollision} onRemoveDisabledObject={id=>setDisabledObjects(current=>{const next={...current};delete next[id];return next;})}
               onClearDisabledObjects={()=>setDisabledObjects({})} collisionBusy={collisionBusy}
-              onSceneChanged={()=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);setComparisonPaths([]);setBenchmarkResults([]);}}/>
+              onSceneChanged={()=>{setPlan(null);setExecutionStatus(null);setPlannedJointSnapshot(null);clearComparisonPaths();setBenchmarkResults([]);}}/>
           </TabsContent>
         </Tabs>
       </aside>

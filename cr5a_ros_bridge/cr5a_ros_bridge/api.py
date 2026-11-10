@@ -1865,6 +1865,140 @@ def create_app(backend, config):
         backend.emit("motion.plan", data)
         return data
 
+    async def create_cartesian_motion_plan_impl(payload: dict, scene_snapshot, contact_matrix, attached_objects=None, attach_world_object_id=None, add_world_objects=None):
+        """Plan a straight collision-checked Cartesian motion segment."""
+        plan_id = "plan_" + uuid.uuid4().hex[:12]
+        backend.plans[plan_id] = {
+            "id": plan_id, "status": "PLANNING", "created_at": time.time(),
+            "trajectory": None, "trajectory_start": None,
+        }
+        backend.emit("motion.plan", {"plan_id": plan_id, "status": "PLANNING", "planner": "cartesian"})
+        try:
+            original_matrix = scene_snapshot.allowed_collision_matrix
+            same_contact_matrix = (
+                list(contact_matrix.entry_names) == list(original_matrix.entry_names)
+                and [list(entry.enabled) for entry in contact_matrix.entry_values]
+                == [list(entry.enabled) for entry in original_matrix.entry_values]
+            )
+            temporary_scene = PlanningScene()
+            temporary_scene.is_diff = True
+            if not same_contact_matrix:
+                temporary_scene.allowed_collision_matrix = contact_matrix
+            if attach_world_object_id:
+                remove_world_object = CollisionObject()
+                remove_world_object.id = attach_world_object_id
+                remove_world_object.operation = CollisionObject.REMOVE
+                temporary_scene.world.collision_objects.append(remove_world_object)
+            # Do not send a redundant full ACM replacement. Some MoveIt scene
+            # monitors reject an unchanged matrix update even though the current
+            # matrix already permits the selected finger/object contacts.
+            scene_modified = False
+            added_world_ids = []
+            try:
+                if not same_contact_matrix or attach_world_object_id:
+                    await apply_scene(temporary_scene)
+                    scene_modified = True
+                if add_world_objects:
+                    add_scene = PlanningScene()
+                    add_scene.is_diff = True
+                    for world_object in add_world_objects:
+                        addition = copy.deepcopy(world_object)
+                        addition.operation = CollisionObject.ADD
+                        add_scene.world.collision_objects.append(addition)
+                        added_world_ids.append(addition.id)
+                    await apply_scene(add_scene)
+                    scene_modified = True
+                result = await _await_ros(
+                    backend.compute_cartesian_path({
+                        **payload,
+                        "attached_collision_objects": attached_objects or [],
+                    }),
+                    float(config.get("ros", {}).get("cartesian_path_timeout_sec", 15.0)),
+                )
+            finally:
+                if scene_modified:
+                    # Remove any temporary placed object before restoring the
+                    # original pickup object with the same ID. Keep both updates
+                    # separate; MoveIt can reject REMOVE+ADD for one ID in a diff.
+                    if added_world_ids:
+                        remove_added = PlanningScene()
+                        remove_added.is_diff = True
+                        for world_id in added_world_ids:
+                            removal = CollisionObject()
+                            removal.id = world_id
+                            removal.operation = CollisionObject.REMOVE
+                            remove_added.world.collision_objects.append(removal)
+                        await apply_scene(remove_added)
+                    restore_scene = PlanningScene()
+                    restore_scene.is_diff = True
+                    if not same_contact_matrix:
+                        restore_scene.allowed_collision_matrix = copy.deepcopy(original_matrix)
+                    if attach_world_object_id:
+                        original_object = next(
+                            (item for item in scene_snapshot.world.collision_objects
+                             if item.id == attach_world_object_id),
+                            None,
+                        )
+                        if original_object is not None:
+                            restored_object = copy.deepcopy(original_object)
+                            restored_object.operation = CollisionObject.ADD
+                            restore_scene.world.collision_objects.append(restored_object)
+                    if not same_contact_matrix or attach_world_object_id:
+                        await apply_scene(restore_scene)
+        except Exception as exc:
+            backend.plans[plan_id]["status"] = "FAILED"
+            backend.emit("motion.plan", {"plan_id": plan_id, "status": "FAILED", "error": str(exc)})
+            raise
+
+        error_code = getattr(result.error_code, "val", None)
+        fraction = float(getattr(result, "fraction", 0.0))
+        trajectory = result.solution
+        joint = trajectory.joint_trajectory
+        points = list(joint.points)
+        succeeded = error_code == 1 and fraction >= 0.999 and bool(points)
+        reason = None
+        if not succeeded:
+            reason = (
+                f"Cartesian insertion was incomplete (fraction={fraction:.3f}, "
+                f"MoveIt error={error_code})"
+            )
+        start_state = RobotState()
+        start_state.is_diff = True
+        start_payload = payload.get("start_state")
+        if isinstance(start_payload, dict):
+            start_state.joint_state.name = list(start_payload.get("joint_names", []))
+            start_state.joint_state.position = list(start_payload.get("positions_rad", []))
+        else:
+            start_state = copy.deepcopy(scene_snapshot.robot_state)
+        invalid_fields = []
+        trajectory_data = _dict(trajectory, invalid_fields)
+        if invalid_fields:
+            succeeded = False
+            reason = "Cartesian path contains non-finite trajectory values"
+        backend.plans[plan_id].update({
+            "status": "SUCCEEDED" if succeeded else "FAILED",
+            "error_code": 1 if succeeded else (error_code if error_code is not None else -2),
+            "planning_time": 0.0,
+            "trajectory": trajectory if succeeded else None,
+            "trajectory_start": start_state if succeeded else None,
+            "fraction": fraction,
+            "failure_reason": reason,
+        })
+        if succeeded:
+            backend.publish_display_trajectory(trajectory, start_state)
+        data = {
+            "plan_id": plan_id,
+            "status": backend.plans[plan_id]["status"],
+            "error_code": backend.plans[plan_id]["error_code"],
+            "planning_time": 0.0,
+            "fraction": fraction,
+            "trajectory": trajectory_data if succeeded else None,
+        }
+        if reason:
+            data["error"] = reason
+        backend.emit("motion.plan", data)
+        return data
+
     def _pick_place_scene_payload(payload: dict):
         obj = normalize_object(payload.get("object", {}))
         frame_id = str(payload.get("frame_id", obj["frame_id"]))
@@ -2000,22 +2134,34 @@ def create_app(backend, config):
                 object_payload["dimensions_m"] = obj["dimensions_m"]
             additions.append(collision_object(object_payload))
             current = await get_scene()
-            diff = PlanningScene()
-            diff.is_diff = True
-            for existing in current.world.collision_objects:
-                if existing.id.startswith("pick_place_"):
+            stale_ids = [
+                existing.id for existing in current.world.collision_objects
+                if existing.id.startswith("pick_place_")
+            ]
+            if stale_ids:
+                remove_diff = PlanningScene()
+                remove_diff.is_diff = True
+                for stale_id in stale_ids:
                     remove = CollisionObject()
-                    remove.id = existing.id
+                    remove.id = stale_id
                     remove.operation = CollisionObject.REMOVE
-                    diff.world.collision_objects.append(remove)
-            diff.world.collision_objects.extend(additions)
-            await apply_scene(diff)
+                    remove_diff.world.collision_objects.append(remove)
+                # MoveIt may reject a diff that removes and re-adds the same
+                # object IDs in one transaction. Clear stale task objects first.
+                await apply_scene(remove_diff)
+            add_diff = PlanningScene()
+            add_diff.is_diff = True
+            add_diff.world.collision_objects.extend(additions)
+            await apply_scene(add_diff)
             return {
                 "status": "SCENE_READY", "frame_id": frame_id,
                 "scene_object_ids": [item.id for item in additions],
+                "pick_source": scene_data["pick_source"],
+                "place_destination": scene_data["place_destination"],
                 "object": obj, "shelf": scene_data["shelf"],
                 "fit": scene_data["fit"], "grasp": grasp,
                 "waypoints": waypoints,
+                "pick_source": scene_data["pick_source"],
                 "place_destination": scene_data["place_destination"],
                 "place_surface_center_m": scene_data["selected_place_surface_center_m"],
                 "place_approach_distance_m": scene_data["place_approach_distance_m"],
@@ -2042,6 +2188,8 @@ def create_app(backend, config):
                     wrap_envelope_m=config.get("gripper", {}).get("wrap_envelope_m", 0.085),
                 )["valid"],
             }
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2052,6 +2200,7 @@ def create_app(backend, config):
             return {**prepared, "status": "BLOCKED_GRIPPER_GEOMETRY",
                     "error": f"Object plus clearance exceeds the PGEA envelope for grasp strategy {strategy!r}. Select an appropriate finger/contact strategy or end-effector."}
         obj = prepared["object"]
+        pick_source = prepared.get("pick_source", "free")
         scene_snapshot = await get_scene()
         base_allowed_collision_matrix = copy.deepcopy(scene_snapshot.allowed_collision_matrix)
         gripper_cfg = config.get("gripper", {})
@@ -2068,6 +2217,89 @@ def create_app(backend, config):
         except ValueError as exc:
             return {**prepared, "status": "BLOCKED_PAYLOAD_LIMIT", "error": str(exc)}
         waypoints = prepared["waypoints"]
+        # Platform-to-platform uses a dedicated collision-checked transfer.
+        # Shelf-source routing is intentionally left on the existing planner
+        # path for its separate follow-up implementation.
+        platform_transfer = (
+            prepared.get("pick_source") == "free"
+            and prepared.get("place_destination") == "platform"
+        )
+        if platform_transfer:
+            transfer_start = next(item for item in waypoints if item["name"] == "withdraw")
+            preplace_waypoint = next(item for item in waypoints if item["name"] == "preplace")
+            # Withdraw already clears the free-space pick. Travel laterally at
+            # that height, lower to the reachable 650 mm transfer plane, then
+            # align above the platform before the final vertical placement.
+            waypoints[:] = [item for item in waypoints if item["name"] != "lift"]
+            transit_height = min(
+                max(transfer_start["position_m"][2], preplace_waypoint["position_m"][2] + 0.35),
+                0.65,
+            )
+            transfer_waypoints = [
+                {
+                    "name": "transit_clear",
+                    "position_m": [
+                        transfer_start["position_m"][0],
+                        preplace_waypoint["position_m"][1],
+                        transfer_start["position_m"][2],
+                    ],
+                    "orientation_xyzw": preplace_waypoint["orientation_xyzw"],
+                    "object_attached": True,
+                },
+            ]
+            if transit_height < transfer_start["position_m"][2] - 0.01:
+                transfer_waypoints.append({
+                    "name": "transit_lower",
+                    "position_m": [
+                        transfer_start["position_m"][0],
+                        preplace_waypoint["position_m"][1],
+                        transit_height,
+                    ],
+                    "orientation_xyzw": preplace_waypoint["orientation_xyzw"],
+                    "object_attached": True,
+                })
+            transfer_waypoints.append({
+                "name": "transit_align",
+                "position_m": [
+                    preplace_waypoint["position_m"][0],
+                    preplace_waypoint["position_m"][1],
+                    transit_height,
+                ],
+                "orientation_xyzw": preplace_waypoint["orientation_xyzw"],
+                "object_attached": True,
+            })
+            preplace_index = waypoints.index(preplace_waypoint)
+            waypoints[preplace_index:preplace_index] = transfer_waypoints
+            place_waypoint = next(item for item in waypoints if item["name"] == "place")
+            retreat_waypoint = next(item for item in waypoints if item["name"] == "retreat")
+            retreat_clear = {
+                "name": "retreat_clear",
+                "position_m": [
+                    place_waypoint["position_m"][0],
+                    place_waypoint["position_m"][1] + 0.12,
+                    place_waypoint["position_m"][2],
+                ],
+                "orientation_xyzw": place_waypoint["orientation_xyzw"],
+                "object_attached": False,
+            }
+            retreat_lift = {
+                "name": "retreat_lift",
+                "position_m": [
+                    place_waypoint["position_m"][0],
+                    place_waypoint["position_m"][1] + 0.12,
+                    place_waypoint["position_m"][2] + 0.15,
+                ],
+                "orientation_xyzw": place_waypoint["orientation_xyzw"],
+                "object_attached": False,
+            }
+            retreat_waypoint["position_m"] = [
+                place_waypoint["position_m"][0],
+                place_waypoint["position_m"][1] + 0.12,
+                retreat_waypoint["position_m"][2] + 0.12,
+            ]
+            waypoints.insert(waypoints.index(retreat_waypoint), retreat_lift)
+            waypoints.insert(waypoints.index(retreat_lift), retreat_clear)
+            prepared["waypoints"] = waypoints
         frame_id = prepared["frame_id"]
         link_name = config.get("moveit", {}).get("pick_place_tcp_link", "tcp")
         object_id = "pick_place_object"
@@ -2077,7 +2309,7 @@ def create_app(backend, config):
         if not isinstance(touch_links, list) or any(not isinstance(item, str) or not item for item in touch_links):
             raise HTTPException(status_code=422, detail="touch_links must be a list of link names")
 
-        def allow_object_contact(goal):
+        def object_contact_matrix():
             matrix = copy.deepcopy(base_allowed_collision_matrix)
             names = list(matrix.entry_names)
             rows = [list(entry.enabled) for entry in matrix.entry_values]
@@ -2104,23 +2336,21 @@ def create_app(backend, config):
                 entry = AllowedCollisionEntry()
                 entry.enabled = row
                 matrix.entry_values.append(entry)
-            scene_diff = goal.planning_options.planning_scene_diff
-            scene_diff.is_diff = True
-            scene_diff.allowed_collision_matrix = matrix
+            return matrix
 
-        def attach_object(goal):
+        def allow_object_contact(goal):
             scene_diff = goal.planning_options.planning_scene_diff
             scene_diff.is_diff = True
-            remove = CollisionObject()
-            remove.id = object_id
-            remove.operation = CollisionObject.REMOVE
-            scene_diff.world.collision_objects.append(remove)
+            scene_diff.allowed_collision_matrix = object_contact_matrix()
+
+        def attached_object_collision():
             attached = AttachedCollisionObject()
             attached.link_name = link_name
             attached.touch_links = touch_links
             object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            grasp_waypoint = next(item for item in waypoints if item["name"] == "grasp")
             relative = pose_relative_to(
-                waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
+                grasp_waypoint["position_m"], grasp_waypoint["orientation_xyzw"],
                 obj["centroid_m"], object_orientation,
             )
             attached.object = collision_object({
@@ -2131,15 +2361,21 @@ def create_app(backend, config):
                    {"radius_m": obj["dimensions_m"][0] / 2}),
             })
             attached.object.header.frame_id = link_name
-            scene_diff.robot_state.attached_collision_objects.append(attached)
+            return attached
+
+        def attach_object(goal):
+            scene_diff = goal.planning_options.planning_scene_diff
+            scene_diff.is_diff = True
+            remove = CollisionObject()
+            remove.id = object_id
+            remove.operation = CollisionObject.REMOVE
+            scene_diff.world.collision_objects.append(remove)
+            scene_diff.robot_state.attached_collision_objects.append(attached_object_collision())
             scene_diff.robot_state.is_diff = True
 
-        def allow_place_contact(goal):
-            # The object is still attached for the place trajectory. Permit
-            # contact with the support surface only for this final lowering
-            # segment; all other environment collisions remain active.
-            attach_object(goal)
-            matrix = copy.deepcopy(base_allowed_collision_matrix)
+        def object_platform_contact_matrix():
+            """Allow only object-to-platform contact for the final place segment."""
+            matrix = object_contact_matrix()
             names = list(matrix.entry_names)
             rows = [list(entry.enabled) for entry in matrix.entry_values]
             while len(rows) < len(names):
@@ -2164,19 +2400,23 @@ def create_app(backend, config):
                 entry = AllowedCollisionEntry()
                 entry.enabled = row
                 matrix.entry_values.append(entry)
-            goal.planning_options.planning_scene_diff.allowed_collision_matrix = matrix
+            return matrix
 
-        def detach_and_place(goal):
-            scene_diff = goal.planning_options.planning_scene_diff
-            scene_diff.is_diff = True
-            # Planning requests use isolated scene diffs; the previous goal's
-            # attachment is not committed to the scene monitor. Model the release
-            # state directly as a world object at the final place pose instead
-            # of removing a non-existent globally-attached body.
+        def allow_place_contact(goal):
+            # The object is attached for lowering onto the support surface.
+            # Keep all other environment collisions active.
+            attach_object(goal)
+            goal.planning_options.planning_scene_diff.allowed_collision_matrix = (
+                object_platform_contact_matrix()
+            )
+
+        def placed_object_collision():
+            """Build the can as a world object at the final platform pose."""
             place = next(item for item in waypoints if item["name"] == "place")
             object_orientation = quaternion_from_rpy(*obj["rpy_rad"])
+            grasp_waypoint = next(item for item in waypoints if item["name"] == "grasp")
             relative = pose_relative_to(
-                waypoints[1]["position_m"], waypoints[1]["orientation_xyzw"],
+                grasp_waypoint["position_m"], grasp_waypoint["orientation_xyzw"],
                 obj["centroid_m"], object_orientation,
             )
             world_pose = pose_compose(
@@ -2195,7 +2435,16 @@ def create_app(backend, config):
                 object_payload["radius_m"] = max(obj["dimensions_m"][0:2]) / 2
             else:
                 object_payload["radius_m"] = obj["dimensions_m"][0] / 2
-            scene_diff.world.collision_objects.append(collision_object(object_payload))
+            return collision_object(object_payload)
+
+        def detach_and_place(goal):
+            scene_diff = goal.planning_options.planning_scene_diff
+            scene_diff.is_diff = True
+            # Planning requests use isolated scene diffs; the previous goal's
+            # attachment is not committed to the scene monitor. Model the release
+            # state directly as a world object at the final place pose instead
+            # of removing a non-existent globally-attached body.
+            scene_diff.world.collision_objects.append(placed_object_collision())
             matrix = copy.deepcopy(base_allowed_collision_matrix)
             names = list(matrix.entry_names)
             rows = [list(entry.enabled) for entry in matrix.entry_values]
@@ -2256,15 +2505,85 @@ def create_app(backend, config):
             mutator = None
             if waypoint["name"] == "grasp":
                 mutator = allow_object_contact
-            elif waypoint["name"] in ("withdraw", "lift", "preplace"):
+            elif waypoint["name"] in (
+                "withdraw", "lift", "transit_raise", "transit_clear", "transit_lower",
+                "transit_align", "transit", "preplace",
+            ):
                 # Each MoveGroup goal receives its own PlanningScene diff; reapply
                 # the TCP-relative attachment to every carried segment.
                 mutator = attach_object
             elif waypoint["name"] == "place":
                 mutator = allow_place_contact
-            elif waypoint["name"] == "retreat":
+            elif waypoint["name"] in ("retreat_lift", "retreat"):
                 mutator = detach_and_place
-            result = await create_motion_plan_impl(stage_payload, mutator)
+            if platform_transfer and waypoint["name"] in (
+                "withdraw", "transit_clear", "transit_lower", "transit_align",
+            ):
+                # Reverse the shelf insertion, lift out, then transfer along
+                # staged straight segments with the can attached. Avoid an OMPL
+                # wrist-branch switch near the shelf and robot pedestal.
+                result = await create_cartesian_motion_plan_impl({
+                    "frame_id": frame_id,
+                    "group_name": stage_payload["group_name"],
+                    "link_name": link_name,
+                    "waypoint": {
+                        "position_m": waypoint["position_m"],
+                        "orientation_xyzw": waypoint["orientation_xyzw"],
+                    },
+                    "start_state": start_state,
+                    "max_step_m": payload.get("cartesian_max_step_m", 0.005),
+                }, scene_snapshot, object_contact_matrix(),
+                    [attached_object_collision()], object_id)
+            elif waypoint["name"] == "preplace" and platform_transfer:
+                # The high transit is above the platform approach edge. Lower
+                # vertically at that offset with the attached can and collision
+                # checking enabled; this segment was validated at 5 mm samples.
+                result = await create_cartesian_motion_plan_impl({
+                    "frame_id": frame_id,
+                    "group_name": stage_payload["group_name"],
+                    "link_name": link_name,
+                    "waypoint": {
+                        "position_m": waypoint["position_m"],
+                        "orientation_xyzw": waypoint["orientation_xyzw"],
+                    },
+                    "start_state": start_state,
+                    "max_step_m": payload.get("cartesian_max_step_m", 0.005),
+                }, scene_snapshot, object_contact_matrix(),
+                    [attached_object_collision()], object_id)
+            elif waypoint["name"] == "place" and platform_transfer:
+                # Move the can horizontally onto the platform at a fixed height.
+                # Permit only can/platform contact for this final placement leg.
+                result = await create_cartesian_motion_plan_impl({
+                    "frame_id": frame_id,
+                    "group_name": stage_payload["group_name"],
+                    "link_name": link_name,
+                    "waypoint": {
+                        "position_m": waypoint["position_m"],
+                        "orientation_xyzw": waypoint["orientation_xyzw"],
+                    },
+                    "start_state": start_state,
+                    "max_step_m": payload.get("cartesian_max_step_m", 0.005),
+                }, scene_snapshot, object_platform_contact_matrix(),
+                    [attached_object_collision()], object_id)
+            elif waypoint["name"] in ("retreat_clear", "retreat_lift", "retreat") and platform_transfer:
+                # The gripper is opened before retreat. Remove the source-pose
+                # object from the temporary scene so the retreat can start at
+                # the release contact state; all robot/environment and platform
+                # collisions remain enabled for the retract segments.
+                result = await create_cartesian_motion_plan_impl({
+                    "frame_id": frame_id,
+                    "group_name": stage_payload["group_name"],
+                    "link_name": link_name,
+                    "waypoint": {
+                        "position_m": waypoint["position_m"],
+                        "orientation_xyzw": waypoint["orientation_xyzw"],
+                    },
+                    "start_state": start_state,
+                    "max_step_m": payload.get("cartesian_max_step_m", 0.005),
+                }, scene_snapshot, object_platform_contact_matrix(),
+                    attached_objects=[], attach_world_object_id=object_id)
+            else:
+                result = await create_motion_plan_impl(stage_payload, mutator)
             plans.append({"name": waypoint["name"], **result})
             if result.get("status") != "SUCCEEDED":
                 return {**prepared, "status": "PARTIAL_FAILED", "plans": plans,
@@ -2323,13 +2642,30 @@ def create_app(backend, config):
         plan = backend.plans.get(plan_id)
         if plan is None or plan.get("status") != "SUCCEEDED":
             raise HTTPException(status_code=409, detail="Only a successful stored plan can be executed")
-        status = backend.topic_snapshot(
-            config.get("robot", {}).get("status_topic", "/dobot_msgs_v4/msg/RobotStatus")
+        status_topic = config.get("robot", {}).get(
+            "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
         )
+        status = backend.topic_snapshot(status_topic)
         if not status or not status.get("data", {}).get("is_connected"):
             raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
         if not status.get("data", {}).get("is_enable"):
-            raise HTTPException(status_code=409, detail="Robot is not enabled")
+            # Some controller/simulator stacks briefly publish is_enable=false
+            # while a completed trajectory transitions back to idle. Wait for
+            # fresh enabled telemetry for a bounded period; never skip the
+            # enable guard or execute while the controller remains disabled.
+            enable_deadline = time.monotonic() + float(
+                config.get("moveit", {}).get("robot_enable_settle_timeout_sec", 2.0)
+            )
+            while time.monotonic() < enable_deadline:
+                await asyncio.sleep(0.1)
+                status = backend.topic_snapshot(status_topic)
+                status_data = status.get("data", {}) if status else {}
+                if status_data.get("is_connected") is not True:
+                    raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
+                if status_data.get("is_enable") is True:
+                    break
+            else:
+                raise HTTPException(status_code=409, detail="Robot is not enabled")
 
         # Never execute a plan against a different or stale robot start state.
         trajectory = plan.get("trajectory")
@@ -3046,23 +3382,7 @@ def create_app(backend, config):
             if not bool(config.get("gripper", {}).get("allow_commands", False)):
                 raise HTTPException(status_code=403, detail="PGEA commands are disabled by bridge safety configuration")
             phase = str(params.get("phase", "")).lower()
-            sequences = {
-                "pick": (
-                    ("pregrasp", "motion", None),
-                    ("grasp", "motion", None),
-                    ("close_gripper", "gripper", 0.0),
-                    ("withdraw", "motion", None),
-                    ("lift", "motion", None),
-                ),
-                "place": (
-                    ("preplace", "motion", None),
-                    ("place", "motion", None),
-                    ("open_gripper", "gripper", 0.020),
-                    ("retreat", "motion", None),
-                ),
-            }
-            if phase not in sequences:
-                raise HTTPException(status_code=422, detail="phase must be 'pick' or 'place'")
+            workflow = str(params.get("workflow", "legacy")).lower()
             supplied = params.get("plans")
             if not isinstance(supplied, list):
                 raise HTTPException(status_code=422, detail="plans must be the planned name/plan_id list")
@@ -3070,6 +3390,56 @@ def create_app(backend, config):
                 str(item.get("name")): str(item.get("plan_id"))
                 for item in supplied if isinstance(item, dict) and item.get("name") and item.get("plan_id")
             }
+            if workflow == "platform_to_platform":
+                # The free-space preset uses a collision-checked, multi-leg
+                # transfer. Keep the gripper actions between the appropriate
+                # motion segments rather than requiring the legacy shelf stages.
+                platform_sequences = {
+                    "pick": (
+                        ("pregrasp", "motion", None),
+                        ("grasp", "motion", None),
+                        ("close_gripper", "gripper", 0.0),
+                        ("withdraw", "motion", None),
+                    ),
+                    "place": (
+                        ("transit_raise", "motion", None),
+                        ("transit_clear", "motion", None),
+                        ("transit_lower", "motion", None),
+                        ("transit_align", "motion", None),
+                        ("preplace", "motion", None),
+                        ("place", "motion", None),
+                        ("open_gripper", "gripper", 0.020),
+                        ("retreat_clear", "motion", None),
+                        ("retreat_lift", "motion", None),
+                        ("retreat", "motion", None),
+                    ),
+                }
+                optional_motion = {"transit_raise", "transit_lower"}
+                sequences = {
+                    name: tuple(
+                        step for step in steps
+                        if step[0] not in optional_motion or step[0] in supplied_by_name
+                    )
+                    for name, steps in platform_sequences.items()
+                }
+            else:
+                sequences = {
+                    "pick": (
+                        ("pregrasp", "motion", None),
+                        ("grasp", "motion", None),
+                        ("close_gripper", "gripper", 0.0),
+                        ("withdraw", "motion", None),
+                        ("lift", "motion", None),
+                    ),
+                    "place": (
+                        ("preplace", "motion", None),
+                        ("place", "motion", None),
+                        ("open_gripper", "gripper", 0.020),
+                        ("retreat", "motion", None),
+                    ),
+                }
+            if phase not in sequences:
+                raise HTTPException(status_code=422, detail="phase must be 'pick' or 'place'")
             required_motion = [name for name, kind, _ in sequences[phase] if kind == "motion"]
             missing = [name for name in required_motion if not supplied_by_name.get(name)]
             if missing:

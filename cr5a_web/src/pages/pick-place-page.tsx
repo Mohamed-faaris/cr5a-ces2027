@@ -10,6 +10,7 @@ import {
   saveVisualizerViewPreferences, type VisualizerViewPreferences,
 } from "@/lib/visualizer-view-preferences";
 
+type WorkflowMode = "platform_to_platform" | "shelf_to_platform";
 type ObjectKind = "coke" | "pringles" | "wood_box" | "custom";
 type InputSource = "synthetic" | "vision" | "manual";
 type Dimensions = { x: number; y: number; z: number };
@@ -110,24 +111,26 @@ export function PickPlacePage() {
   const [gripperAngle,setGripperAngle]=useState(0);
   const [gripperRoll,setGripperRoll]=useState(90);
   const [approachAngle,setApproachAngle]=useState(-90);
-  const [approachDistance,setApproachDistance]=useState(250);
-  const [placeApproachDistance,setPlaceApproachDistance]=useState(10);
+  const [approachDistance,setApproachDistance]=useState(150);
+  const [placeApproachDistance,setPlaceApproachDistance]=useState(50);
   const [tcpOffset,setTcpOffset]=useState({x:0,y:0,z:0});
-  const [platform,setPlatform]=useState({x:100,y:-550,z:610});
+  const [platform,setPlatform]=useState({x:500,y:0,z:-20});
   const [platformDimensions,setPlatformDimensions]=useState({x:120,y:120,z:20});
   const [gripperClearanceMm,setGripperClearanceMm]=useState(6);
   const [plannerSettings,setPlannerSettings]=useState({
     plannerId:"",allowedPlanningTime:8,numPlanningAttempts:8,
     maxVelocityScaling:0.15,maxAccelerationScaling:0.15,
-    positionToleranceMm:3,orientationToleranceDeg:2.9,liftDistanceMm:0,
+    positionToleranceMm:3,orientationToleranceDeg:2.9,liftDistanceMm:80,
   });
   const [maxPayloadKg,setMaxPayloadKg]=useState(5);
-  const [shelfPose,setShelfPose]=useState({x:550,y:0,z:0,yaw:90});
-  const [pick,setPick]=useState({x:0,y:-426,z:650});
+  const [shelfPose,setShelfPose]=useState({x:150,y:-600,z:0,yaw:0});
+  const [shelfPickOffset,setShelfPickOffset]=useState({x:0,y:150});
+  const [pick,setPick]=useState({x:150,y:-450,z:691});
   const [density,setDensity]=useState(650);
   const [planState,setPlanState]=useState<"idle"|"ready"|"blocked">("idle");
   const [planResult,setPlanResult]=useState<any>(null);
   const [activeStage,setActiveStage]=useState(0);
+  const [workflowMode,setWorkflowMode]=useState<WorkflowMode>("platform_to_platform");
   const [executionBusy,setExecutionBusy]=useState<"pick"|"place"|null>(null);
   const [simulationConfirmed,setSimulationConfirmed]=useState(false);
   const [pickExecution,setPickExecution]=useState<any>(null);
@@ -180,7 +183,7 @@ export function PickPlacePage() {
   const massKg=objectKind==="wood_box"?object.dimensions.x*object.dimensions.y*object.dimensions.z/1e9*density:object.massKg;
   const bayWidth=shelf.width-2*shelf.board;
   const bayHeight=(shelf.height-shelf.board*(shelf.levels+1))/shelf.levels;
-  const generatedPick={x:shelfPose.x,y:shelfPose.y,z:shelfPose.z+shelf.board+slot*(bayHeight+shelf.board)+clearance+object.dimensions.z/2};
+  const generatedPick={x:shelfPose.x+shelfPickOffset.x,y:shelfPose.y+shelfPickOffset.y,z:shelfPose.z+shelf.board+slot*(bayHeight+shelf.board)+clearance+object.dimensions.z/2};
   const activePick=source==="synthetic"&&pickSource==="shelf"?generatedPick:pick;
   const shelfRelativeObjectYaw=(objectYaw-shelfPose.yaw)*Math.PI/180;
   const projectedShelfWidth=Math.abs(Math.cos(shelfRelativeObjectYaw))*object.dimensions.x+Math.abs(Math.sin(shelfRelativeObjectYaw))*object.dimensions.y;
@@ -224,14 +227,29 @@ export function PickPlacePage() {
   };
   const visionFrameValid=source!=="vision"||(!!visionFrame&&visionFrame===model?.base_frame);
   const placeBayDistinct=pickSource!=="shelf"||placeDestination!=="shelf"||slot!==placeSlot;
-  const shelfApproachAligned=Math.cos((grasp.yaw-shelfPose.yaw)*Math.PI/180)*Math.cos(approachRad)>=Math.cos(35*Math.PI/180);
-  const checks=[{label:"Object fits selected shelf bay",ok:sceneFitValid,detail:!shelfFitRequired?"Not required for free-space to platform":`Bay ${bayWidth} × ${shelf.depth} × ${Math.round(bayHeight)} mm`},{label:"Shelf source and destination differ",ok:placeBayDistinct,detail:placeDestination!=="shelf"?"Platform destination":`Pick bay ${slot+1} · destination bay ${placeSlot+1}`},{label:"Shelf opening approach",ok:(pickSource!=="shelf"&&placeDestination!=="shelf")||shelfApproachAligned,detail:shelfApproachAligned?"Gripper approaches along the open-front axis":"Adjust gripper yaw/approach to align with the shelf front"},{label:"Approach clearance",ok:approachDistance>=Math.max(40,object.dimensions.z*.25),detail:`${approachDistance} mm approach distance`},{label:"Gripper geometry",ok:gripperWidthFeasible,detail:`${objectWidthMm} mm object + ${gripperClearanceMm} mm clearance vs ${gripperEnvelopeMm} mm ${graspStrategy==="pgea_finger_wrap"?"extended-finger wrap envelope (CAD estimate)":"nominal jaw travel"}`},{label:"Vision frame aligned",ok:visionFrameValid,detail:source!=="vision"?"Synthetic / manual input":`Detection frame ${visionFrame??"missing"} · robot base ${model?.base_frame??"unknown"}`},{label:"Shelf geometry valid",ok:shelfGeometryValid,detail:shelfGeometryValid?"Positive dimensions and usable bays":"Check shelf dimensions, board thickness and level count"},{label:"Robot model available",ok:!!model,detail:model?`${model.group_name} · ${model.base_frame} → tcp`:"Waiting for bridge model"}];
+  const shelfYawForKeepout=shelfPose.yaw*Math.PI/180;
+  const shelfDx=(platform.x-shelfPose.x)/1000;
+  const shelfDy=(platform.y-shelfPose.y)/1000;
+  const platformHalfShelfWidth=(Math.abs(Math.cos(shelfYawForKeepout))*platformDimensions.x+Math.abs(Math.sin(shelfYawForKeepout))*platformDimensions.y)/2000;
+  const platformHalfShelfDepth=(Math.abs(Math.sin(shelfYawForKeepout))*platformDimensions.x+Math.abs(Math.cos(shelfYawForKeepout))*platformDimensions.y)/2000;
+  const platformLocalX=Math.cos(shelfYawForKeepout)*shelfDx+Math.sin(shelfYawForKeepout)*shelfDy;
+  const platformLocalY=-Math.sin(shelfYawForKeepout)*shelfDx+Math.cos(shelfYawForKeepout)*shelfDy;
+  const platformSeparationX=Math.abs(platformLocalX)-shelf.width/2000-platformHalfShelfWidth;
+  const platformSeparationY=Math.abs(platformLocalY)-shelf.depth/2000-platformHalfShelfDepth;
+  const platformShelfClearanceMm=Math.max(platformSeparationX,platformSeparationY)*1000;
+  const platformKeepoutRequired=pickSource==="shelf"&&placeDestination==="platform";
+  const platformClearOfShelf=!platformKeepoutRequired||platformShelfClearanceMm>=150;
+  const shelfFrontInwardX=Math.sin(shelfYawForKeepout);
+  const shelfFrontInwardY=-Math.cos(shelfYawForKeepout);
+  const shelfApproachAlignment=grasp.approachVector.x*shelfFrontInwardX+grasp.approachVector.y*shelfFrontInwardY;
+  const shelfApproachAligned=pickSource!=="shelf"||shelfApproachAlignment>=Math.cos(35*Math.PI/180);
+  const checks=[{label:"Platform outside shelf keep-out",ok:platformClearOfShelf,detail:!platformKeepoutRequired?"Not required for this workflow":`${Math.round(platformShelfClearanceMm)} mm separation · 150 mm minimum`},{label:"Object fits selected shelf bay",ok:sceneFitValid,detail:!shelfFitRequired?"Not required for free-space to platform":`Bay ${bayWidth} × ${shelf.depth} × ${Math.round(bayHeight)} mm`},{label:"Shelf source and destination differ",ok:placeBayDistinct,detail:placeDestination!=="shelf"?"Platform destination":`Pick bay ${slot+1} · destination bay ${placeSlot+1}`},{label:"Shelf opening approach",ok:(pickSource!=="shelf"&&placeDestination!=="shelf")||shelfApproachAligned,detail:shelfApproachAligned?"Gripper approaches along the open-front axis":"Adjust gripper yaw/approach to align with the shelf front"},{label:"Approach clearance",ok:approachDistance>=Math.max(40,object.dimensions.z*.25),detail:`${approachDistance} mm approach distance`},{label:"Gripper geometry",ok:gripperWidthFeasible,detail:`${objectWidthMm} mm object + ${gripperClearanceMm} mm clearance vs ${gripperEnvelopeMm} mm ${graspStrategy==="pgea_finger_wrap"?"extended-finger wrap envelope (CAD estimate)":"nominal jaw travel"}`},{label:"Vision frame aligned",ok:visionFrameValid,detail:source!=="vision"?"Synthetic / manual input":`Detection frame ${visionFrame??"missing"} · robot base ${model?.base_frame??"unknown"}`},{label:"Shelf geometry valid",ok:shelfGeometryValid,detail:shelfGeometryValid?"Positive dimensions and usable bays":"Check shelf dimensions, board thickness and level count"},{label:"Robot model available",ok:!!model,detail:model?`${model.group_name} · ${model.base_frame} → tcp`:"Waiting for bridge model"}];
   const allValid=checks.every(item=>item.ok);
   const objectReady=Boolean(model && [object.dimensions.x,object.dimensions.y,object.dimensions.z].every(value=>Number.isFinite(value)&&value>0) && visionFrameValid);
   // Only scene geometry inputs invalidate the prepared MoveIt scene. Grasp tuning is tracked separately.
   const sceneConfigKey=JSON.stringify({
     frame_id:source==="vision"?visionFrame:model?.base_frame,source,objectKind,shape:object.shape,
-    dimensions:object.dimensions,centroid:activePick,objectYaw,shelfId,shelfGeometry,shelfPose,slot,placeSlot,
+    dimensions:object.dimensions,centroid:activePick,objectYaw,shelfId,shelfGeometry,shelfPose,shelfPickOffset,slot,placeSlot,
     pickSource,placeDestination,clearance,platform,platformDimensions,
   });
   const liveSceneIds=useMemo(()=>new Set((scene?.world?.collision_objects??[]).map((item:any)=>item.id as string)),[scene]);
@@ -265,13 +283,34 @@ export function PickPlacePage() {
   const resetConfiguration=()=>{
     setSource("synthetic");setObjectKind("coke");setCustom({kind:"custom",label:"Custom object",shape:"box",dimensions:{x:100,y:80,z:80},massKg:.5,massSource:"User supplied"});
     setShelfId("standard");setShelfGeometry({width:600,height:900,depth:400,levels:3,board:18});setSlot(1);setPlaceSlot(0);
-    setPlaceDestination("platform");setPickSource("free");setClearance(12);setGripperAngle(0);setGripperRoll(90);setApproachAngle(-90);setApproachDistance(250);setPlaceApproachDistance(10);setTcpOffset({x:0,y:0,z:0});
-    setPlatform({x:100,y:-550,z:610});setPlatformDimensions({x:120,y:120,z:20});setShelfPose({x:550,y:0,z:0,yaw:90});setPick({x:0,y:-426,z:650});
+    setWorkflowMode("platform_to_platform");setPlaceDestination("platform");setPickSource("free");setClearance(12);setGripperAngle(0);setGripperRoll(90);setApproachAngle(-90);setApproachDistance(150);setPlaceApproachDistance(50);setTcpOffset({x:0,y:0,z:0});
+    setPlatform({x:500,y:0,z:-20});setPlatformDimensions({x:120,y:120,z:20});setShelfPose({x:450,y:-600,z:0,yaw:0});setShelfPickOffset({x:0,y:150});setPick({x:150,y:-450,z:691});
     setDensity(650);setObjectYaw(90);setGraspStrategy("pgea_finger_wrap");setGripperClearanceMm(6);
-    setPlannerSettings({plannerId:"",allowedPlanningTime:8,numPlanningAttempts:8,maxVelocityScaling:.15,maxAccelerationScaling:.15,positionToleranceMm:3,orientationToleranceDeg:2.9,liftDistanceMm:0});
+    setPlannerSettings({plannerId:"",allowedPlanningTime:8,numPlanningAttempts:6,maxVelocityScaling:.15,maxAccelerationScaling:.15,positionToleranceMm:3,orientationToleranceDeg:2.9,liftDistanceMm:80});
     setToolMassKg(1.3);setToolCom({x:-86.1,y:0,z:-92.6});setMaxPayloadKg(5);setControllerToolVerified(false);setVisionFrame(null);setDefaultsStatus(null);setDefaultsError(false);setPlanResult(null);setPlanState("idle");
     setPreparedSceneKey(null);setPreparedSceneObjectIds([]);setPlannedConfigKey(null);setSceneStatus(null);setPayloadStatus(null);setActiveStage(0);
     setExecutionBusy(null);setPickExecution(null);setPlaceExecution(null);setVerification(null);setSimulationConfirmed(false);
+  };
+  const applyWorkflowPreset=(mode:WorkflowMode)=>{
+    setWorkflowMode(mode);setObjectKind("coke");setSource("synthetic");setVisionFrame(null);
+    setPlaceDestination("platform");setClearance(12);setPlatform({x:500,y:0,z:-20});
+    setPlatformDimensions({x:120,y:120,z:20});setGripperAngle(0);setTcpOffset({x:0,y:0,z:0});
+    setPlannerSettings(current=>({...current,plannerId:"",allowedPlanningTime:15,numPlanningAttempts:10,
+      maxVelocityScaling:.15,maxAccelerationScaling:.15,positionToleranceMm:3,orientationToleranceDeg:2.9,liftDistanceMm:30}));
+    if(mode==="platform_to_platform"){
+      setShelfGeometry({width:600,height:900,depth:400,levels:3,board:18});
+      setPickSource("free");setPick({x:150,y:-450,z:691});setObjectYaw(90);setGripperRoll(90);setApproachAngle(-90);
+      setApproachDistance(150);setPlaceApproachDistance(150);
+    }else{
+      setShelfGeometry({width:360,height:900,depth:400,levels:3,board:18});
+      setPickSource("shelf");setShelfPose({x:450,y:-600,z:0,yaw:0});setShelfPickOffset({x:0,y:150});setSlot(1);setPlaceSlot(0);
+      setPlannerSettings(current=>({...current,liftDistanceMm:120}));
+      setObjectYaw(0);setGripperRoll(0);setApproachAngle(0);setApproachDistance(265);setPlaceApproachDistance(150);
+      setPlannerSettings(current=>({...current,allowedPlanningTime:30,numPlanningAttempts:20}));
+    }
+    setPreparedSceneKey(null);setPreparedSceneObjectIds([]);setPlannedConfigKey(null);
+    setPlanResult(null);setPlanState("idle");setSceneStatus(null);setPickExecution(null);
+    setPlaceExecution(null);setVerification(null);setSimulationConfirmed(false);setActiveStage(0);
   };
   const loadDefaultConstraints=async()=>{
     if(!model||bridgeState!=="connected"||defaultsBusy)return;
@@ -354,14 +393,19 @@ export function PickPlacePage() {
   const executePhase=async(phase:"pick"|"place")=>{
     if(!planReady||!executionAvailable||!simulationConfirmed||executionBusy)return;
     if(phase==="place"&&!pickDone)return;
-    const required=phase==="pick"?["pregrasp","grasp","withdraw","lift"]:["preplace","place","retreat"];
+    const platformToPlatform=workflowMode==="platform_to_platform";
+    const required=phase==="pick"
+      ?(platformToPlatform?["pregrasp","grasp","withdraw"]:["pregrasp","grasp","withdraw","lift"])
+      :(platformToPlatform
+        ?["transit_raise","transit_clear","transit_lower","transit_align","preplace","place","retreat_clear","retreat_lift","retreat"].filter(name=>(planResult?.plans??[]).some((item:any)=>item.name===name))
+        :["preplace","place","retreat"]);
     const plans=(planResult?.plans??[]).filter((item:any)=>required.includes(item.name)&&item.plan_id).map((item:any)=>({name:item.name,plan_id:item.plan_id}));
     if(plans.length!==required.length){setVerification({error:"Missing planned segments: "+required.filter(name=>!plans.some((item:any)=>item.name===name)).join(", ")});return;}
     setExecutionBusy(phase);setVerification(null);
     if(phase==="pick")setPickExecution({status:"RUNNING",completed:[]});
     else setPlaceExecution({status:"RUNNING",completed:[]});
     try{
-      const result=await request("pick_place.execute_phase",{phase,plans});
+      const result=await request("pick_place.execute_phase",{phase,workflow:workflowMode,plans});
       if(phase==="pick"){setPickExecution(result);if(result.status==="SUCCEEDED")setActiveStage(5);}
       else{setPlaceExecution(result);if(result.status==="SUCCEEDED")setActiveStage(6);}
     }catch(error){
@@ -407,6 +451,60 @@ export function PickPlacePage() {
   };
   return <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><div className="eyebrow">MOTION WORKSPACE / TASK PLANNING</div><h1 className="page-title">Pick & place planner</h1><p className="mt-1 max-w-2xl text-sm text-zinc-500">Follow the stages in order. Each stage unlocks after the previous action succeeds.</p></div><div className="flex items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${simulation?"bg-amber-50 text-amber-700":"bg-zinc-100 text-zinc-600"}`}>{simulation?"SIMULATION":"PLAN ONLY"}</span><span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[10px] text-zinc-600">{bridgeState}</span></div></div>
+    <section className="panel space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div><div className="text-sm font-semibold">Choose pick-and-place workflow</div><p className="mt-0.5 text-[11px] text-zinc-500">Choose one of the two supported task patterns. Object details and motion tuning stay under Advanced configuration.</p></div>
+        <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[10px] text-zinc-600">{object.label}</span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <button type="button" onClick={()=>applyWorkflowPreset("platform_to_platform")} aria-pressed={workflowMode==="platform_to_platform"}
+          className={workflowMode==="platform_to_platform"?"rounded-lg border border-zinc-900 bg-zinc-900 p-3 text-left text-white":"rounded-lg border border-zinc-200 bg-white p-3 text-left text-zinc-800 hover:border-zinc-400"}>
+          <span className="block text-xs font-semibold">Platform → Platform</span>
+          <span className={workflowMode==="platform_to_platform"?"mt-1 block text-[10px] text-zinc-300":"mt-1 block text-[10px] text-zinc-500"}>Pick from a free-space position and place onto a destination platform.</span>
+        </button>
+        <button type="button" onClick={()=>applyWorkflowPreset("shelf_to_platform")} aria-pressed={workflowMode==="shelf_to_platform"}
+          className={workflowMode==="shelf_to_platform"?"rounded-lg border border-zinc-900 bg-zinc-900 p-3 text-left text-white":"rounded-lg border border-zinc-200 bg-white p-3 text-left text-zinc-800 hover:border-zinc-400"}>
+          <span className="block text-xs font-semibold">Shelf → Platform</span>
+          <span className={workflowMode==="shelf_to_platform"?"mt-1 block text-[10px] text-zinc-300":"mt-1 block text-[10px] text-zinc-500"}>Pick through the open front, withdraw, transfer outside the rack and place at base-link height.</span>
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 pt-3">
+        <div className="min-w-0 text-[10px] text-zinc-500">
+          <div>Pick: {pickSource==="shelf"?"Shelf bay "+(slot+1):"Free-space position"} · Place: Platform</div>
+          <div>Frame: {model?.base_frame??"waiting for robot model"} · Scene: {scenePrepared?"ready":"not prepared"} · Plan: {planResult?.status??"not generated"}</div>
+          {sceneStatus&&<div className="mt-1 break-words text-amber-700">{sceneStatus}</div>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" disabled={!objectReady||sceneBusy||bridgeState!=="connected"||!shelfGeometryValid||!sceneFitValid} onClick={prepareScene}>
+            <Layers3 size={13}/>{sceneBusy?"Preparing…":scenePrepared?"Refresh scene":"Prepare scene"}
+          </Button>
+          <Button size="sm" disabled={!scenePrepared||!allValid||!model||bridgeState!=="connected"||planResult?.status==="PLANNING"} onClick={runPlan}>
+            <Target size={13}/>{planResult?.status==="PLANNING"?"Planning…":planReady?"Re-plan":"Generate plan"}
+          </Button>
+        </div>
+      </div>
+      {planResult&&<div className={planReady?"rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] text-emerald-800":"rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] text-amber-800"}>
+        <div className="font-semibold">{planResult.status}{planResult.failed_stage?" · stopped at "+planResult.failed_stage:""}</div>
+        {planResult.error&&<div className="mt-1 break-words">{planResult.error}</div>}
+        {Array.isArray(planResult.plans)&&<div className="mt-1">{planResult.plans.filter((item:any)=>item.status==="SUCCEEDED").length}/{planResult.plans.length} segments planned</div>}
+      </div>}
+    </section>
+    <section className="panel overflow-hidden pick-place-viewport">
+      <div className="panel-header"><div><div className="eyebrow">3D / MOVEIT PLANNING SCENE</div><h2 className="mt-1 text-sm font-semibold">Robot, workpiece and destination platform</h2></div><div className="text-[10px] text-zinc-400">{scene?.world?.collision_objects?.length??0} world · {scene?.robot_state?.attached_collision_objects?.length??0} attached</div></div>
+      <RobotViewport model={model} scene={scene} plan={plan} targetTcp={displayedTargetTcp}
+        loading={modelLoading} error={modelError??sceneError}
+        viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
+        objectLabels={viewPreferences.objectLabels} disabledObjects={emptyDisabledObjects} hiddenObjects={viewPreferences.hiddenObjects}/>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-4 py-2 text-[10px] text-zinc-500">
+        <div className="min-w-0"><div>MoveIt scene data · {model?.base_frame??"waiting for base frame"}</div><div className={scenePrepared?"text-emerald-700":"text-amber-700"}>{scenePrepared?sceneStatus??"Scene ready for current settings":sceneStatus?`Last preparation: ${sceneStatus}`:"Scene not prepared for the current settings"}</div></div>
+        <span>{activeStage===1?"Scene setup is active below":"Follow the stages to prepare and validate this scene"}</span>
+      </div>
+    </section>
+    <details className="panel overflow-hidden group">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+        <span><span className="block text-xs font-semibold text-zinc-800">Advanced configuration</span><span className="mt-0.5 block text-[10px] text-zinc-500">Object geometry, source, shelf/platform positions, grasp, TCP, planner, payload and simulation stages.</span></span><ChevronDown size={14} className="transition-transform group-open:rotate-180"/>
+      </summary>
+      <div className="space-y-4 border-t border-zinc-100 p-3 sm:p-4">
     <section className="panel p-3 sm:p-4">
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
         {stageItems.map((stage,index)=>{
@@ -423,17 +521,6 @@ export function PickPlacePage() {
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 pt-3 text-[11px]">
         <span className="text-zinc-500">{stageItems[activeStage]?.description}. {activeStage===3?"Planning does not move the robot.":activeStage>=4?"Execution is simulation-only and requires explicit confirmation.":""}</span>
         <span className="font-medium text-zinc-700">{stageItems.filter(stage=>stage.done).length} / 7 stages complete</span>
-      </div>
-    </section>
-    <section className="panel overflow-hidden pick-place-viewport">
-      <div className="panel-header"><div><div className="eyebrow">3D / MOVEIT PLANNING SCENE</div><h2 className="mt-1 text-sm font-semibold">Robot, shelf and workpiece</h2></div><div className="text-[10px] text-zinc-400">{scene?.world?.collision_objects?.length??0} world · {scene?.robot_state?.attached_collision_objects?.length??0} attached</div></div>
-      <RobotViewport model={model} scene={scene} plan={plan} targetTcp={displayedTargetTcp}
-        loading={modelLoading} error={modelError??sceneError}
-        viewPreferences={viewPreferences} onViewPreferencesChange={setViewPreferences}
-        objectLabels={viewPreferences.objectLabels} disabledObjects={emptyDisabledObjects} hiddenObjects={viewPreferences.hiddenObjects}/>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-4 py-2 text-[10px] text-zinc-500">
-        <div className="min-w-0"><div>MoveIt scene data · {model?.base_frame??"waiting for base frame"}</div><div className={scenePrepared?"text-emerald-700":"text-amber-700"}>{scenePrepared?sceneStatus??"Scene ready for current settings":sceneStatus?`Last preparation: ${sceneStatus}`:"Scene not prepared for the current settings"}</div></div>
-        <span>{activeStage===1?"Scene setup is active below":"Follow the stages to prepare and validate this scene"}</span>
       </div>
     </section>
     <div className="grid gap-4">
@@ -491,6 +578,8 @@ export function PickPlacePage() {
                   <ConfigNumberRow label="Y" value={shelfPose.y} unit="mm" onChange={value=>setShelfPose(current=>({...current,y:value}))}/>
                   <ConfigNumberRow label="Z" value={shelfPose.z} unit="mm" onChange={value=>setShelfPose(current=>({...current,z:value}))}/>
                   <ConfigNumberRow label="Yaw" value={shelfPose.yaw} unit="deg" min={-180} max={180} onChange={value=>setShelfPose(current=>({...current,yaw:value}))}/>
+                  <ConfigNumberRow label="Bay pick offset X" value={shelfPickOffset.x} unit="mm" min={-1000} max={1000} onChange={value=>setShelfPickOffset(current=>({...current,x:value}))}/>
+                  <ConfigNumberRow label="Bay pick offset Y" value={shelfPickOffset.y} unit="mm" min={-1000} max={1000} onChange={value=>setShelfPickOffset(current=>({...current,y:value}))}/>
                 </ConfigTable>
               </div>
               <div className="space-y-3">
@@ -503,7 +592,7 @@ export function PickPlacePage() {
                 </ConfigTable>
                 {pickSource==="free"&&<div className="rounded-md bg-zinc-50 p-3 text-[10px] leading-4 text-zinc-600">The planner will use the manual or vision centroid entered in Step 3. Ensure the selected frame is the MoveIt base frame.</div>}
                 {placeDestination==="platform"&&<>
-                  <ConfigTable title="Platform position" description="X/Y are the platform centre; Z is the bottom/base height, in the MoveIt base frame.">
+                  <ConfigTable title="Platform position" description="X/Y are the platform centre. The preset top surface is aligned to base_link Z=0; the base Z field includes platform thickness.">
                     <ConfigNumberRow label="Center X" value={platform.x} unit="mm" onChange={value=>setPlatform(current=>({...current,x:value}))}/>
                     <ConfigNumberRow label="Center Y" value={platform.y} unit="mm" onChange={value=>setPlatform(current=>({...current,y:value}))}/>
                     <ConfigNumberRow label="Base Z" value={platform.z} unit="mm" onChange={value=>setPlatform(current=>({...current,z:value}))}/>
@@ -654,6 +743,8 @@ export function PickPlacePage() {
         :activeStage===5?<Button size="sm" disabled={!placeDone} onClick={()=>setActiveStage(6)}>Continue to verify <ChevronDown size={13}/></Button>
         :<Button size="sm" variant="outline" onClick={()=>setActiveStage(5)}>Back to place</Button>}
       </div>}
-    </div>
+      </div>
+      </div>
+    </details>
   </div>;
 }

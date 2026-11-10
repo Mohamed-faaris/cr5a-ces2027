@@ -25,7 +25,7 @@ from rcl_interfaces.srv import (
 )
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import DisplayTrajectory, PlanningScene, PlanningSceneComponents, CollisionObject
-from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene
+from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene, GetCartesianPath
 from geometry_msgs.msg import Pose
 from shape_msgs.msg import SolidPrimitive
 from control_msgs.action import GripperCommand
@@ -39,6 +39,47 @@ def stamp():
 def message_dict(message, invalid_paths=None):
     payload = dict(message_to_ordereddict(message))
     return json_safe(payload, invalid_paths) if invalid_paths is not None else payload
+
+
+def merge_joint_state_payload(current, incoming):
+    """Merge partial JointState messages from independent arm/gripper publishers.
+
+    ros2_control publishes the six arm joints while the simulated PGEA node may
+    publish only the two finger joints on the same /joint_states topic. A cache
+    that keeps only the most recent message loses one group and makes the
+    execution start-state guard incorrectly reject otherwise valid plans.
+    """
+    if not isinstance(incoming, dict):
+        return incoming
+
+    joints = {}
+
+    def consume(payload):
+        if not isinstance(payload, dict):
+            return
+        names = payload.get("name")
+        if not isinstance(names, (list, tuple)):
+            return
+        for index, raw_name in enumerate(names):
+            name = str(raw_name).strip()
+            if not name:
+                continue
+            values = joints.setdefault(name, {})
+            for field in ("position", "velocity", "effort"):
+                field_values = payload.get(field)
+                if isinstance(field_values, (list, tuple)) and index < len(field_values):
+                    values[field] = field_values[index]
+
+    consume(current)
+    consume(incoming)
+    result = {
+        "header": incoming.get("header") or (current.get("header") if isinstance(current, dict) else None),
+        "name": list(joints),
+    }
+    for field in ("position", "velocity", "effort"):
+        if any(field in values for values in joints.values()):
+            result[field] = [values.get(field) for values in joints.values()]
+    return result
 
 
 class BridgeNode(Node):
@@ -292,6 +333,9 @@ class BridgeNode(Node):
                 payload = message_dict(message, invalid_paths)
             self._warn_non_finite(topic_name, invalid_paths)
             with self._lock:
+                if topic_name == "/joint_states":
+                    previous = self._topic_cache.get(topic_name, {}).get("data")
+                    payload = merge_joint_state_payload(previous, payload)
                 seq = self._topic_seq.get(topic_name, 0) + 1
                 self._topic_seq[topic_name] = seq
                 self._topic_cache[topic_name] = {
@@ -441,10 +485,21 @@ class BridgeNode(Node):
         ros_future = client.call_async(request)
 
         def complete(done):
+            # The awaiting coroutine may time out and cancel this Future before
+            # the underlying rclpy request completes. Never let that late callback
+            # raise InvalidStateError on the shared ROS executor thread.
             try:
-                result.set_result(done.result())
-            except Exception as exc:
-                result.set_exception(exc)
+                value = done.result()
+            except BaseException as exc:
+                try:
+                    result.set_exception(exc)
+                except concurrent.futures.InvalidStateError:
+                    pass
+            else:
+                try:
+                    result.set_result(value)
+                except concurrent.futures.InvalidStateError:
+                    pass
 
         ros_future.add_done_callback(complete)
         return result
@@ -715,6 +770,55 @@ class BridgeNode(Node):
         ros_future.add_done_callback(completed)
         return result_future
 
+    def compute_cartesian_path(self, payload):
+        """Request a collision-checked straight Cartesian segment for a linear approach."""
+        from geometry_msgs.msg import Pose
+
+        request = GetCartesianPath.Request()
+        request.header.frame_id = str(payload.get("frame_id", self.config.get("moveit", {}).get("base_frame", "dummy_link")))
+        request.group_name = str(payload.get("group_name", self.config.get("moveit", {}).get("group_name", "cr5_group")))
+        request.link_name = str(payload.get("link_name", self.config.get("moveit", {}).get("pick_place_tcp_link", "tcp")))
+        request.start_state.is_diff = True
+        start_state = payload.get("start_state")
+        if start_state is not None:
+            if not isinstance(start_state, dict):
+                raise ValueError("start_state must be an object")
+            names = start_state.get("joint_names", [])
+            if (not isinstance(names, list) or not names
+                    or any(not isinstance(name, str) or not name for name in names)
+                    or len(set(names)) != len(names)):
+                raise ValueError("start_state.joint_names must be unique non-empty names")
+            positions = finite_vector(start_state.get("positions_rad", []), len(names), "start_state.positions_rad")
+            request.start_state.joint_state.name = names
+            request.start_state.joint_state.position = positions
+
+        attached_objects = payload.get("attached_collision_objects", [])
+        if not isinstance(attached_objects, list) or len(attached_objects) > 16:
+            raise ValueError("attached_collision_objects must be a list of at most 16 objects")
+        request.start_state.attached_collision_objects = attached_objects
+
+        waypoint = payload.get("waypoint")
+        if not isinstance(waypoint, dict):
+            raise ValueError("waypoint must be an object")
+        position = finite_vector(waypoint.get("position_m"), 3, "waypoint.position_m")
+        orientation = finite_quaternion(waypoint.get("orientation_xyzw"), "waypoint.orientation_xyzw")
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = position
+        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = orientation
+        request.waypoints = [pose]
+        request.max_step = finite_float(payload.get("max_step_m", 0.005), "max_step_m")
+        if request.max_step <= 0:
+            raise ValueError("max_step_m must be greater than zero")
+        request.jump_threshold = 0.0
+        request.prismatic_jump_threshold = 0.0
+        request.revolute_jump_threshold = 0.0
+        request.avoid_collisions = True
+
+        service_name = self.config.get("moveit", {}).get(
+            "compute_cartesian_path_service", "/compute_cartesian_path"
+        )
+        return self.call_service(service_name, GetCartesianPath, request)
+
     def send_plan_goal(self, plan_id, goal):
         result_future = concurrent.futures.Future()
         timeout = float(self.config.get("ros", {}).get("action_timeout_sec", 45.0))
@@ -746,14 +850,27 @@ class BridgeNode(Node):
                 result = handle.get_result_async()
 
                 def finished(result_done):
+                    if result_future.done():
+                        return
                     try:
-                        result_future.set_result(result_done.result().result)
+                        value = result_done.result().result
                     except Exception as exc:
-                        result_future.set_exception(exc)
+                        try:
+                            result_future.set_exception(exc)
+                        except concurrent.futures.InvalidStateError:
+                            pass
+                    else:
+                        try:
+                            result_future.set_result(value)
+                        except concurrent.futures.InvalidStateError:
+                            pass
 
                 result.add_done_callback(finished)
             except Exception as exc:
-                result_future.set_exception(exc)
+                try:
+                    result_future.set_exception(exc)
+                except concurrent.futures.InvalidStateError:
+                    pass
 
         sent.add_done_callback(accepted)
         return result_future
@@ -791,14 +908,27 @@ class BridgeNode(Node):
                 result = handle.get_result_async()
 
                 def finished(result_done):
+                    if result_future.done():
+                        return
                     try:
-                        result_future.set_result(result_done.result().result)
+                        value = result_done.result().result
                     except Exception as exc:
-                        result_future.set_exception(exc)
+                        try:
+                            result_future.set_exception(exc)
+                        except concurrent.futures.InvalidStateError:
+                            pass
+                    else:
+                        try:
+                            result_future.set_result(value)
+                        except concurrent.futures.InvalidStateError:
+                            pass
 
                 result.add_done_callback(finished)
             except Exception as exc:
-                result_future.set_exception(exc)
+                try:
+                    result_future.set_exception(exc)
+                except concurrent.futures.InvalidStateError:
+                    pass
 
         sent.add_done_callback(accepted)
         return result_future
