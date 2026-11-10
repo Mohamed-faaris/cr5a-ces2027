@@ -299,6 +299,11 @@ def create_app(backend, config):
     )
     app.router.route_class = StrictJSONRoute
 
+    # Stored outside backend.plans so internal ROS message objects are never
+    # exposed through public plan-list/get-plan JSON responses.
+    pick_place_release_objects = {}
+    pick_place_release_acm = {}
+
     auth = config.get("auth", {})
     auth_enabled = bool(auth.get("enabled", False))
     token_name = auth.get("token_env", "CR5A_BRIDGE_TOKEN")
@@ -650,6 +655,42 @@ def create_app(backend, config):
                 detail="PGEA commands are disabled by bridge safety configuration",
             )
 
+    async def wait_for_robot_mode(allowed_modes, timeout_sec, purpose):
+        """Wait for an explicitly allowed controller mode without bypassing safety gates."""
+        timeout = finite_vector([timeout_sec], 1, "robot mode timeout")[0]
+        if timeout < 0 or timeout > 30:
+            raise HTTPException(status_code=500, detail="Robot mode wait timeout must be between 0 and 30 seconds")
+        allowed = {str(value) for value in allowed_modes}
+        deadline = time.monotonic() + timeout
+        last_mode = None
+        last_error = None
+        while True:
+            try:
+                response = await _await_ros(backend.robot_service("RobotMode"), 1.5)
+            except HTTPException as exc:
+                last_error = str(exc.detail)
+            else:
+                if int(response.res) == 0:
+                    last_mode = str(response.robot_return).strip()
+                    if last_mode in allowed:
+                        return last_mode
+                    last_error = None
+                    if last_mode not in {"6", "7", "8", "11"}:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"RobotMode {last_mode} is not allowed for {purpose}; expected one of {sorted(allowed)}",
+                        )
+                else:
+                    last_error = f"RobotMode returned controller code {response.res}"
+            if time.monotonic() >= deadline:
+                detail = f"Robot did not reach an allowed mode for {purpose}"
+                if last_mode is not None:
+                    detail += f"; current RobotMode is {last_mode}"
+                elif last_error:
+                    detail += f"; {last_error}"
+                raise HTTPException(status_code=409, detail=detail)
+            await asyncio.sleep(0.1)
+
     async def require_connected_arm(enabled=False):
         status_topic = config.get("robot", {}).get(
             "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
@@ -669,15 +710,28 @@ def create_app(backend, config):
         max_age = float(config.get("gripper", {}).get("max_robot_status_age_sec", 2.0))
         if age < -1.0 or age > max_age:
             raise HTTPException(status_code=409, detail="Robot status is stale; wait for fresh telemetry")
-        mode = await _await_ros(backend.robot_service("RobotMode"), 1.5)
-        mode_code = int(str(mode.robot_return))
-        if int(mode.res) != 0 or mode_code not in (3, 4, 5):
-            raise HTTPException(
-                status_code=409,
-                detail="PGEA operation is blocked while the robot controller is running, dragging, paused, or faulted",
+        allowed_modes = {"5"} if enabled else {"3", "4", "5"}
+        await wait_for_robot_mode(
+            allowed_modes,
+            config.get("gripper", {}).get("robot_mode_settle_timeout_sec", 5.0),
+            "PGEA operation",
+        )
+        # A mode transition may have taken several seconds. Re-check that the
+        # connection telemetry is still fresh before commanding the gripper.
+        snapshot = backend.topic_snapshot(status_topic)
+        data = snapshot.get("data", {}) if snapshot else {}
+        if data.get("is_connected") is not True:
+            raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
+        try:
+            from datetime import datetime, timezone
+            observed_at = datetime.fromisoformat(
+                str(snapshot.get("timestamp", "")).replace("Z", "+00:00")
             )
-        if enabled and mode_code != 5:
-            raise HTTPException(status_code=409, detail="Robot must be enabled and idle before moving the PGEA gripper")
+            age = (datetime.now(timezone.utc) - observed_at).total_seconds()
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Robot status timestamp is invalid")
+        if age < -1.0 or age > max_age:
+            raise HTTPException(status_code=409, detail="Robot status is stale; wait for fresh telemetry")
 
     command_services = {
         "enable": "EnableRobot",
@@ -2217,19 +2271,71 @@ def create_app(backend, config):
         except ValueError as exc:
             return {**prepared, "status": "BLOCKED_PAYLOAD_LIMIT", "error": str(exc)}
         waypoints = prepared["waypoints"]
-        # Platform-to-platform uses a dedicated collision-checked transfer.
-        # Shelf-source routing is intentionally left on the existing planner
-        # path for its separate follow-up implementation.
-        platform_transfer = (
-            prepared.get("pick_source") == "free"
-            and prepared.get("place_destination") == "platform"
-        )
-        if platform_transfer:
+        platform_transfer = prepared.get("place_destination") == "platform"
+        shelf_to_platform = platform_transfer and pick_source == "shelf"
+        free_platform_pick = platform_transfer and pick_source == "free"
+        if shelf_to_platform:
+            # Enter the shelf bay from a high, collision-free pose outside the
+            # open front. Then descend at the front and insert along the shelf
+            # corridor; direct OMPL to the low pregrasp cuts across shelf boards.
+            pregrasp_waypoint = next(item for item in waypoints if item["name"] == "pregrasp")
+            approach_high = {
+                "name": "approach_high",
+                "position_m": [
+                    pregrasp_waypoint["position_m"][0],
+                    pregrasp_waypoint["position_m"][1],
+                    pregrasp_waypoint["position_m"][2] + 0.32,
+                ],
+                "orientation_xyzw": pregrasp_waypoint["orientation_xyzw"],
+                "object_attached": False,
+            }
+            waypoints.insert(waypoints.index(pregrasp_waypoint), approach_high)
+            transfer_start = next(item for item in waypoints if item["name"] == "lift")
+            preplace_waypoint = next(item for item in waypoints if item["name"] == "preplace")
+            transit_height = max(
+                transfer_start["position_m"][2] + 0.15,
+                preplace_waypoint["position_m"][2] + 0.35,
+            )
+            transfer_waypoints = [
+                {
+                    "name": "transit_raise",
+                    "position_m": [
+                        transfer_start["position_m"][0],
+                        transfer_start["position_m"][1],
+                        transit_height,
+                    ],
+                    "orientation_xyzw": transfer_start["orientation_xyzw"],
+                    "object_attached": True,
+                },
+                {
+                    "name": "transit_clear",
+                    "position_m": [
+                        transfer_start["position_m"][0],
+                        preplace_waypoint["position_m"][1],
+                        transit_height,
+                    ],
+                    "orientation_xyzw": preplace_waypoint["orientation_xyzw"],
+                    "object_attached": True,
+                },
+                {
+                    "name": "transit_align",
+                    "position_m": [
+                        preplace_waypoint["position_m"][0],
+                        preplace_waypoint["position_m"][1],
+                        transit_height,
+                    ],
+                    "orientation_xyzw": preplace_waypoint["orientation_xyzw"],
+                    "object_attached": True,
+                },
+            ]
+            preplace_index = waypoints.index(preplace_waypoint)
+            waypoints[preplace_index:preplace_index] = transfer_waypoints
+        elif free_platform_pick:
             transfer_start = next(item for item in waypoints if item["name"] == "withdraw")
             preplace_waypoint = next(item for item in waypoints if item["name"] == "preplace")
             # Withdraw already clears the free-space pick. Travel laterally at
             # that height, lower to the reachable 650 mm transfer plane, then
-            # align above the platform before the final vertical placement.
+            # align above the platform before the final horizontal placement.
             waypoints[:] = [item for item in waypoints if item["name"] != "lift"]
             transit_height = min(
                 max(transfer_start["position_m"][2], preplace_waypoint["position_m"][2] + 0.35),
@@ -2270,6 +2376,8 @@ def create_app(backend, config):
             })
             preplace_index = waypoints.index(preplace_waypoint)
             waypoints[preplace_index:preplace_index] = transfer_waypoints
+
+        if platform_transfer:
             place_waypoint = next(item for item in waypoints if item["name"] == "place")
             retreat_waypoint = next(item for item in waypoints if item["name"] == "retreat")
             retreat_clear = {
@@ -2516,8 +2624,36 @@ def create_app(backend, config):
                 mutator = allow_place_contact
             elif waypoint["name"] in ("retreat_lift", "retreat"):
                 mutator = detach_and_place
-            if platform_transfer and waypoint["name"] in (
-                "withdraw", "transit_clear", "transit_lower", "transit_align",
+            if shelf_to_platform and waypoint["name"] in ("approach_high", "pregrasp"):
+                # Collision-checked Cartesian approach from the shelf front,
+                # followed by a vertical descent to the shelf's pregrasp pose.
+                result = await create_cartesian_motion_plan_impl({
+                    "frame_id": frame_id,
+                    "group_name": stage_payload["group_name"],
+                    "link_name": link_name,
+                    "waypoint": {
+                        "position_m": waypoint["position_m"],
+                        "orientation_xyzw": waypoint["orientation_xyzw"],
+                    },
+                    "start_state": start_state,
+                    "max_step_m": payload.get("cartesian_max_step_m", 0.005),
+                }, scene_snapshot, base_allowed_collision_matrix)
+            elif shelf_to_platform and waypoint["name"] == "grasp":
+                # Insert through the open front; allow contact only between the
+                # can and configured gripper touch links.
+                result = await create_cartesian_motion_plan_impl({
+                    "frame_id": frame_id,
+                    "group_name": stage_payload["group_name"],
+                    "link_name": link_name,
+                    "waypoint": {
+                        "position_m": waypoint["position_m"],
+                        "orientation_xyzw": waypoint["orientation_xyzw"],
+                    },
+                    "start_state": start_state,
+                    "max_step_m": payload.get("cartesian_max_step_m", 0.005),
+                }, scene_snapshot, object_contact_matrix())
+            elif platform_transfer and waypoint["name"] in (
+                "withdraw", "lift", "transit_raise", "transit_clear", "transit_lower", "transit_align",
             ):
                 # Reverse the shelf insertion, lift out, then transfer along
                 # staged straight segments with the can attached. Avoid an OMPL
@@ -2598,6 +2734,14 @@ def create_app(backend, config):
                         "failed_stage": waypoint["name"], "error": "MoveIt returned no joint trajectory points"}
             start_state = {"joint_names": joint.get("joint_names", []),
                            "positions_rad": points[-1].get("positions", [])}
+        if platform_transfer:
+            place_plan = next((item for item in plans if item.get("name") == "place"), None)
+            if place_plan and place_plan.get("plan_id"):
+                # Keep the intended released-object pose with this plan set.
+                # It is applied to the live PlanningScene only after the
+                # simulated/commissioned gripper confirms that it has opened.
+                pick_place_release_objects[place_plan["plan_id"]] = placed_object_collision()
+                pick_place_release_acm[place_plan["plan_id"]] = object_platform_contact_matrix()
         return {**prepared, "status": "PLANNED", "plans": plans,
                 "payload_model": payload_model,
                 "planning_time_total": sum(float(item.get("planning_time") or 0.0) for item in plans)}
@@ -2646,26 +2790,20 @@ def create_app(backend, config):
             "status_topic", "/dobot_msgs_v4/msg/RobotStatus"
         )
         status = backend.topic_snapshot(status_topic)
-        if not status or not status.get("data", {}).get("is_connected"):
+        if not status or status.get("data", {}).get("is_connected") is not True:
             raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
-        if not status.get("data", {}).get("is_enable"):
-            # Some controller/simulator stacks briefly publish is_enable=false
-            # while a completed trajectory transitions back to idle. Wait for
-            # fresh enabled telemetry for a bounded period; never skip the
-            # enable guard or execute while the controller remains disabled.
-            enable_deadline = time.monotonic() + float(
-                config.get("moveit", {}).get("robot_enable_settle_timeout_sec", 2.0)
-            )
-            while time.monotonic() < enable_deadline:
-                await asyncio.sleep(0.1)
-                status = backend.topic_snapshot(status_topic)
-                status_data = status.get("data", {}) if status else {}
-                if status_data.get("is_connected") is not True:
-                    raise HTTPException(status_code=409, detail="Robot connection is not confirmed")
-                if status_data.get("is_enable") is True:
-                    break
-            else:
-                raise HTTPException(status_code=409, detail="Robot is not enabled")
+
+        # RobotMode is the controller's synchronous state query. RobotStatus is
+        # asynchronous topic telemetry and can briefly report is_enable=false
+        # while the controller transitions between running and idle. Use the
+        # same source-of-truth policy as the Diagnostics UI, and execute only
+        # in mode 5 (enabled + idle); disabled, dragging, paused and running
+        # states remain blocked.
+        await wait_for_robot_mode(
+            {"5"},
+            config.get("moveit", {}).get("robot_mode_settle_timeout_sec", 5.0),
+            "trajectory execution",
+        )
 
         # Never execute a plan against a different or stale robot start state.
         trajectory = plan.get("trajectory")
@@ -2765,10 +2903,30 @@ def create_app(backend, config):
             raise
         error_code = getattr(result.error_code, "val", None)
         state = "SUCCEEDED" if error_code == 1 else "FAILED"
+        idle_confirmed = False
+        idle_error = None
+        if state == "SUCCEEDED":
+            try:
+                await wait_for_robot_mode(
+                    {"5"},
+                    config.get("moveit", {}).get("robot_mode_settle_timeout_sec", 10.0),
+                    "post-trajectory idle confirmation",
+                )
+                idle_confirmed = True
+            except HTTPException as exc:
+                state = "FAILED"
+                idle_error = exc.detail
         backend.emit("motion.execution", {
-            "plan_id": plan_id, "status": state, "error_code": error_code
+            "plan_id": plan_id, "status": state, "error_code": error_code,
+            "idle_confirmed": idle_confirmed,
         })
-        return {"plan_id": plan_id, "status": state, "error_code": error_code}
+        response = {
+            "plan_id": plan_id, "status": state, "error_code": error_code,
+            "idle_confirmed": idle_confirmed,
+        }
+        if idle_error:
+            response["error"] = idle_error
+        return response
 
     @app.post("/api/v1/motion-plans/{plan_id}/execute")
     async def execute_motion_plan(plan_id: str):
@@ -3390,17 +3548,24 @@ def create_app(backend, config):
                 str(item.get("name")): str(item.get("plan_id"))
                 for item in supplied if isinstance(item, dict) and item.get("name") and item.get("plan_id")
             }
-            if workflow == "platform_to_platform":
-                # The free-space preset uses a collision-checked, multi-leg
-                # transfer. Keep the gripper actions between the appropriate
-                # motion segments rather than requiring the legacy shelf stages.
+            if workflow in ("platform_to_platform", "shelf_to_platform"):
+                # Both platform workflows use the same staged destination
+                # route. Shelf picks add a high front approach and an insertion
+                # corridor before closing the gripper and lifting out.
+                shelf_pick = workflow == "shelf_to_platform"
+                pick_sequence = []
+                if shelf_pick:
+                    pick_sequence.append(("approach_high", "motion", None))
+                pick_sequence.extend((
+                    ("pregrasp", "motion", None),
+                    ("grasp", "motion", None),
+                    ("close_gripper", "gripper", 0.0),
+                    ("withdraw", "motion", None),
+                ))
+                if shelf_pick:
+                    pick_sequence.append(("lift", "motion", None))
                 platform_sequences = {
-                    "pick": (
-                        ("pregrasp", "motion", None),
-                        ("grasp", "motion", None),
-                        ("close_gripper", "gripper", 0.0),
-                        ("withdraw", "motion", None),
-                    ),
+                    "pick": tuple(pick_sequence),
                     "place": (
                         ("transit_raise", "motion", None),
                         ("transit_clear", "motion", None),
@@ -3456,6 +3621,41 @@ def create_app(backend, config):
                         result = await execute_motion_plan_impl(supplied_by_name[name])
                     else:
                         result = await websocket_request("gripper.move", {"position_m": position, "max_effort": 0.0})
+                        if name == "open_gripper" and workflow in ("platform_to_platform", "shelf_to_platform"):
+                            place_plan_id = supplied_by_name.get("place")
+                            released_object = pick_place_release_objects.get(place_plan_id)
+                            release_acm = pick_place_release_acm.get(place_plan_id)
+                            if released_object is None or release_acm is None:
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="The planned destination object pose is unavailable; re-plan before placement",
+                                )
+                            # The object collision geometry stayed at the pick
+                            # pose during planning/execution because MoveIt plan
+                            # requests use isolated scene diffs. Once the PGEA
+                            # confirms opening, move that world object to the
+                            # destination so the live scene matches the physical
+                            # simulated placement before retreat begins.
+                            current_scene = await get_scene()
+                            if any(item.id == released_object.id for item in current_scene.world.collision_objects):
+                                remove_scene = PlanningScene()
+                                remove_scene.is_diff = True
+                                remove = CollisionObject()
+                                remove.id = released_object.id
+                                remove.operation = CollisionObject.REMOVE
+                                remove_scene.world.collision_objects.append(remove)
+                                await apply_scene(remove_scene)
+                            add_scene = PlanningScene()
+                            add_scene.is_diff = True
+                            placed = copy.deepcopy(released_object)
+                            placed.operation = CollisionObject.ADD
+                            add_scene.world.collision_objects.append(placed)
+                            add_scene.allowed_collision_matrix = copy.deepcopy(release_acm)
+                            await apply_scene(add_scene)
+                            pick_place_release_objects.pop(place_plan_id, None)
+                            pick_place_release_acm.pop(place_plan_id, None)
+                            result["scene_object_placed"] = True
+                            result["placed_object_id"] = released_object.id
                     state = str(result.get("status", "SUCCEEDED"))
                     completed.append({"step": name, "status": state, "result": result})
                     if state != "SUCCEEDED":

@@ -254,6 +254,7 @@ class FakeGripperBackend(FakeBackend):
         super().__init__()
         from datetime import datetime, timezone
         self.mode = mode
+        self.mode_sequence = []
         self.sent_gripper_goals = []
         self.parameter_updates = []
         self._topic_cache["/dobot_msgs_v4/msg/RobotStatus"] = {
@@ -305,7 +306,8 @@ class FakeGripperBackend(FakeBackend):
     def robot_service(self, name, payload=None):
         from types import SimpleNamespace
         future = Future()
-        future.set_result(SimpleNamespace(robot_return=self.mode, res=0))
+        mode = self.mode_sequence.pop(0) if self.mode_sequence else self.mode
+        future.set_result(SimpleNamespace(robot_return=mode, res=0))
         return future
 
     def send_gripper_goal(self, position_m, max_effort=0.0):
@@ -426,6 +428,47 @@ def test_gripper_move_requires_enabled_idle_robot_and_successful_action():
     assert moved["data"]["reached_goal"] is True
     assert moved["data"]["status"] == "SUCCEEDED"
     assert backend.sent_gripper_goals == [(0.01, 0.0)]
+
+def test_gripper_move_waits_for_controller_to_return_to_idle():
+    backend = FakeGripperBackend(mode="5")
+    backend.mode_sequence = ["7", "5"]
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"topic_publish_enabled": False, "generic_service_calls_enabled": False},
+        "robot": {"status_topic": "/dobot_msgs_v4/msg/RobotStatus"},
+        "moveit": {"allow_execution": False},
+        "gripper": {"allow_commands": True, "robot_mode_settle_timeout_sec": 0.5},
+    }
+    with TestClient(create_app(backend, config)) as client:
+        moved = _gripper_ws_request(
+            client, "gripper.move", {"position_m": 0.01, "max_effort": 0.0}
+        )
+
+    assert moved["ok"] is True
+    assert moved["data"]["reached_goal"] is True
+    assert backend.sent_gripper_goals == [(0.01, 0.0)]
+    assert backend.mode_sequence == []
+
+
+def test_gripper_move_rejects_controller_that_stays_running():
+    backend = FakeGripperBackend(mode="7")
+    config = {
+        "auth": {"enabled": False},
+        "ros": {"topic_publish_enabled": False, "generic_service_calls_enabled": False},
+        "robot": {"status_topic": "/dobot_msgs_v4/msg/RobotStatus"},
+        "moveit": {"allow_execution": False},
+        "gripper": {"allow_commands": True, "robot_mode_settle_timeout_sec": 0.2},
+    }
+    with TestClient(create_app(backend, config)) as client:
+        blocked = _gripper_ws_request(
+            client, "gripper.move", {"position_m": 0.01, "max_effort": 0.0}
+        )
+
+    assert blocked["ok"] is False
+    assert blocked["error"]["code"] == 409
+    assert "RobotMode is 7" in blocked["error"]["message"]
+    assert backend.sent_gripper_goals == []
+
 
 def test_gripper_move_requires_initialization():
     backend = FakeGripperBackend(initialized=False)

@@ -393,10 +393,13 @@ export function PickPlacePage() {
   const executePhase=async(phase:"pick"|"place")=>{
     if(!planReady||!executionAvailable||!simulationConfirmed||executionBusy)return;
     if(phase==="place"&&!pickDone)return;
-    const platformToPlatform=workflowMode==="platform_to_platform";
+    const platformWorkflow=workflowMode==="platform_to_platform"||workflowMode==="shelf_to_platform";
+    const shelfToPlatform=workflowMode==="shelf_to_platform";
     const required=phase==="pick"
-      ?(platformToPlatform?["pregrasp","grasp","withdraw"]:["pregrasp","grasp","withdraw","lift"])
-      :(platformToPlatform
+      ?(platformWorkflow
+        ?[...(shelfToPlatform?["approach_high"]:[]),"pregrasp","grasp","withdraw",...(shelfToPlatform?["lift"]:[])]
+        :["pregrasp","grasp","withdraw","lift"])
+      :(platformWorkflow
         ?["transit_raise","transit_clear","transit_lower","transit_align","preplace","place","retreat_clear","retreat_lift","retreat"].filter(name=>(planResult?.plans??[]).some((item:any)=>item.name===name))
         :["preplace","place","retreat"]);
     const plans=(planResult?.plans??[]).filter((item:any)=>required.includes(item.name)&&item.plan_id).map((item:any)=>({name:item.name,plan_id:item.plan_id}));
@@ -407,7 +410,14 @@ export function PickPlacePage() {
     try{
       const result=await request("pick_place.execute_phase",{phase,workflow:workflowMode,plans});
       if(phase==="pick"){setPickExecution(result);if(result.status==="SUCCEEDED")setActiveStage(5);}
-      else{setPlaceExecution(result);if(result.status==="SUCCEEDED")setActiveStage(6);}
+      else{
+        setPlaceExecution(result);
+        if(result.status==="SUCCEEDED"){
+          setActiveStage(6);
+          const latestScene=await request("moveit.get_scene");
+          useRobotStore.getState().setScene(latestScene);
+        }
+      }
     }catch(error){
       const failed={phase,status:"FAILED",error:error instanceof Error?error.message:String(error)};
       if(phase==="pick")setPickExecution(failed);else setPlaceExecution(failed);

@@ -86,6 +86,8 @@ robot:
   allow_direct_movement: false
   allow_error_clear: true
 gripper:
+  # The fake PGEA node mirrors the physical node's runtime profile parameters.
+  node_name: /pgea_gripper_simulation
   # Assembly mass/COM correspond to the current PGEA geometry-only URDF.
   nominal_total_stroke_m: 0.04
   finger_mesh_span_m: 0.045

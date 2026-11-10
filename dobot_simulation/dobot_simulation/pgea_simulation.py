@@ -17,6 +17,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import JointState
 
@@ -31,8 +32,14 @@ class PgeaGripperSimulation(Node):
         super().__init__("pgea_gripper_simulation")
         self.declare_parameter("stroke_m", STROKE_M)
         self.declare_parameter("motion_time_sec", 0.8)
+        # Match the physical PGEA node's runtime profile parameter contract so
+        # the bridge can apply saved force/speed profiles in simulation too.
+        self.declare_parameter("force_percent", 60)
+        self.declare_parameter("speed_percent", 50)
         self._stroke = float(self.get_parameter("stroke_m").value)
         self._motion_time = float(self.get_parameter("motion_time_sec").value)
+        self._force_percent = int(self.get_parameter("force_percent").value)
+        self._speed_percent = int(self.get_parameter("speed_percent").value)
         if not math.isfinite(self._stroke) or self._stroke != STROKE_M:
             raise ValueError("PGEA simulation stroke_m must remain 0.020 m per finger")
         if not math.isfinite(self._motion_time) or self._motion_time <= 0:
@@ -45,6 +52,7 @@ class PgeaGripperSimulation(Node):
         self._grip_state = 1
         self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
         self._joint_state_timer = self.create_timer(0.05, self._publish_joint_state)
+        self.add_on_set_parameters_callback(self._on_profile_parameters)
         self._action_group = ReentrantCallbackGroup()
         self._action_server = ActionServer(
             self,
@@ -67,6 +75,39 @@ class PgeaGripperSimulation(Node):
         self.get_logger().info(
             "Fake PGEA gripper ready: 0 mm open, 20 mm closed per finger"
         )
+
+    def _on_profile_parameters(self, parameters):
+        """Mirror the physical PGEA force/speed runtime parameter contract."""
+        updates = {}
+        for parameter in parameters:
+            if parameter.name not in ("force_percent", "speed_percent"):
+                continue
+            value = parameter.value
+            if isinstance(value, bool) or not isinstance(value, int):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be an integer percentage",
+                )
+            minimum = 20 if parameter.name == "force_percent" else 1
+            if not minimum <= value <= 100:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be between {minimum} and 100",
+                )
+            updates[parameter.name] = value
+
+        if updates:
+            with self._lock:
+                if self._busy:
+                    return SetParametersResult(
+                        successful=False,
+                        reason="Cannot change gripper profile while motion is active",
+                    )
+                if "force_percent" in updates:
+                    self._force_percent = updates["force_percent"]
+                if "speed_percent" in updates:
+                    self._speed_percent = updates["speed_percent"]
+        return SetParametersResult(successful=True)
 
     def _publish_joint_state(self):
         """Publish the actuated finger joint; robot_state_publisher applies URDF mimic."""
@@ -163,7 +204,11 @@ class PgeaGripperSimulation(Node):
             target = float(goal_handle.request.command.position)
             with self._lock:
                 start = self._position_m
-            duration = max(0.08, abs(target - start) / self._stroke * self._motion_time)
+            speed_scale = 50.0 / max(1, self._speed_percent)
+            duration = max(
+                0.08,
+                abs(target - start) / self._stroke * self._motion_time * speed_scale,
+            )
             started = time.monotonic()
             while True:
                 if goal_handle.is_cancel_requested:
